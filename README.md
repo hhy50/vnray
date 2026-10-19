@@ -2,7 +2,7 @@
 
 内网穿透 / 远程访问工具：**客户端**主动连接**服务端**，服务端把**用户**的请求桥接给客户端，由客户端访问目标。
 
-![vnray 流量路径](https://github.com/hhy50/vnray/vnray-traffic-path.png)
+![vnray 流量路径](https://github.com/hhy50/vnray/blob/master/vnray-traffic-path.png)
 
 Client 部署在能访问目标的位置（如内网），Server 部署在公网；用户接入 Server 即可访问只有 Client 可达的目标，响应沿同一隧道原路返回。
 
