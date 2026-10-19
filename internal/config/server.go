@@ -13,12 +13,15 @@ import (
 const (
 	DefaultAdminUsername = "admin"
 	DefaultAdminPassword = "admin"
+	// DefaultAdminPort 是管理台默认监听端口；地址固定为 127.0.0.1。
+	DefaultAdminPort = 8080
 )
 
-// AdminConfig 是 Web 管理端配置；监听地址固定为 127.0.0.1:<port>。
+// AdminConfig 是 Web 管理端配置；默认监听 127.0.0.1:8080。
 type AdminConfig struct {
 	Enabled bool `yaml:"enabled"`
-	Port    int  `yaml:"port"`
+	// Listen 是管理端监听地址（host:port）；空取默认值。
+	Listen string `yaml:"listen"`
 	// Username 是管理台登录账号；留空取 DefaultAdminUsername。
 	Username string `yaml:"username"`
 	// Password 是登录口令：启动时种子/更新进管理库（bcrypt 存储，配置文件里的明文只在种子时使用）。
@@ -34,15 +37,18 @@ func (a AdminConfig) ResolvedUsername() string {
 	return a.Username
 }
 
-// Addr 返回管理端监听地址。
+// Addr 返回管理端监听地址；空值视为默认 127.0.0.1:8080。
 func (a AdminConfig) Addr() string {
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(a.Port))
+	if a.Listen == "" {
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(DefaultAdminPort))
+	}
+	return a.Listen
 }
 
-// Validate 校验管理端配置；禁用时端口不做要求。
+// Validate 校验管理端配置；禁用时不要求监听地址。
 func (a AdminConfig) Validate() error {
-	if a.Enabled && (a.Port <= 0 || a.Port >= 65536) {
-		return fmt.Errorf("admin.port: %d must be in 1..65535 when admin is enabled", a.Port)
+	if a.Enabled {
+		return validateAddress("admin.listen", a.Addr())
 	}
 	return nil
 }
@@ -185,7 +191,7 @@ func DefaultServer() Server {
 		Storage: StorageConfig{Driver: DefaultDriver},
 		Admin: AdminConfig{
 			Enabled:  true,
-			Port:     8080,
+			Listen:   "127.0.0.1:8080",
 			Username: DefaultAdminUsername,
 		},
 		Log: DefaultLog(),

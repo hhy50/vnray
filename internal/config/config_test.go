@@ -11,7 +11,7 @@ func TestDefaults(t *testing.T) {
 	if s.Server.Listen != "127.0.0.1:9000" {
 		t.Fatalf("unexpected server defaults: %+v", s)
 	}
-	if !s.Admin.Enabled || s.Admin.Port != 8080 || s.Admin.Addr() != "127.0.0.1:8080" {
+	if !s.Admin.Enabled || s.Admin.Listen != "127.0.0.1:8080" || s.Admin.Addr() != "127.0.0.1:8080" {
 		t.Fatalf("unexpected admin defaults: %+v", s.Admin)
 	}
 	if err := s.Validate(); err != nil {
@@ -226,7 +226,7 @@ func repoRoot(t *testing.T) string {
 	return dir
 }
 
-// admin 段整体替换默认值；禁用时端口可以任意，加载保留未给出的默认键。
+// admin 段整体替换默认值；禁用时监听地址可以任意，加载保留未给出的默认键。
 func TestAdminConfig(t *testing.T) {
 	path := writeYAML(t, "server:\n  listen: 127.0.0.1:9000\nadmin:\n  enabled: false\n")
 	s := DefaultServer()
@@ -237,10 +237,10 @@ func TestAdminConfig(t *testing.T) {
 		t.Fatal("admin should be disabled")
 	}
 	if err := s.Validate(); err != nil {
-		t.Fatalf("disabled admin must skip port validation: %v", err)
+		t.Fatalf("disabled admin must skip listen validation: %v", err)
 	}
 
-	path = writeYAML(t, "server:\n  listen: 127.0.0.1:9000\nadmin:\n  enabled: true\n  port: 9090\n")
+	path = writeYAML(t, "server:\n  listen: 127.0.0.1:9000\nadmin:\n  enabled: true\n  listen: 127.0.0.1:9090\n")
 	s = DefaultServer()
 	if err := Load(path, &s); err != nil {
 		t.Fatal(err)
