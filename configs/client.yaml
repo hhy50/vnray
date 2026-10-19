@@ -1,0 +1,44 @@
+# vnray 客户端配置
+# 用法: go run ./cmd/client -c configs/client.yaml
+
+# 请求发起服务端的地址、握手密钥与断线重连策略。
+# 客户端默认长期在线，连接失败或会话中断后按固定间隔不断重连。
+server:
+  addr: 127.0.0.1:9000
+  # 握手认证：本端密钥，接入服务端后随认证帧上报；必须与服务端 auth.key 一致。
+  auth_key: vnray-shared-key
+  reconnect:
+    enabled: true
+    interval: 10s
+
+# 本客户端在服务端侧的名字，格式 namespace:group:name，供转发绑定与范围密钥选中；
+# 留空时默认为 default:default:${hostname}-${ip}（IP 取首个非回环 IPv4）。
+name: default:default:edge-1
+
+# 分发网络访问控制（支持 CIDR、IPv4 尾部通配、单 IP，逗号分隔）：
+public: ""
+private: ""
+
+log:
+  level: info
+  output: stderr
+  console: false
+
+# 路由与出站配置
+routing:
+  default: direct
+  outbounds:
+    - tag: direct
+      type: direct
+    - tag: reject
+      type: reject
+      reason: domain blocked by client rule
+  rules:
+    - name: block-list
+      outbound: reject
+      match:
+        domain_prefix: ["blocked."]
+    - name: private-ip
+      outbound: direct
+      match:
+        host: ["127.0.0.1"]

@@ -1,0 +1,227 @@
+<div class="p-6 grid gap-4">
+  <div class="flex flex-wrap items-center justify-between gap-2">
+    <h2 class="text-2xl font-semibold">客户端管理</h2>
+    <p class="text-sm text-muted-foreground">{{.Data.Meta}}</p>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:1rem">
+    <div class="card"><section>
+      <p class="text-sm text-muted-foreground">在线客户端</p>
+      <p class="mt-1 text-3xl font-semibold">{{.Data.ClientCount}}</p>
+    </section></div>
+    <div class="card"><section>
+      <p class="text-sm text-muted-foreground">活跃隧道</p>
+      <p class="mt-1 text-3xl font-semibold">{{.Data.ActiveTunnels}}</p>
+    </section></div>
+  </div>
+  <form method="get" action="/admin/ops/_clients" class="flex flex-wrap items-center gap-2">
+    <span class="grow"></span>
+    <input name="q" class="input" placeholder="搜索客户端名 / 地址 / 主机名 / 版本 / 网卡" value="{{.Data.Q}}" style="width:24rem">
+    <select name="platform" class="select" style="width:auto">
+      <option value="">全部平台</option>
+      {{range .Data.Platforms}}<option value="{{.}}" {{if eq . $.Data.Platform}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <button type="submit" class="btn">查询</button>
+    {{if or .Data.Q .Data.Platform}}
+    <a class="btn" data-variant="outline" href="/admin/ops/_clients">重置</a>
+    {{end}}
+  </form>
+  {{if .Data.Clients}}
+  <div class="card">
+    <div class="table-container">
+      <table class="table">
+        <thead>
+          <tr><th>状态</th><th>ID</th><th>客户端</th><th>地址</th><th>网卡</th><th>接入时刻</th><th>最近心跳</th><th>延迟</th><th>累计转发</th><th>出站</th><th class="text-end">操作</th></tr>
+        </thead>
+        <tbody>
+          {{range .Data.Clients}}
+          <tr>
+            <td>
+              {{if .Local}}<span class="badge bg-green-50 text-green-700">本机</span>
+              {{else if .Online}}<span class="badge bg-green-50 text-green-700">在线</span>
+              {{else}}<span class="badge" data-variant="destructive">离线</span>{{end}}
+            </td>
+            <td class="tabular-nums">{{if .Online}}{{.ID}}{{else}}—{{end}}</td>
+            <td><span class="font-medium">{{.Name}}</span>{{if .Version}}<br/><small class="text-sm text-muted-foreground">{{.Version}}</small>{{end}}</td>
+            <td class="whitespace-nowrap">{{.Remote}}</td>
+            <td class="whitespace-nowrap"><small class="text-sm text-muted-foreground" title="{{.IfaceDetail}}">{{.Iface}}</small></td>
+            <td class="tabular-nums">{{.ConnectedAt}}</td>
+            <td class="tabular-nums">{{.Heartbeat}}</td>
+            <td class="tabular-nums">{{.RTT}}</td>
+            <td><small class="text-sm text-muted-foreground">↑ {{.UpBytes}}<br/>↓ {{.DownBytes}}</small></td>
+            <td><small class="text-sm text-muted-foreground">{{.Outbounds}}</small></td>
+            <td class="text-end">
+              <div class="inline-flex items-center gap-2">
+                {{if .ConfigURL}}<button type="button" class="btn" data-variant="outline" data-client="{{.Name}}" onclick="openHostsDialog(this.dataset.client)">配置</button>{{end}}
+                {{if .Online}}
+                <form method="post" action="/admin/ops/_client-kick" style="margin:0">
+                  <input type="hidden" name="_token" value="{{$.Page.CSRF}}"/>
+                  <input type="hidden" name="id" value="{{.ID}}"/>
+                  <button class="btn" data-variant="destructive" type="submit">断开</button>
+                </form>
+                {{end}}
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {{template "vnray/pagination.html" .Data.Nav}}
+  <p class="text-sm text-muted-foreground">在线行来自当前会话；离线行是已注册（client_bindings）但此刻没接进来的客户端，只能看配置、不能断开。标为「本机」的行是服务端本机出口（server_proxy），常驻可用、不是会话，绑定到它即由服务端本机出站。断开会立刻关闭该客户端的会话，客户端若开启了自动重连，稍后会重新接入并获得新编号。「网卡」取自客户端接入时自报的网卡快照，悬停可看全部地址。</p>
+  {{else}}
+  <div class="card"><section><p class="text-sm text-muted-foreground">没有符合条件的客户端。</p></section></div>
+  {{end}}
+</div>
+<dialog id="hosts-dialog" class="hd-dialog">
+  <form method="post" action="/admin/ops/_client-hosts" class="hd-form">
+    <input type="hidden" name="_token" value="{{.Page.CSRF}}"/>
+    <input type="hidden" name="name" id="hosts-name" value=""/>
+    <header class="hd-head">
+      <div class="hd-head-text">
+        <p class="hd-title">客户端配置</p>
+        <p class="hd-sub" id="hosts-title"></p>
+      </div>
+      <div class="hd-head-actions">
+        <a class="btn" data-variant="outline" id="hosts-config-link" href="#">完整配置页</a>
+        <button type="button" class="hd-close" onclick="document.getElementById('hosts-dialog').close()" aria-label="关闭">&times;</button>
+      </div>
+    </header>
+    <div class="hd-body">
+      <div class="hd-cap">
+        <label class="text-sm" for="hd-concurrency">并发上限</label>
+        <input type="number" id="hd-concurrency" name="concurrency" class="input" min="0" style="width:8rem" placeholder="0"/>
+        <span class="text-sm text-muted-foreground">同时路由到该客户端的隧道流数，0 = 不限；超限排队等待。仅服务端生效、不下发到设备。</span>
+      </div>
+      <details class="hd-block" open>
+        <summary>
+          <span>自定义 Host</span>
+          <span class="hd-count" id="hosts-count">0 条</span>
+        </summary>
+        <div>
+          <div id="hosts-rows" class="hd-rows"></div>
+          <button type="button" class="btn" data-variant="outline" onclick="addHostRow()">+ 添加记录</button>
+          <p class="hd-hint">每条记录把「域名」固定解析到「IP」：客户端出站拨号命中域名时直接用该 IP，未命中的域名照常走 DNS。保存后立即下发，离线客户端重连时随认证自动补发。</p>
+        </div>
+      </details>
+      <details class="hd-block">
+        <summary>
+          <span>IP 段映射</span>
+          <span class="hd-count" id="ipmap-count">0 条</span>
+        </summary>
+        <div>
+          <div id="ipmap-rows" class="hd-rows"></div>
+          <button type="button" class="btn" data-variant="outline" onclick="addIPMapRow()">+ 添加映射</button>
+          <p class="hd-hint">把「源 IP 段」重写到「目标 IP 段」：每段是 0-255 或 *（* 位取源 IP 的对应段），如 123.123.*.* → 192.168.*.*。出站拨号目标为命中的 IPv4 时先按此改写再直连；与自定义 Host 同为客户端级配置，随下发生效。本机出口（server:self）不支持以上配置。</p>
+        </div>
+      </details>
+    </div>
+    <footer class="hd-foot">
+      <span class="hd-foot-hint">保存后立即下发，离线重连自动补发</span>
+      <button type="button" class="btn" data-variant="outline" onclick="document.getElementById('hosts-dialog').close()">取消</button>
+      <button type="submit" class="btn">保存并下发</button>
+    </footer>
+  </form>
+</dialog>
+<style>
+.hd-dialog{margin:auto;width:min(46rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--border);border-radius:14px;background:var(--card);box-shadow:0 20px 50px -16px rgba(0,0,0,.4)}
+.hd-dialog[open]{display:flex;flex-direction:column}
+.hd-dialog::backdrop{background:rgba(0,0,0,.42)}
+.hd-form{display:flex;flex-direction:column;max-height:inherit;overflow:hidden}
+.hd-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.9rem 1.25rem;border-bottom:1px solid var(--border);flex-shrink:0}
+.hd-head-text{min-width:0}
+.hd-title{margin:0;font-size:1.05rem;font-weight:600;line-height:1.2}
+.hd-sub{margin:.15rem 0 0;font-family:var(--font-mono,monospace);font-size:.8rem;color:var(--muted-foreground,#6b7280)}
+.hd-head-actions{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
+.hd-close{width:2.1rem;height:2.1rem;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted-foreground,#6b7280);font-size:1.25rem;line-height:1;cursor:pointer;transition:background-color .15s,color .15s}
+.hd-close:hover{background:var(--muted);color:var(--foreground,#111)}
+.hd-body{overflow-y:auto;padding:.8rem 1.25rem;display:grid;gap:.75rem;grid-auto-rows:min-content}
+.hd-cap{display:flex;align-items:center;gap:.5rem;padding:.55rem .1rem}
+.hd-block{border:1px solid var(--border);border-radius:12px;background:color-mix(in oklab, var(--muted) 10%, var(--card));overflow:hidden}
+.hd-block>summary{display:flex;align-items:center;gap:.6rem;padding:.7rem .9rem;cursor:pointer;font-weight:600;font-size:.9rem;list-style:none;user-select:none}
+.hd-block>summary::-webkit-details-marker{display:none}
+.hd-block>summary::before{content:"\25B8";font-size:.7rem;color:var(--muted-foreground,#6b7280);transition:transform .15s}
+.hd-block[open]>summary::before{transform:rotate(90deg)}
+.hd-block[open]>summary{border-bottom:1px solid var(--border)}
+.hd-count{margin-left:auto;font-size:.72rem;font-weight:500;color:var(--muted-foreground,#6b7280);background:var(--muted);border-radius:999px;padding:.1rem .55rem}
+.hd-block>div{padding:.85rem .9rem;display:grid;gap:.6rem}
+.hd-rows{display:grid;gap:.5rem}
+.hd-row{display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;align-items:center}
+.hd-row .input{width:100%}
+.hd-del{width:2.4rem;height:2.35rem;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--muted-foreground,#6b7280);cursor:pointer;transition:color .15s,background-color .15s,border-color .15s}
+.hd-del:hover{color:var(--destructive);border-color:color-mix(in oklab, var(--destructive) 45%, transparent);background:color-mix(in oklab, var(--destructive) 9%, transparent)}
+.hd-hint{font-size:.78rem;color:var(--muted-foreground,#6b7280);line-height:1.55;margin:0}
+.hd-foot{display:flex;align-items:center;gap:.5rem;padding:.85rem 1.25rem;border-top:1px solid var(--border);background:color-mix(in oklab, var(--muted) 8%, var(--card));flex-shrink:0}
+.hd-foot .grow{flex:1}
+.hd-foot-hint{margin-right:auto;font-size:.78rem;color:var(--muted-foreground,#6b7280)}
+</style>
+<script>
+const hostsDialog = document.getElementById('hosts-dialog');
+function updateCounts() {
+  document.getElementById('hosts-count').textContent = document.getElementById('hosts-rows').children.length + ' 条';
+  document.getElementById('ipmap-count').textContent = document.getElementById('ipmap-rows').children.length + ' 条';
+}
+function makeDelBtn(row) {
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'hd-del';
+  del.title = '删除';
+  del.setAttribute('aria-label', '删除这条记录');
+  del.onclick = function () { row.remove(); updateCounts(); };
+  del.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>';
+  return del;
+}
+function makeInput(name, extra, placeholder, value) {
+  const i = document.createElement('input');
+  i.name = name;
+  i.className = 'input ' + (extra || '');
+  i.placeholder = placeholder;
+  i.value = value || '';
+  return i;
+}
+function makeRow() {
+  const row = document.createElement('div');
+  row.className = 'hd-row';
+  return row;
+}
+function addHostRow(domain, ip) {
+  const row = makeRow();
+  row.appendChild(makeInput('domain', '', '域名，如 example.com', domain));
+  row.appendChild(makeInput('ip', 'font-mono', 'IP，如 192.168.1.10', ip));
+  row.appendChild(makeDelBtn(row));
+  document.getElementById('hosts-rows').appendChild(row);
+  updateCounts();
+}
+function addIPMapRow(from, to) {
+  const row = makeRow();
+  row.appendChild(makeInput('ip_from', 'font-mono', '源 IP 段，如 123.123.*.*', from));
+  row.appendChild(makeInput('ip_to', 'font-mono', '目标 IP 段，如 192.168.*.*', to));
+  row.appendChild(makeDelBtn(row));
+  document.getElementById('ipmap-rows').appendChild(row);
+  updateCounts();
+}
+function openHostsDialog(name) {
+  document.getElementById('hosts-name').value = name;
+  document.getElementById('hosts-title').textContent = name;
+  document.getElementById('hosts-config-link').href = '/admin/ops/_client-config?name=' + encodeURIComponent(name);
+  const box = document.getElementById('hosts-rows');
+  box.innerHTML = '';
+  const ipbox = document.getElementById('ipmap-rows');
+  ipbox.innerHTML = '';
+  fetch('/admin/ops/_client-hosts?name=' + encodeURIComponent(name))
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      box.innerHTML = '';
+      var hosts = data.hosts || [];
+      if (hosts.length === 0) { addHostRow('', ''); }
+      else { hosts.forEach(function (h) { addHostRow(h.domain, h.ip); }); }
+      ipbox.innerHTML = '';
+      var maps = data.ip_maps || [];
+      if (maps.length === 0) { addIPMapRow('', ''); }
+      else { maps.forEach(function (m) { addIPMapRow(m.from, m.to); }); }
+      document.getElementById('hd-concurrency').value = data.concurrency || 0;
+    })
+    .catch(function () { addHostRow('', ''); addIPMapRow('', ''); });
+  hostsDialog.showModal();
+}
+</script>

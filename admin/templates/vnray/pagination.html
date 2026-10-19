@@ -1,0 +1,18 @@
+<div class="flex items-center justify-between mt-2">
+  <span class="text-sm text-muted-foreground">共 {{.Total}} 条 · 第 {{.Page}}/{{.Pages}} 页</span>
+  <div class="flex items-center gap-1">
+    <select class="select" style="width:auto;margin-right:0.5rem" aria-label="每页条数"
+            onchange="if(this.value)location.href=this.value">
+      {{range .PerLinks}}<option value="{{.URL}}" {{if .Active}}selected{{end}}>{{.N}} 条/页</option>{{end}}
+    </select>
+    {{if .Prev}}<a class="btn" data-variant="outline" href="{{.Prev}}">上一页</a>
+    {{else}}<span class="btn opacity-50 pointer-events-none" data-variant="outline">上一页</span>{{end}}
+    {{range .Links}}
+    {{if .Dots}}<span class="px-1 text-sm text-muted-foreground">…</span>
+    {{else if .Active}}<span class="btn min-w-9 px-2" data-variant="secondary">{{.N}}</span>
+    {{else}}<a class="btn min-w-9 px-2" data-variant="outline" href="{{.URL}}">{{.N}}</a>{{end}}
+    {{end}}
+    {{if .Next}}<a class="btn" data-variant="outline" href="{{.Next}}">下一页</a>
+    {{else}}<span class="btn opacity-50 pointer-events-none" data-variant="outline">下一页</span>{{end}}
+  </div>
+</div>

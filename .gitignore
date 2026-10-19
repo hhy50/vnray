@@ -1,0 +1,19 @@
+.github/
+.vscode/
+.idea/
+.claude/
+.codex
+.trae/
+.roo/
+.workbuddy/
+docs/
+logs/
+log/
+.DS_Store
+
+*__debug*
+# 管理台自有 SQLite 库与本地绑定库
+admin.db
+bindings.db
+*.db
+third_party/

@@ -1,0 +1,66 @@
+<div class="p-6 grid gap-4">
+  <h2 class="text-2xl font-semibold">密钥管理</h2>
+  <form method="get" action="/admin/ops/_keys" class="flex flex-wrap items-center gap-2">
+    <button type="button" class="btn" onclick="document.getElementById('add-key-dialog').showModal()">添加密钥</button>
+  </form>
+  {{if .Data.Keys}}
+  <div class="card">
+    <div class="table-container">
+      <table class="table">
+        <thead>
+          <tr><th>范围 key</th><th>密钥</th><th>创建时间</th><th>更新时间</th><th class="text-end">操作</th></tr>
+        </thead>
+        <tbody>
+          {{range $i, $k := .Data.Keys}}
+          <tr>
+            <td class="font-mono text-xs">{{$k.Scope}}</td>
+            <td class="font-mono text-xs">{{$k.Key}}</td>
+            <td><small class="text-sm text-muted-foreground">{{$k.CreatedAt}}</small></td>
+            <td><small class="text-sm text-muted-foreground">{{$k.UpdatedAt}}</small></td>
+            <td class="text-end">
+              <form method="post" action="/admin/ops/_auth-keys" style="margin:0">
+                <input type="hidden" name="_token" value="{{$.Page.CSRF}}"/>
+                <input type="hidden" name="key" value="{{$k.Key}}"/>
+                <input type="hidden" name="action" value="delete"/>
+                <button type="submit" class="btn" data-variant="destructive">删除</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {{else}}
+  <div class="card"><section><p class="text-sm text-muted-foreground">还没有配置任何密钥。未配置时客户端认证按服务端配置文件里的 auth.key 校验（也没有则放行）；在这里添加密钥后，以本页为准。</p></section></div>
+  {{end}}
+  <p class="text-sm text-muted-foreground">范围 key 约束密钥可供哪些客户端使用：* 表示所有客户端都能用；namespace:* 表示该 namespace 下的客户端都能用；填具体客户端名（namespace:group:name）则只有它能用。密钥唯一，同密钥再次提交即修改范围。改动写穿到持久存储，即时生效，已在线会话不受影响。</p>
+  <dialog id="add-key-dialog" style="margin:auto;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.5rem;width:min(36rem,calc(100% - 2rem));max-height:calc(100% - 2rem);overflow:auto">
+    <form method="post" action="/admin/ops/_auth-keys" class="grid gap-3">
+      <input type="hidden" name="_token" value="{{.Page.CSRF}}"/>
+      <input type="hidden" name="action" value="set"/>
+      <h3 class="font-medium">添加密钥</h3>
+      <label class="text-sm">密钥（至少 8 个字符）
+        <div class="flex items-center gap-2">
+          <input name="key" id="ak" class="input" style="width:100%" required>
+          <button type="button" class="btn" data-variant="outline" onclick="genAuthKey()">生成</button>
+        </div>
+      </label>
+      <label class="text-sm">范围 key
+        <input name="scope" class="input" style="width:100%" placeholder="* 或 namespace:* 或 namespace:group:name" required>
+      </label>
+      <p class="text-sm text-muted-foreground">* = 所有客户端；namespace:* = 该 namespace 下的客户端；具体名字 = 仅该客户端。客户端名格式为 namespace:group:name。</p>
+      <div class="flex items-center gap-2">
+        <button type="submit" class="btn">添加</button>
+        <button type="button" class="btn" data-variant="outline" onclick="document.getElementById('add-key-dialog').close()">取消</button>
+      </div>
+    </form>
+  </dialog>
+  <script>
+  function genAuthKey(){
+    var b=new Uint8Array(24);crypto.getRandomValues(b);
+    var r='';for(var i=0;i<b.length;i++){r+=('0'+b[i].toString(16)).slice(-2);}
+    document.getElementById('ak').value=r;
+  }
+  </script>
+</div>

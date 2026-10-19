@@ -1,0 +1,14 @@
+<div class="p-6 grid gap-4">
+  <h2 class="text-2xl font-semibold">日志查看</h2>
+  <div class="card">
+    <section>
+      <form method="get" action="/admin/ops/_logs" class="flex flex-wrap items-center gap-2">
+        <input name="q" class="input" placeholder="过滤关键字" value="{{.Data.Query}}" style="width:20rem">
+        <button type="submit" class="btn">过滤</button>
+        <small class="text-sm text-muted-foreground">来源 {{.Data.Path}}{{if .Data.Truncated}} · 仅显示文件末尾约 256 KiB{{end}} · {{len .Data.Lines}} 行</small>
+      </form>
+    </section>
+  </div>
+  <pre class="font-mono text-xs rounded-md p-4 overflow-y-auto" style="background:#0f172a;color:#e2e8f0;max-height:30rem;line-height:1.55">{{range .Data.Lines}}{{.}}
+{{end}}</pre>
+</div>

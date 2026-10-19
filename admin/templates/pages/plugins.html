@@ -1,0 +1,83 @@
+<div class="p-6 grid gap-4">
+  <h2 class="text-2xl font-semibold">插件管理</h2>
+  <p class="text-sm text-muted-foreground">入站插件在本机开监听端口，把进来的流量按路由规则送进转发链路；启停与参数写穿到持久存储。</p>
+  {{if .Data.Plugins}}
+  <div class="card">
+    <div class="table-container">
+      <table class="table">
+        <thead>
+          <tr><th>插件</th><th>状态</th><th>监听端口</th><th class="text-end">操作</th></tr>
+        </thead>
+        <tbody>
+          {{range .Data.Plugins}}
+          <tr>
+            <td class="font-medium">{{.Name}}</td>
+            <td>{{if .Enabled}}<span class="badge bg-green-50 text-green-700">运行中</span>{{else}}<span class="badge" data-variant="destructive">已停止</span>{{end}}</td>
+            <td class="tabular-nums">
+              {{if .Ports}}
+                {{range .Ports}}<span title="{{.Protocol}} 协议">:{{.Port}}</span> {{end}}
+                {{if not .Enabled}}<small class="text-sm text-muted-foreground">（待启用）</small>{{end}}
+              {{else}}—{{end}}
+            </td>
+            <td class="text-end">
+              <div class="inline-flex items-center gap-2">
+                {{if .Enabled}}
+                <form method="post" action="/admin/ops/_plugin" style="margin:0">
+                  <input type="hidden" name="_token" value="{{$.Page.CSRF}}"/>
+                  <input type="hidden" name="plugin" value="{{.Name}}"/>
+                  <input type="hidden" name="action" value="stop"/>
+                  <button type="submit" class="btn" data-variant="destructive">停用</button>
+                </form>
+                <button type="button" class="btn" data-variant="outline"
+                        onclick="openPortDlg('{{.Name}}','set_port')">修改端口</button>
+                {{else}}
+                <button type="button" class="btn"
+                        onclick="openPortDlg('{{.Name}}','start')">启用</button>
+                {{end}}
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {{range .Data.Plugins}}
+  <dialog id="portdlg-{{.Name}}" style="margin:auto;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.25rem 1.5rem;width:min(24rem,calc(100% - 2rem));max-height:calc(100% - 2rem);overflow:auto">
+    <form method="post" action="/admin/ops/_plugin" class="grid gap-3">
+      <input type="hidden" name="_token" value="{{$.Page.CSRF}}"/>
+      <input type="hidden" name="plugin" value="{{.Name}}"/>
+      <input type="hidden" name="action" id="act-{{.Name}}" value="start"/>
+      <h3 class="font-medium">{{.Name}} · 监听端口</h3>
+      <p class="text-sm text-muted-foreground">{{if .Enabled}}当前运行中，保存后热切换；旧连接不受影响。{{else}}当前已停止，保存后下次启用生效。{{end}}</p>
+      {{range .Slots}}
+      <label class="text-sm">{{.Label}} 端口 <input name="{{.Field}}" class="input" value="{{.Value}}" required></label>
+      {{end}}
+      <div class="flex items-center gap-2">
+        <button type="submit" class="btn" id="ok-{{.Name}}">保存</button>
+        <button type="button" class="btn" data-variant="outline" onclick="document.getElementById('portdlg-{{.Name}}').close()">取消</button>
+      </div>
+    </form>
+  </dialog>
+  {{end}}
+  <script>
+  function openPortDlg(name, action){
+    document.getElementById('act-' + name).value = action;
+    document.getElementById('ok-' + name).textContent = action === 'start' ? '启用' : '保存';
+    document.getElementById('portdlg-' + name).showModal();
+  }
+  </script>
+  {{else}}
+  <div class="card"><section><p class="text-sm text-muted-foreground">未配置插件管理器。</p></section></div>
+  {{end}}
+  {{range .Data.Plugins}}{{if .Enabled}}{{if .AcceptsUsers}}
+  <div class="card">
+    <header><h3 class="font-medium">{{.Name}} · 账号管理</h3></header>
+    <section>
+      <p class="text-sm text-muted-foreground">本插件在本机 {{range .Ports}}<span class="tabular-nums">:{{.Port}}</span>（{{.Protocol}}）{{end}}
+        接收入站。<b>账号路由与限速已并入用户表</b>，
+        统一在 <a class="underline" href="/admin/ops/_users">用户管理</a> 页按对应的 protocol 增删改，本页不再单独维护。</p>
+    </section>
+  </div>
+  {{end}}{{end}}{{end}}
+</div>

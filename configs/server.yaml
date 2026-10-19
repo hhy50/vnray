@@ -1,0 +1,25 @@
+server:
+  listen: 0.0.0.0:9000
+  auth:
+    key: vnray-shared-key
+
+admin:
+  enabled: true
+  port: 8080
+  username: admin
+  password: admin
+
+storage:
+  driver: sqlite
+  dsn: bindings.db
+
+# diagnostics:
+  # pprof_listen: 127.0.0.1:6060
+
+plugin:
+  enabled: ["v2ray"]
+
+log:
+  level: info
+  output: log/server.log
+  console: false
