@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/routine"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -45,9 +46,9 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// Handler 处理解码完成的 VMess 连接；user 为认证通过的 UUID，client 为其路由出口。
+// Handler 处理解码完成的 VMess 连接；id 为认证通过的身份（uuid + 路由出口）。
 // Handler 返回后连接关闭。
-type Handler func(user, client string, target Target, conn *Conn)
+type Handler func(id identity.Identity, target Target, conn *Conn)
 
 // Server 是 VMess 入站服务：持有账号验证器与连接处理器，驱动每条连接的一生。
 type Server struct {
@@ -162,7 +163,7 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	logging.Debugf("vmess: request accepted, user=%s, client=%s, target=%s",
 		u.uuid, u.client, req.Target)
-	s.handler(u.uuid, u.client, req.Target, vconn)
+	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, req.Target, vconn)
 }
 
 // noOpAuth 是安全级别为 none 时的直通认证器。

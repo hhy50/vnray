@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"github.com/hhy50/vnray/internal/dispatch"
+	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/mux"
 	"github.com/hhy50/vnray/internal/protocol"
@@ -28,6 +29,12 @@ type relayDeps struct {
 	traffic *traffic.Meter
 	proto   store.Protocol
 }
+
+// pumpSingle / pumpMux 是隧道泵的路径名（流量统计区分路径用）。
+const (
+	pumpSingle = "plugin.v2ray.tunnel"
+	pumpMux    = "plugin.v2ray.mux"
+)
 
 // boundClient 查找绑定的出口（远程客户端会话或服务端本机出口）；未命中时记日志并
 // 返回 nil，由调用方关闭入站连接。日志器已带 user/name 字段，这里不再重复传 user。
@@ -57,57 +64,59 @@ func (d relayDeps) options(user, client string) transport.ProxyOptions {
 }
 
 // relaySingle 单连接路径：开一条隧道双向搬运，返回时关闭入站连接与隧道。
-func relaySingle(d relayDeps, log *logging.Scoped, proto, user, client string,
-	target dispatch.Destination, conn net.Conn, origin, pump string) {
+// proto 与 origin 都取自 d.proto，pump 用固定路径常量，只传这次连接真正不同的参数。
+func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target dispatch.Destination, conn net.Conn) {
+	proto := string(d.proto)
 	tgt := target.String()
-	sess := d.boundClient(log, proto, client, tgt)
+	sess := d.boundClient(log, proto, id.Client, tgt)
 	if sess == nil {
 		_ = conn.Close()
 		return
 	}
 	// 用户级并发：占一个并发位再建隧道，超限排队。
 	if d.limits != nil {
-		gate := d.limits.Gate(ratelimit.Identity(d.proto, user))
+		gate := d.limits.Gate(ratelimit.Identity(d.proto, id.Key))
 		if err := gate.Acquire(nil); err != nil {
-			log.Warn(proto+": user concurrency limit reached", "client", client, "target", tgt, "err", err)
+			log.Warn(proto+": user concurrency limit reached", "client", id.Client, "target", tgt, "err", err)
 			_ = conn.Close()
 			return
 		}
 		defer gate.Release()
 	}
-	tunnel, err := sess.OpenTunnel(target, protocol.TunnelRequest{Origin: origin})
+	tunnel, err := sess.OpenTunnel(target, protocol.TunnelRequest{Origin: proto})
 	if err != nil {
-		log.Warn(proto+": open tunnel failed", "client", client, "target", tgt, "err", err)
+		log.Warn(proto+": open tunnel failed", "client", id.Client, "target", tgt, "err", err)
 		_ = conn.Close()
 		return
 	}
-	log.Debug(proto+": tunnel established", "client", client, "target", tgt)
-	transport.ProxyBidirectional(conn, tunnel, pump, d.options(user, client))
+	log.Debug(proto+": tunnel established", "client", id.Client, "target", tgt)
+	transport.ProxyBidirectional(conn, tunnel, pumpSingle, d.options(id.Key, id.Client))
 	_ = conn.Close()
 	_ = tunnel.Close()
-	log.Debug(proto+": tunnel closed", "client", client, "target", tgt)
+	log.Debug(proto+": tunnel closed", "client", id.Client, "target", tgt)
 }
 
 // serveMuxConn mux 主连接路径：把已认证的主连接交给 mux 服务端，每条子连接
 // 各开一条隧道，真实目标在各子连接帧里。
-func serveMuxConn(d relayDeps, log *logging.Scoped, proto, user, client string, conn net.Conn) {
-	sess := d.boundClient(log, proto, client, vmess.MuxCoolHost)
+func serveMuxConn(d relayDeps, log *logging.Scoped, id identity.Identity, conn net.Conn) {
+	proto := string(d.proto)
+	sess := d.boundClient(log, proto, id.Client, vmess.MuxCoolHost)
 	if sess == nil {
 		_ = conn.Close()
 		return
 	}
 	srv := mux.NewServer(&muxTunnel{
-		log: log, client: client, sess: sess,
-		limits: d.limits, identity: ratelimit.Identity(d.proto, user),
-		opts: d.options(user, client),
+		log: log, client: id.Client, sess: sess,
+		limits: d.limits, identity: ratelimit.Identity(d.proto, id.Key),
+		opts: d.options(id.Key, id.Client),
 	})
-	log.Info(proto+": mux session started", "client", client, "target", vmess.MuxCoolHost)
+	log.Info(proto+": mux session started", "client", id.Client, "target", vmess.MuxCoolHost)
 	if err := srv.Serve(conn); err != nil {
 		log.Warn(proto+": mux session ended",
-			"client", client, "target", vmess.MuxCoolHost, "err", err)
+			"client", id.Client, "target", vmess.MuxCoolHost, "err", err)
 		return
 	}
-	log.Info(proto+": mux session closed", "client", client, "target", vmess.MuxCoolHost)
+	log.Info(proto+": mux session closed", "client", id.Client, "target", vmess.MuxCoolHost)
 }
 
 // muxTunnel 实现 mux.Handler：为每条 mux 子连接开隧道并按 uuid 限速搬运。
@@ -142,7 +151,7 @@ func (m *muxTunnel) Open(target mux.Target, conn *mux.Conn) {
 		return
 	}
 	m.log.Info("mux: tunnel established", "client", m.client, "target", target.String())
-	transport.ProxyBidirectional(conn, tunnel, "plugin.v2ray.mux", m.opts)
+	transport.ProxyBidirectional(conn, tunnel, pumpMux, m.opts)
 	_ = conn.Close()
 	_ = tunnel.Close()
 	m.log.Info("mux: tunnel closed", "client", m.client, "target", target.String())

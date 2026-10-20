@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/vmess"
@@ -35,9 +36,9 @@ type Target struct {
 // String 实现 fmt.Stringer。
 func (t Target) String() string { return fmt.Sprintf("%s:%d", t.Host, t.Port) }
 
-// Handler 处理解码完成的 VLESS 连接：user 为认证通过的 UUID，client 为其路由
-// 出口；conn 在响应头写出之后交付，Read/Write 即明文载荷通道。
-type Handler func(user, client string, target Target, conn net.Conn)
+// Handler 处理解码完成的 VLESS 连接：id 为认证通过的身份（uuid + 路由出口）；
+// conn 在响应头写出之后交付，Read/Write 即明文载荷通道。
+type Handler func(id identity.Identity, target Target, conn net.Conn)
 
 // user 是一个已注册的 VLESS 账号。
 type user struct {
@@ -196,7 +197,7 @@ func (s *Server) handle(conn net.Conn) {
 
 	logging.Infof("vless: request accepted, user=%s, client=%s, target=%s",
 		u.uuid, u.client, target)
-	s.handler(u.uuid, u.client, target, conn)
+	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, target, conn)
 }
 
 // readTarget 读 TCP 命令的端口与地址段：端口 2B → 类型 1B → 地址本体。

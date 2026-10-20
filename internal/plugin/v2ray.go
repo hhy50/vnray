@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/hhy50/vnray/internal/dispatch"
+	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
@@ -91,16 +92,16 @@ func (p *V2RayPlugin) newInbound(proto store.Protocol) *uuidInbound {
 		v := vmess.NewValidator()
 		in.validator = v
 		in.serve = func(ln net.Listener) error {
-			return vmess.NewServer(v, func(user, client string, target vmess.Target, conn *vmess.Conn) {
-				p.serveConn(proto, user, client, target.Host, target.Port, conn)
+			return vmess.NewServer(v, func(id identity.Identity, target vmess.Target, conn *vmess.Conn) {
+				p.serveConn(proto, id, target.Host, target.Port, conn)
 			}).Serve(ln)
 		}
 	case store.ProtocolVLESS:
 		v := vless.NewValidator()
 		in.validator = v
 		in.serve = func(ln net.Listener) error {
-			return vless.NewServer(v, func(user, client string, target vless.Target, conn net.Conn) {
-				p.serveConn(proto, user, client, target.Host, target.Port, conn)
+			return vless.NewServer(v, func(id identity.Identity, target vless.Target, conn net.Conn) {
+				p.serveConn(proto, id, target.Host, target.Port, conn)
 			}).Serve(ln)
 		}
 	}
@@ -419,15 +420,14 @@ func (p *V2RayPlugin) deps(proto store.Protocol) relayDeps {
 // serveConn 是两条入站共用的数据面入口：目标为 mux 标记域名 v1.mux.cool 的主连接
 // 交给 mux 服务端，复用到多条隧道；普通请求开一条隧道直接搬运。两条路径的数据面
 // 装配见 tunnel.go。
-func (p *V2RayPlugin) serveConn(proto store.Protocol, user, client, host string, port int, conn net.Conn) {
-	log := p.userLog(proto, user)
+func (p *V2RayPlugin) serveConn(proto store.Protocol, id identity.Identity, host string, port int, conn net.Conn) {
+	log := p.userLog(proto, id.Key)
 	if host == vmess.MuxCoolHost {
-		serveMuxConn(p.deps(proto), log, string(proto), user, client, conn)
+		serveMuxConn(p.deps(proto), log, id, conn)
 		return
 	}
-	relaySingle(p.deps(proto), log, string(proto), user, client,
-		dispatch.Destination{Host: host, Port: port},
-		conn, string(proto), "plugin.v2ray.tunnel")
+	relaySingle(p.deps(proto), log, id,
+		dispatch.Destination{Host: host, Port: port}, conn)
 }
 
 // userLog 返回该 uuid 的会话日志器：级别取用户配置里的 log_level（默认 info），

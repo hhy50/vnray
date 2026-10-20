@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hhy50/vnray/internal/identity"
 )
 
 // numberedUUID 生成第 i 个合法测试 UUID（避开 vmess_test.go 的 testUUID 常量）。
@@ -158,7 +160,7 @@ func TestServerRejectsDuplicatedSession(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	var served atomic.Int32
-	server := NewServer(validator, func(user, client string, target Target, conn *Conn) {
+	server := NewServer(validator, func(id identity.Identity, target Target, conn *Conn) {
 		served.Add(1)
 		_ = conn.Close()
 	})

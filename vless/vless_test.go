@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/vmess"
 )
 
@@ -75,9 +76,9 @@ func dialRequest(t *testing.T, addr string, payload []byte) (net.Conn, [2]byte, 
 // TestServerTCPRoundtrip 走 TCP 命令全路径：目标解析、响应头、载荷透传回显。
 func TestServerTCPRoundtrip(t *testing.T) {
 	requests := make(chan Target, 1)
-	addr := startTestServer(t, func(user, client string, target Target, conn net.Conn) {
-		if user != testUUID || client != "client-a" {
-			t.Errorf("auth = %s/%s, want %s/client-a", user, client, testUUID)
+	addr := startTestServer(t, func(id identity.Identity, target Target, conn net.Conn) {
+		if id.Key != testUUID || id.Client != "client-a" {
+			t.Errorf("auth = %s/%s, want %s/client-a", id.Key, id.Client, testUUID)
 		}
 		requests <- target
 		_, _ = io.Copy(conn, conn)
@@ -116,7 +117,7 @@ func TestServerTCPRoundtrip(t *testing.T) {
 // TestServerMuxTarget 合成 mux 标记目标：命令 3 不带地址段，目标为 v1.mux.cool。
 func TestServerMuxTarget(t *testing.T) {
 	requests := make(chan Target, 1)
-	addr := startTestServer(t, func(user, client string, target Target, conn net.Conn) {
+	addr := startTestServer(t, func(id identity.Identity, target Target, conn net.Conn) {
 		requests <- target
 		_ = conn.Close()
 	})
@@ -138,7 +139,7 @@ func TestServerMuxTarget(t *testing.T) {
 // TestServerRejects 覆盖四类握手拒绝：未知 uuid、坏版本、非空 addons、UDP 命令。
 // 拒绝的表现一致：不写响应头、连接关闭。
 func TestServerRejects(t *testing.T) {
-	addr := startTestServer(t, func(user, client string, target Target, conn net.Conn) {
+	addr := startTestServer(t, func(id identity.Identity, target Target, conn net.Conn) {
 		t.Error("handler should not be invoked for rejected requests")
 		_ = conn.Close()
 	})
