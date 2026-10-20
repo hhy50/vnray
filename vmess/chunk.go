@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -177,6 +178,22 @@ func (r *chunkReader) nextChunk() error {
 	return nil
 }
 
+// nextPayload 读取下一个完整分块的明文并作为单个数据报返回。终结块或对端半关闭返回 io.EOF；
+// 返回的切片在下次 nextChunk 前有效（nextChunk 会重新分配）。
+func (r *chunkReader) nextPayload() ([]byte, error) {
+	for r.pos == len(r.buf) {
+		if r.done {
+			return nil, io.EOF
+		}
+		if err := r.nextChunk(); err != nil {
+			return nil, err
+		}
+	}
+	payload := r.buf[r.pos:]
+	r.pos = len(r.buf)
+	return payload, nil
+}
+
 // chunkWriter 把明文写入封装成分块加密帧；Close 写出终结块（空载荷）。
 type chunkWriter struct {
 	mu      sync.Mutex
@@ -209,15 +226,33 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 func (w *chunkWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.seal(nil)
+	return w.sealSized(nil, 0)
 }
 
-func (w *chunkWriter) seal(plain []byte) error {
+// maxPacketSize 是单个数据报封成块的上限（长度字段为 uint16 满值）。
+const maxPacketSize = 65535
+
+// WritePacket 把单个数据报封装成一个分块写出（不经 Write 的 16K 分包，保持数据报唯一）。
+// 长度超限（含认证开销与填充）时拒绝返回错误。
+func (w *chunkWriter) WritePacket(payload []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sealSized(payload, maxPacketSize)
+}
+
+func (w *chunkWriter) seal(plain []byte) error { return w.sealSized(plain, 0) }
+
+// sealSized 把明文封成一个分块写出；maxSize>0 时校验 size 不超限（Write 的字节流分包不设限，
+// 单个数据报封块受长度字段上限约束）。
+func (w *chunkWriter) sealSized(plain []byte, maxSize int) error {
 	padding := uint16(0)
 	if w.padding {
 		padding = w.codec.nextPadding()
 	}
 	size := len(plain) + w.auth.overhead() + int(padding)
+	if maxSize > 0 && size > maxSize {
+		return fmt.Errorf("vmess: datagram too large for one chunk: %d > %d", size, maxSize)
+	}
 	if debugChunks {
 		logging.Warnf("chunk write: size=%d padding=%d payload=%d", size, padding, len(plain))
 	}

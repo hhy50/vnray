@@ -221,16 +221,31 @@ func (h *echoHandler) Open(target Target, conn *Conn) {
 	h.mu.Lock()
 	h.opens = append(h.opens, target.String())
 	h.mu.Unlock()
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			if _, werr := conn.Write(buf[:n]); werr != nil {
+	if target.Network == "udp" {
+		// UDP 子连接按数据报回显：读一个报原样写回一个报。
+		for {
+			pkt, err := conn.ReadPacket()
+			if len(pkt) > 0 {
+				if werr := conn.WritePacket(pkt); werr != nil {
+					break
+				}
+			}
+			if err != nil {
 				break
 			}
 		}
-		if err != nil {
-			break
+	} else {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				if _, werr := conn.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
 		}
 	}
 	_ = conn.Close()
@@ -639,16 +654,28 @@ func TestServerUnknownSessionGetsEnd(t *testing.T) {
 	h.waitDone(t, "127.0.0.1:9005")
 }
 
-// TestServerRejectsUDPAndBadTargets 断言 UDP 子连接与非法目标被
-// End(OptionError) 拒绝，主连接保持可用。
-func TestServerRejectsUDPAndBadTargets(t *testing.T) {
+// TestServerUDPSubConnection 断言 UDP 子连接被接受并按数据报回显，主连接保持可用。
+func TestServerUDPSubConnection(t *testing.T) {
 	t.Parallel()
 	h := newEchoHandler()
 	cli, stop := runServer(t, h)
 	defer stop()
 
 	udp := cli.openRaw(11, NetworkUDP, Target{Host: "127.0.0.1", Port: 53}, []byte("dns"))
-	udp.waitEnd(t, OptionError)
+	udp.readData(t, "dns")
+	cli.keep(udp, []byte("more"))
+	udp.readData(t, "more")
+	cli.end(udp, nil, false)
+	udp.waitEnd(t, 0)
+	h.waitDone(t, "127.0.0.1:53")
+}
+
+// TestServerRejectsBadTargets 断言非法目标被 End(OptionError) 拒绝，主连接保持可用。
+func TestServerRejectsBadTargets(t *testing.T) {
+	t.Parallel()
+	h := newEchoHandler()
+	cli, stop := runServer(t, h)
+	defer stop()
 
 	badPort := cli.openRaw(12, NetworkTCP, Target{Host: "127.0.0.1", Port: 0}, nil)
 	badPort.waitEnd(t, OptionError)

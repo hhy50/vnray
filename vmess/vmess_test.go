@@ -15,7 +15,7 @@ import (
 const testUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
 // echoHandler 回显解密后的请求体（单元测试用）。
-func echoHandler(id identity.Identity, target Target, conn *Conn) {
+func echoHandler(id identity.Identity, target Target, network string, conn *Conn) {
 	_, _ = io.Copy(conn, conn)
 	_ = conn.Close()
 }

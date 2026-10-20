@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
 )
 
@@ -72,6 +73,19 @@ func (d *DirectOutbound) resolveAddress(address string) string {
 	return net.JoinHostPort(replaced, port)
 }
 
+// resolveUDPAddr 拨号前改写目标（与 TCP 共用 resolveAddress），解析成 *net.UDPAddr。
+func (d *DirectOutbound) resolveUDPAddr(dest Destination) *net.UDPAddr {
+	address := dest.String()
+	if d.hosts != nil || d.ipMaps != nil {
+		address = d.resolveAddress(address)
+	}
+	a, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return nil
+	}
+	return a
+}
+
 func (d *DirectOutbound) Tag() string {
 	if d.tag != "" {
 		return d.tag
@@ -79,10 +93,15 @@ func (d *DirectOutbound) Tag() string {
 	return "direct"
 }
 
-// Process 起两个泵：上行（管道→目标）和下行（目标→管道）。
-// 方向分离：上行读到入站 FIN 时只对目标 TCP 写方向 CloseWrite，让目标收到请求 EOF 后
-// 开始返回响应；下行把响应送完、管道优雅关闭后才整体收尾。任一方向出错才另一条也断。
+// Process 按目标网络类型分流出站：TCP 走字节流半关闭搬运，UDP 走数据报出站（见 processUDP）。
 func (d *DirectOutbound) Process(ctx context.Context, link *Link, dest Destination) error {
+	if dest.netName() == "udp" {
+		return d.processUDP(ctx, link, dest)
+	}
+	return d.processTCP(ctx, link, dest)
+}
+
+func (d *DirectOutbound) processTCP(ctx context.Context, link *Link, dest Destination) error {
 	conn, err := d.dial(ctx, dest.String())
 	if err != nil {
 		return fmt.Errorf("direct: dial %s: %w", dest, err)
@@ -141,6 +160,109 @@ func (d *DirectOutbound) Process(ctx context.Context, link *Link, dest Destinati
 	}
 	teardown()
 	return downErr
+}
+
+// linkRW 把 Link 的两端合成 io.ReadWriteCloser，供 protocol.NewDatagramConn 在管道上
+// 做 [2B 长度][数据报] 封帧。Close 是空操作：管道的收尾由 Interrupt/CloseWithError 完成。
+type linkRW struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (l linkRW) Read(p []byte) (int, error)  { return l.r.Read(p) }
+func (l linkRW) Write(p []byte) (int, error) { return l.w.Write(p) }
+func (l linkRW) Close() error                { return nil }
+
+// processUDP 数据报出站：监听匿名 UDP 源端口到目标地址，管道侧以 [2B 长度][数据报]* 封帧。
+// 上行把管道里每个数据报 WriteToUDP 发往目标；下行从 socket ReadFromUDP 读回包写回管道。
+// UDP 无半关闭：任一向读到 EOF/出错即整体关闭两端返回。
+func (d *DirectOutbound) processUDP(ctx context.Context, link *Link, dest Destination) error {
+	addr := d.resolveUDPAddr(dest)
+	if addr == nil {
+		return fmt.Errorf("direct: resolve udp target %s", dest)
+	}
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return fmt.Errorf("direct: listen udp: %w", err)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	routine.Go("core.direct.udp.watchCancel", func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+			link.Reader.Interrupt()
+		case <-done:
+		}
+	})
+
+	var once sync.Once
+	teardown := func() {
+		once.Do(func() {
+			_ = conn.Close()
+			link.Reader.Interrupt()
+			link.Writer.Interrupt()
+		})
+	}
+	defer teardown()
+
+	upErr := make(chan error, 1)
+	routine.Go("core.direct.udp.up", func() {
+		dc := protocol.NewDatagramConn(&linkRW{r: link.Reader, w: link.Writer})
+		for {
+			packet, rerr := dc.ReadPacket()
+			if len(packet) > 0 {
+				if _, err := conn.WriteToUDP(packet, addr); err != nil {
+					upErr <- err
+					return
+				}
+			}
+			if rerr != nil {
+				upErr <- nil
+				return
+			}
+		}
+	})
+
+	downErr := make(chan error, 1)
+	routine.Go("core.direct.udp.down", func() {
+		dc := protocol.NewDatagramConn(&linkRW{r: link.Reader, w: link.Writer})
+		buf := make([]byte, protocol.MaxDatagram)
+		for {
+			n, _, rerr := conn.ReadFromUDP(buf)
+			if n > 0 {
+				if werr := dc.WritePacket(buf[:n]); werr != nil {
+					downErr <- werr
+					return
+				}
+			}
+			if rerr != nil {
+				downErr <- nil
+				return
+			}
+		}
+	})
+
+	// 任一向结束后关 socket + 中断 link，促使另一向（若还挂在读上）尽快退出；
+	// 两向都退出才算整体结束（UDP 无半关闭，不能只等一向）。
+	pending := 2
+	var fail error
+	for pending > 0 {
+		var err error
+		select {
+		case err = <-upErr:
+		case err = <-downErr:
+		}
+		pending--
+		_ = conn.Close()
+		link.Reader.Interrupt()
+		link.Writer.Interrupt()
+		if err != nil && fail == nil {
+			fail = err
+		}
+	}
+	return fail
 }
 
 // RejectOutbound 拒绝出站：通过结构化错误把拒绝原因回传给对端。

@@ -32,6 +32,14 @@ func (w *Writer) writeData(id uint16, p []byte) (int, error) {
 	return written, nil
 }
 
+// writePacket 以单个 Keep 数据帧写出一个完整数据报（UDP 子连接用，保持数据报唯一，
+// 不做 8K 分包）。数据报长度须能放进帧的 2B 数据长度字段。
+func (w *Writer) writePacket(id uint16, datagram []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writeLocked(id, StatusKeep, OptionData, datagram)
+}
+
 // writeEnd 发送 End 帧；errFlag 置位时带 OptionError（对端据此异常收尾）。
 func (w *Writer) writeEnd(id uint16, errFlag bool) error {
 	w.mu.Lock()

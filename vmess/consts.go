@@ -27,6 +27,8 @@ const (
 	SecurityChaCha20Poly1305  = 0x04
 	SecurityNone              = 0x05
 	RequestCommandTCP         = 0x01
+	// RequestCommandUDP 标记 UDP 隧道：载荷 chunk 的每个分块是一个数据报。
+	RequestCommandUDP = 0x02
 	// RequestCommandMux 标记 mux 主连接：载荷通道承载 mux.cool 帧而非直达目标的
 	// 字节流，与 v2fly/Xray 同值。
 	RequestCommandMux = 0x03

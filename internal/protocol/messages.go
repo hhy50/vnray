@@ -100,10 +100,13 @@ type UserAuthRequest struct {
 	Info UserInfo `json:"user"`
 }
 
-// TunnelRequest 是 Tunnel 帧载荷里地址块之后的 JSON：这次隧道由谁发起，便于出口侧诊断；
-// 目标在载荷开头的 Address 块里。
+// TunnelRequest 是 Tunnel 帧载荷里地址块之后的 JSON：这次隧道由谁发起、以及隧道承载的
+// 网络类型（tcp/udp），便于出口侧诊断与选择搬运语义；目标在载荷开头的 Address 块里。
 type TunnelRequest struct {
 	Origin string `json:"origin,omitempty"`
+	// Network 是隧道的数据类型，取值 "tcp"（默认）或 "udp"。udp 隧道载荷是一串
+	// [2B len][datagram]* 封帧，客户端据此用 UDP 出口出站。
+	Network string `json:"network,omitempty"`
 }
 
 // Reply 是各类结果帧（AuthResult / ForwardResult / TunnelResult）的载荷。
@@ -170,6 +173,7 @@ func NewForwardFrame(a Address) (*Frame, error) {
 }
 
 // NewTunnelFrame 构造隧道请求帧：载荷 = 地址块 + JSON 请求体。
+// 隧道为 UDP 时在固定头标志位上带 FlagUDP，客户端据此用 UDP 出口出站。
 func NewTunnelFrame(req TunnelRequest, a Address) (*Frame, error) {
 	addr, err := a.Bytes()
 	if err != nil {
@@ -179,7 +183,11 @@ func NewTunnelFrame(req TunnelRequest, a Address) (*Frame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("protocol: encode tunnel frame payload: %w", err)
 	}
-	return NewBufferedFrame(Tunnel, append(addr, jsonPart...)), nil
+	f := NewBufferedFrame(Tunnel, append(addr, jsonPart...))
+	if req.Network == "udp" {
+		f.Flags |= FlagUDP
+	}
+	return f, nil
 }
 
 // ReadTunnelRequest 从 Tunnel 帧载荷读出地址块与请求体；读完整个载荷，

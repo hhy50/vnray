@@ -47,6 +47,9 @@ const maxFrameData = 8 * 1024
 type Target struct {
 	Host string
 	Port int
+	// Network 是子连接的数据类型：空或 "tcp"（默认）表示字节流，取 "udp" 表示每个
+	// Keep 帧的 Data 是一个数据报。只在 StatusNew 时设置。
+	Network string
 }
 
 // String 实现 fmt.Stringer。

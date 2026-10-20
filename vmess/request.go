@@ -72,10 +72,10 @@ func parseRequest(plain []byte) (*Request, error) {
 		return nil, fmt.Errorf("%w: %d", errBadSecurity, security)
 	}
 	switch command {
-	case RequestCommandTCP, RequestCommandMux:
+	case RequestCommandTCP, RequestCommandUDP, RequestCommandMux:
 		r.Command = command
 	default:
-		return nil, fmt.Errorf("vmess: unsupported command %d (tcp or mux only)", command)
+		return nil, fmt.Errorf("vmess: unsupported command %d (tcp, udp or mux only)", command)
 	}
 
 	// 地址段：端口 2B → 类型 1B（1=IPv4 / 2=域名 / 3=IPv6）→ 地址本体。

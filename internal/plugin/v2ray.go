@@ -92,16 +92,16 @@ func (p *V2RayPlugin) newInbound(proto store.Protocol) *uuidInbound {
 		v := vmess.NewValidator()
 		in.validator = v
 		in.serve = func(ln net.Listener) error {
-			return vmess.NewServer(v, func(id identity.Identity, target vmess.Target, conn *vmess.Conn) {
-				p.serveConn(proto, id, target.Host, target.Port, conn)
+			return vmess.NewServer(v, func(id identity.Identity, target vmess.Target, network string, conn *vmess.Conn) {
+				p.serveConn(proto, id, target.Host, target.Port, network, conn)
 			}).Serve(ln)
 		}
 	case store.ProtocolVLESS:
 		v := vless.NewValidator()
 		in.validator = v
 		in.serve = func(ln net.Listener) error {
-			return vless.NewServer(v, func(id identity.Identity, target vless.Target, conn net.Conn) {
-				p.serveConn(proto, id, target.Host, target.Port, conn)
+			return vless.NewServer(v, func(id identity.Identity, target vless.Target, network string, conn net.Conn) {
+				p.serveConn(proto, id, target.Host, target.Port, network, conn)
 			}).Serve(ln)
 		}
 	}
@@ -418,16 +418,16 @@ func (p *V2RayPlugin) deps(proto store.Protocol) relayDeps {
 }
 
 // serveConn 是两条入站共用的数据面入口：目标为 mux 标记域名 v1.mux.cool 的主连接
-// 交给 mux 服务端，复用到多条隧道；普通请求开一条隧道直接搬运。两条路径的数据面
-// 装配见 tunnel.go。
-func (p *V2RayPlugin) serveConn(proto store.Protocol, id identity.Identity, host string, port int, conn net.Conn) {
+// 交给 mux 服务端，复用到多条隧道；普通请求开一条隧道直接搬运。network 是隧道数据
+// 类型（tcp/udp）。两条路径的数据面装配见 tunnel.go。
+func (p *V2RayPlugin) serveConn(proto store.Protocol, id identity.Identity, host string, port int, network string, conn net.Conn) {
 	log := p.userLog(proto, id.Key)
 	if host == vmess.MuxCoolHost {
 		serveMuxConn(p.deps(proto), log, id, conn)
 		return
 	}
 	relaySingle(p.deps(proto), log, id,
-		dispatch.Destination{Host: host, Port: port}, conn)
+		dispatch.Destination{Host: host, Port: port, Network: network}, network, conn)
 }
 
 // userLog 返回该 uuid 的会话日志器：级别取用户配置里的 log_level（默认 info），

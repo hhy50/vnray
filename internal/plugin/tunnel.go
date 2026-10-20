@@ -7,6 +7,7 @@ package plugin
 
 import (
 	"net"
+	"time"
 
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/identity"
@@ -63,9 +64,13 @@ func (d relayDeps) options(user, client string) transport.ProxyOptions {
 	return o
 }
 
+// udpIdle 是 UDP 隧道无数据流动的关停兜底（DNS 等短会话几乎不触发；长静默才关停）。
+const udpIdle = 2 * time.Minute
+
 // relaySingle 单连接路径：开一条隧道双向搬运，返回时关闭入站连接与隧道。
-// proto 与 origin 都取自 d.proto，pump 用固定路径常量，只传这次连接真正不同的参数。
-func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target dispatch.Destination, conn net.Conn) {
+// proto、network 与 origin 都取自入站解析结果，pump 用固定路径常量，只传这次连接
+// 真正不同的参数。UDP 隧道按数据报搬运（无半关闭），TCP 沿用字节流半关闭泵。
+func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target dispatch.Destination, network string, conn net.Conn) {
 	proto := string(d.proto)
 	tgt := target.String()
 	sess := d.boundClient(log, proto, id.Client, tgt)
@@ -83,17 +88,32 @@ func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target 
 		}
 		defer gate.Release()
 	}
-	tunnel, err := sess.OpenTunnel(target, protocol.TunnelRequest{Origin: proto})
+	tunnel, err := sess.OpenTunnel(target, protocol.TunnelRequest{Origin: proto, Network: network})
 	if err != nil {
 		log.Warn(proto+": open tunnel failed", "client", id.Client, "target", tgt, "err", err)
 		_ = conn.Close()
 		return
 	}
-	log.Debug(proto+": tunnel established", "client", id.Client, "target", tgt)
-	transport.ProxyBidirectional(conn, tunnel, pumpSingle, d.options(id.Key, id.Client))
+	log.Debug(proto+": tunnel established", "client", id.Client, "target", tgt, "network", network)
+	if network == "udp" {
+		transport.ProxyDatagramBidirectional(
+			udpInbound(d.proto, conn), protocol.NewDatagramConn(tunnel),
+			pumpSingle+".udp", udpIdle, d.options(id.Key, id.Client))
+	} else {
+		transport.ProxyBidirectional(conn, tunnel, pumpSingle, d.options(id.Key, id.Client))
+	}
 	_ = conn.Close()
 	_ = tunnel.Close()
 	log.Debug(proto+": tunnel closed", "client", id.Client, "target", tgt)
+}
+
+// udpInbound 把入站侧连接适配成数据报端点：vmess 的 chunk 边界天然是数据报（*vmess.Conn
+// 原生实现 DatagramConn），vless 是 [2B len] 明文流，用 protocol.NewDatagramConn 包裹。
+func udpInbound(proto store.Protocol, conn net.Conn) transport.DatagramConn {
+	if proto == store.ProtocolVMess {
+		return conn.(*vmess.Conn)
+	}
+	return protocol.NewDatagramConn(conn)
 }
 
 // serveMuxConn mux 主连接路径：把已认证的主连接交给 mux 服务端，每条子连接
@@ -142,16 +162,21 @@ func (m *muxTunnel) Open(target mux.Target, conn *mux.Conn) {
 		defer m.limits.Gate(m.identity).Release()
 	}
 	tunnel, err := m.sess.OpenTunnel(
-		dispatch.Destination{Host: target.Host, Port: target.Port},
-		protocol.TunnelRequest{Origin: "vmess-mux"})
+		dispatch.Destination{Host: target.Host, Port: target.Port, Network: target.Network},
+		protocol.TunnelRequest{Origin: "vmess-mux", Network: target.Network})
 	if err != nil {
 		m.log.Warn("mux: open tunnel failed",
 			"client", m.client, "target", target.String(), "err", err)
 		_ = conn.CloseWithError()
 		return
 	}
-	m.log.Info("mux: tunnel established", "client", m.client, "target", target.String())
-	transport.ProxyBidirectional(conn, tunnel, pumpMux, m.opts)
+	m.log.Info("mux: tunnel established", "client", m.client, "target", target.String(), "network", target.Network)
+	if target.Network == "udp" {
+		transport.ProxyDatagramBidirectional(
+			conn, protocol.NewDatagramConn(tunnel), pumpMux+".udp", udpIdle, m.opts)
+	} else {
+		transport.ProxyBidirectional(conn, tunnel, pumpMux, m.opts)
+	}
 	_ = conn.Close()
 	_ = tunnel.Close()
 	m.log.Info("mux: tunnel closed", "client", m.client, "target", target.String())

@@ -14,6 +14,17 @@ import (
 type Destination struct {
 	Host string
 	Port int
+	// Network 是目标的数据类型：空或 "tcp"（默认）走字节流出站，取 "udp" 走数据报
+	// 出站。只影响出站拨号与搬运语义，不参与路由规则匹配（规则只读 Host/Port）。
+	Network string
+}
+
+// netName 归一化网络类型：空视为 tcp。
+func (d Destination) netName() string {
+	if d.Network == "" {
+		return "tcp"
+	}
+	return d.Network
 }
 
 func (d Destination) String() string {

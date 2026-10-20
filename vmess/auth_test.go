@@ -160,7 +160,7 @@ func TestServerRejectsDuplicatedSession(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	var served atomic.Int32
-	server := NewServer(validator, func(id identity.Identity, target Target, conn *Conn) {
+	server := NewServer(validator, func(id identity.Identity, target Target, network string, conn *Conn) {
 		served.Add(1)
 		_ = conn.Close()
 	})

@@ -62,9 +62,13 @@ func (s *Server) Serve(conn net.Conn) error {
 
 // handleNew 开子连接：校验目标后登记会话，由 Handler 协程建连与搬运。
 // New 帧附带的首数据随登记一起进入输入缓冲，Handler 开隧道的耗时不会丢数据。
+// 网络类型为 TCP 或 UDP；UDP 子连接按数据报语义搬运。
 func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
-	if f.Network != NetworkTCP {
-		logging.Warn("mux: rejecting non-tcp sub-connection",
+	network := "tcp"
+	if f.Network == NetworkUDP {
+		network = "udp"
+	} else if f.Network != NetworkTCP {
+		logging.Warn("mux: rejecting sub-connection with bad network",
 			"session", f.SessionID, "network", f.Network)
 		_ = w.writeEnd(f.SessionID, true)
 		return
@@ -75,7 +79,7 @@ func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
 		_ = w.writeEnd(f.SessionID, true)
 		return
 	}
-	c, ok := mgr.add(f.SessionID, w)
+	c, ok := mgr.add(f.SessionID, network, w)
 	if !ok {
 		logging.Warn("mux: rejecting sub-connection: id reuse or too many sessions",
 			"session", f.SessionID)
@@ -91,6 +95,7 @@ func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
 		}
 	}
 	target := f.Target
+	target.Network = network
 	routine.Go("mux.session", func() {
 		defer c.Close()
 		s.handler.Open(target, c)

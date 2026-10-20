@@ -36,6 +36,12 @@ func (c *Conn) Read(p []byte) (int, error) { return c.body.Read(p) }
 // Write 写出加密的响应载荷。
 func (c *Conn) Write(p []byte) (int, error) { return c.resp.Write(p) }
 
+// ReadPacket 读出一个完整分块的明文作为单个数据报（UDP 隧道用）；终结块返回 io.EOF。
+func (c *Conn) ReadPacket() ([]byte, error) { return c.body.nextPayload() }
+
+// WritePacket 把单个数据报封装成一个分块写出（UDP 隧道用，保持数据报边界）。
+func (c *Conn) WritePacket(d []byte) error { return c.resp.WritePacket(d) }
+
 // Close 写出 VMess 终结块（兼容 v2ray 的带内 FIN，让对端响应体 Reader 拿到 EOF）
 // 并关闭底层连接。
 func (c *Conn) Close() error {
@@ -46,9 +52,9 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// Handler 处理解码完成的 VMess 连接；id 为认证通过的身份（uuid + 路由出口）。
-// Handler 返回后连接关闭。
-type Handler func(id identity.Identity, target Target, conn *Conn)
+// Handler 处理解码完成的 VMess 连接；id 为认证通过的身份（uuid + 路由出口），
+// network 是隧道数据类型（"tcp"/"udp"）。Handler 返回后连接关闭。
+type Handler func(id identity.Identity, target Target, network string, conn *Conn)
 
 // Server 是 VMess 入站服务：持有账号验证器与连接处理器，驱动每条连接的一生。
 type Server struct {
@@ -161,9 +167,13 @@ func (s *Server) handle(conn net.Conn) {
 		body: newChunkReader(conn, bodyAuth, bodyCodec, bodyPadding),
 		resp: newChunkWriter(conn, respAuth, respCodec, respPadding),
 	}
-	logging.Debugf("vmess: request accepted, user=%s, client=%s, target=%s",
-		u.uuid, u.client, req.Target)
-	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, req.Target, vconn)
+	network := "tcp"
+	if req.Command == RequestCommandUDP {
+		network = "udp"
+	}
+	logging.Debugf("vmess: request accepted, user=%s, client=%s, target=%s, network=%s",
+		u.uuid, u.client, req.Target, network)
+	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, req.Target, network, vconn)
 }
 
 // noOpAuth 是安全级别为 none 时的直通认证器。

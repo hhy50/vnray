@@ -198,6 +198,9 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 		return
 	}
 	dest := dispatch.Destination{Host: addr.Host, Port: int(addr.Port)}
+	if first.Flags&protocol.FlagUDP != 0 {
+		dest.Network = "udp"
+	}
 	if !dest.IsValid() {
 		protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: false, Reason: "invalid destination " + dest.String()})
 		return
@@ -241,6 +244,8 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 			link.Reader.Interrupt()
 		})
 	}
+	// UDP 无半关闭：任一方向读完即整体收尾（TCP 依赖半关闭，只在下行结束时收尾）。
+	udp := dest.Network == "udp"
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -250,6 +255,9 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 		defer wg.Done()
 		_, _ = io.Copy(link.Writer, stream)
 		_ = link.Writer.Close()
+		if udp {
+			teardown()
+		}
 	})
 	// 下行：目标 → 外部客户端。响应搬完（真实连接结束）才整体断开。
 	routine.Go("client.tunnel.down", func() {

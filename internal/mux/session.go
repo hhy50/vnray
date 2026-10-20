@@ -1,10 +1,16 @@
 package mux
 
 import (
+	"encoding/binary"
+	"errors"
+	"io"
 	"sync"
 
 	"github.com/hhy50/vnray/internal/pipe"
 )
+
+// maxSessionDatagram 是单个数据报的上限，与长度前缀 uint16 的表达范围一致。
+const maxSessionDatagram = 65535
 
 // maxSessions 是单条主连接上的子连接上限：客户端规范上限 128，放宽到 1024 容忍
 // 激进实现，同时把恶意会话数挡在资源耗尽之前。
@@ -13,20 +19,23 @@ const maxSessions = 1024
 // Conn 是一条 mux 子连接的端点视图，实现 io.ReadWriteCloser：
 // Read 读出对端经 Keep 帧发来的数据（读到带内结束返回 io.EOF）；
 // Write 写出的数据以 Keep 帧回传；Close 发送 End 帧并结束该子连接（幂等）。
+// UDP 子连接（network=="udp"）语义为数据报：ReadPacket/WritePacket 各对应一个
+// 数据报，每个 Keep 帧的 Data 恰好是一报（WritePacket 不分包）。
 type Conn struct {
-	id    uint16
-	in    *pipe.Reader
-	inW   *pipe.Writer
-	out   *Writer
-	mgr   *SessionManager
-	once  sync.Once
-	doneC chan struct{}
+	id      uint16
+	network string
+	in      *pipe.Reader
+	inW     *pipe.Writer
+	out     *Writer
+	mgr     *SessionManager
+	once    sync.Once
+	doneC   chan struct{}
 }
 
 // newConn 创建一条子连接视图。
-func newConn(id uint16, out *Writer, mgr *SessionManager) *Conn {
+func newConn(id uint16, network string, out *Writer, mgr *SessionManager) *Conn {
 	r, w := pipe.New()
-	return &Conn{id: id, in: r, inW: w, out: out, mgr: mgr, doneC: make(chan struct{})}
+	return &Conn{id: id, network: network, in: r, inW: w, out: out, mgr: mgr, doneC: make(chan struct{})}
 }
 
 // Read 读出对端发来的数据；子连接结束后返回 io.EOF（或 io.ErrClosedPipe，
@@ -35,6 +44,30 @@ func (c *Conn) Read(p []byte) (int, error) { return c.in.Read(p) }
 
 // Write 以 Keep 数据帧回传数据，超过单帧上限自动分帧。
 func (c *Conn) Write(p []byte) (int, error) { return c.out.writeData(c.id, p) }
+
+// ReadPacket 读出一个完整数据报（UDP 子连接用）。底层输入里每个数据报以
+// [2B 大端长度] 前缀入队；输入优雅关闭后读空返回 io.EOF。
+func (c *Conn) ReadPacket() ([]byte, error) {
+	if c.network != "udp" {
+		return nil, errors.New("mux: ReadPacket on tcp sub-connection")
+	}
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(c.in, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if n > maxSessionDatagram {
+		return nil, errors.New("mux: datagram too long")
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(c.in, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// WritePacket 以单个 Keep 帧写出一个完整数据报（UDP 子连接用，不分包）。
+func (c *Conn) WritePacket(datagram []byte) error { return c.out.writePacket(c.id, datagram) }
 
 // Close 结束该子连接：中断输入、向对端发 End 帧、从管理器摘除。幂等；
 // 重复调用（Handler 收尾与连接级关闭竞争）只发一次 End。
@@ -62,7 +95,17 @@ func (c *Conn) finishInput() {
 }
 
 // feedInput 把一帧数据投递进输入缓冲；管道已关闭（Handler 已收尾）时返回错误。
+// UDP 子连接每个帧的 Data 是一个数据报，入队前加 [2B 大端长度] 前缀以保住边界。
 func (c *Conn) feedInput(data []byte) error {
+	if c.network != "udp" {
+		_, err := c.inW.Write(data)
+		return err
+	}
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(data)))
+	if _, err := c.inW.Write(lenBuf[:]); err != nil {
+		return err
+	}
 	_, err := c.inW.Write(data)
 	return err
 }
@@ -79,7 +122,7 @@ func NewSessionManager() *SessionManager {
 }
 
 // add 登记一条新子连接；ID 已占用或数量超限时返回 false（调用方应回 End 帧）。
-func (m *SessionManager) add(id uint16, out *Writer) (*Conn, bool) {
+func (m *SessionManager) add(id uint16, network string, out *Writer) (*Conn, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.sessions[id]; exists {
@@ -88,7 +131,7 @@ func (m *SessionManager) add(id uint16, out *Writer) (*Conn, bool) {
 	if len(m.sessions) >= maxSessions {
 		return nil, false
 	}
-	c := newConn(id, out, m)
+	c := newConn(id, network, out, m)
 	m.sessions[id] = c
 	return c, true
 }

@@ -80,18 +80,23 @@ func validType(t Type) bool {
 }
 
 // header 是固定头的内存视图（10 字节：魔数2+类型2+标志1+保留3+载荷长2）。
-// 保留 3 字节原本是主机长度与端口——目标挪进载荷后留作将来扩展：编码时置零、
-// 解码时忽略（不校验，避免给将来复用埋雷）。
+// b[4] 是标志位，语义见 Flag* 常量；保留 3 字节（b[5:8]）原本是主机长度与端口——
+// 目标挪进载荷后留作将来扩展：编码时置零、解码时忽略（不校验，避免给将来复用埋雷）。
 type header struct {
 	Type       Type
+	Flags      byte
 	PayloadLen uint32 // 线路上是 2 字节字段
 }
+
+// 标志位：语义按位定义，只增不改。目前仅 UDP 隧道使用；其余帧恒为 0。
+const FlagUDP byte = 0x01
 
 // encode 把固定头写入 b（len(b) 必须 == headerLen）。
 func (h header) encode(b []byte) {
 	b[0], b[1] = Magic[0], Magic[1]
 	putUint16(b[2:4], uint16(h.Type))
-	b[4], b[5], b[6], b[7] = 0, 0, 0, 0 // 标志与保留
+	b[4] = h.Flags
+	b[5], b[6], b[7] = 0, 0, 0
 	putUint16(b[8:10], uint16(h.PayloadLen))
 }
 
@@ -104,7 +109,7 @@ func decodeHeader(b []byte) (header, error) {
 	if !validType(t) {
 		return header{}, protocolError("unknown message type %d", t)
 	}
-	return header{Type: t, PayloadLen: uint32(getUint16(b[8:10]))}, nil
+	return header{Type: t, Flags: b[4], PayloadLen: uint32(getUint16(b[8:10]))}, nil
 }
 
 // Frame 是一帧的逻辑视图。目标不在头里：带目标消息（Forward/Tunnel）的
@@ -112,6 +117,8 @@ func decodeHeader(b []byte) (header, error) {
 type Frame struct {
 	// Type 是消息类型。
 	Type Type
+	// Flags 是从固定头带来的标志位（见 Flag*）。仅 Tunnel 帧目前会带 FlagUDP。
+	Flags byte
 	// PayloadLen 是载荷字节数；线路上是 2 字节字段，因此单帧上限 65535。
 	PayloadLen uint32
 	// Body 是载荷的读写端：写入时为待读载荷，读取时为 *Payload 流式载荷。
@@ -211,7 +218,7 @@ func (e *Encoder) WriteFrame(f *Frame) error {
 
 	// 带目标消息的载荷必须以 Address 块开头（构造方负责），主机长度上限在
 	// Address.Bytes 里把关；这里只校验载荷总宽。
-	h := header{Type: f.Type, PayloadLen: f.PayloadLen}
+	h := header{Type: f.Type, Flags: f.Flags, PayloadLen: f.PayloadLen}
 	head := make([]byte, headerLen)
 	h.encode(head)
 
@@ -267,6 +274,7 @@ func (d *Decoder) ReadFrame() (*Frame, error) {
 
 	frame := &Frame{
 		Type:       h.Type,
+		Flags:      h.Flags,
 		PayloadLen: h.PayloadLen,
 	}
 	frame.Body = newPayload(d.r, frame.PayloadLen, hasher)

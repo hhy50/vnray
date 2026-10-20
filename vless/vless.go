@@ -37,8 +37,9 @@ type Target struct {
 func (t Target) String() string { return fmt.Sprintf("%s:%d", t.Host, t.Port) }
 
 // Handler 处理解码完成的 VLESS 连接：id 为认证通过的身份（uuid + 路由出口）；
-// conn 在响应头写出之后交付，Read/Write 即明文载荷通道。
-type Handler func(id identity.Identity, target Target, conn net.Conn)
+// network 是隧道数据类型（"tcp"/"udp"）；conn 在响应头写出之后交付，
+// Read/Write 即明文载荷通道。
+type Handler func(id identity.Identity, target Target, network string, conn net.Conn)
 
 // user 是一个已注册的 VLESS 账号。
 type user struct {
@@ -173,7 +174,7 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	var target Target
 	switch cmd[0] {
-	case CommandTCP:
+	case CommandTCP, CommandUDP:
 		t, err := readTarget(conn)
 		if err != nil {
 			logging.Warnf("vless: read target failed, remote=%s, err=%v", conn.RemoteAddr(), err)
@@ -186,6 +187,12 @@ func (s *Server) handle(conn net.Conn) {
 		logging.Warnf("vless: unsupported command %d, remote=%s", cmd[0], conn.RemoteAddr())
 		return
 	}
+	// UDP 命令之后是 [2B len][datagram]* 明文封帧（v2ray MultiLengthPacketWriter），
+	// 数据面按网络类型选择搬运语义。
+	network := "tcp"
+	if cmd[0] == CommandUDP {
+		network = "udp"
+	}
 
 	// 响应头 2B [version, addonsLen]。v2fly 把它挂在首包响应上懒写，这里解析
 	// 成功立即回：客户端两种都兼容，且与 vmess 入站"握手即应答"的行为一致。
@@ -195,9 +202,9 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	logging.Infof("vless: request accepted, user=%s, client=%s, target=%s",
-		u.uuid, u.client, target)
-	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, target, conn)
+	logging.Infof("vless: request accepted, user=%s, client=%s, target=%s, network=%s",
+		u.uuid, u.client, target, network)
+	s.handler(identity.Identity{Key: u.uuid, Client: u.client}, target, network, conn)
 }
 
 // readTarget 读 TCP 命令的端口与地址段：端口 2B → 类型 1B → 地址本体。
