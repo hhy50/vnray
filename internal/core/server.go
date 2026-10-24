@@ -47,21 +47,6 @@ func newBindings(st store.Store) *admin.Bindings {
 	return admin.NewBindings(st)
 }
 
-// seedAuthKeys 把配置文件的共享密钥迁移成范围密钥：仅当密钥表为空且配置了
-// server.auth.key 时种子一条 scope=* 的记录——老部署升级后不用去管理台补配；
-// 表里已有条目则以管理台为准，配置文件里的密钥不再生效。
-func seedAuthKeys(b *admin.Bindings, cfg *config.Server) {
-	key := cfg.Server.Auth.Key
-	if key == "" || len(b.AuthKeySnapshot()) > 0 {
-		return
-	}
-	if err := b.SetAuthKey(key, "*"); err != nil {
-		logging.Warnf("seed auth key from config: %v", err)
-		return
-	}
-	logging.Info("seeded scope=* auth key from server.auth.key; manage keys in the admin panel")
-}
-
 // newAdminService 管理面服务；admin.enabled 为 false 时返回 nil（newInstance 跳过）。
 // 管理库打不开视为装配失败：管理台是运维入口，带病启动不如显式报错。
 func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *admin.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings) (*admin.AdminService, error) {
@@ -129,7 +114,6 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	// 运行时服务配置（管理台可在线改）先于组件构造解析：会话参数与心跳在此定基线。
 	settings := loadServiceSettings(appctx, st, cfg)
 	bindings := newBindings(st)
-	seedAuthKeys(bindings, cfg)
 	limits := ratelimit.NewRegistry()
 	meter := traffic.NewMeter(limits)
 	// 出口解析器：settings 里本机出口启用时附带它（保留名 server:self）。

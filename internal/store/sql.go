@@ -51,28 +51,12 @@ func Open(ctx context.Context, driver, dsn string) (Store, error) {
 // newSQLStore 用已打开的 GORM 连接构造存储：AutoMigrate 保证全部表存在。
 // 项目未上线，不保留历史结构的升级/迁移 DDL——表结构直接改，旧库删掉重建。
 func newSQLStore(ctx context.Context, db *gorm.DB) (*sqlStore, error) {
-	if err := checkLegacySchema(db); err != nil {
-		return nil, err
-	}
 	if err := db.WithContext(ctx).AutoMigrate(&UserBinding{}, &ClientBinding{}, &authKeyModel{},
 		&PluginState{}, &userTrafficModel{}, &clientTrafficModel{}, &PortMapping{},
 		&serviceSettingsModel{}); err != nil {
 		return nil, fmt.Errorf("store: migrate tables: %w", err)
 	}
 	return &sqlStore{db: db}, nil
-}
-
-// checkLegacySchema 拦住"半迁移"的旧库。AutoMigrate 只新增列、不删旧列，也不会因为
-// 唯一索引同名而重建它；于是旧表残留的 user_type 列与旧的 (user_key, user_type) 唯一索引
-// 会让 upsert 的 ON CONFLICT (protocol, user_key) 失配（SQLite 报 "does not match any
-// PRIMARY KEY or UNIQUE constraint"），把问题拖到运行期才暴露成一条难懂的 SQL 错误。
-// 按项目约定旧库删掉重建，因此这里只做检测并显式报错，不做迁移。
-func checkLegacySchema(db *gorm.DB) error {
-	if !db.Migrator().HasColumn(&UserBinding{}, "user_type") {
-		return nil
-	}
-	return errors.New("store: vn_user_bindings 仍是旧结构（残留 user_type 列）：" +
-		"表结构已改，请删除旧库后重启（旧库删掉重建是本项目的既定约定）")
 }
 
 func (s *sqlStore) SetUser(ctx context.Context, b UserBinding) error {

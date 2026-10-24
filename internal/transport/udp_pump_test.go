@@ -48,15 +48,23 @@ func TestProxyDatagramBidirectional(t *testing.T) {
 		t.Fatalf("down packet = %q, %v", got, err)
 	}
 
-	// 上行只有 5 字节被限速器计费；统计各方向均累计 5 字节。
-	if lim.waited.Load() != 5 {
-		t.Fatalf("up limiter waited = %d, want 5", lim.waited.Load())
+	// 上行只有 5 字节被限速器计费。统计由泵协程在写返回后才递增，本测试与泵
+	// 之间没有同步点（net.Pipe 的读只保证数据到位），轮询等待统计收敛。
+	waitFor := func(want int64) {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if lim.waited.Load() == want &&
+				stats.UpRead.Load() == want && stats.UpWrite.Load() == want &&
+				stats.DownRead.Load() == want && stats.DownWrite.Load() == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("stats not converged: limiter=%d up=%d/%d down=%d/%d, want %d",
+			lim.waited.Load(), stats.UpRead.Load(), stats.UpWrite.Load(),
+			stats.DownRead.Load(), stats.DownWrite.Load(), want)
 	}
-	if stats.UpRead.Load() != 5 || stats.UpWrite.Load() != 5 ||
-		stats.DownRead.Load() != 5 || stats.DownWrite.Load() != 5 {
-		t.Fatalf("stats = %d/%d/%d/%d, want 5/5/5/5",
-			stats.UpRead.Load(), stats.UpWrite.Load(), stats.DownRead.Load(), stats.DownWrite.Load())
-	}
+	waitFor(5)
 
 	// 关闭 a 侧对端 → 泵读到 EOF → 整体收尾。
 	_ = aPeer.Close()

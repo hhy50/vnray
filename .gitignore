@@ -17,3 +17,10 @@ admin.db
 bindings.db
 *.db
 third_party/
+# 前端工程：依赖与构建产物都不入库。产物缺失时 go build 会直接失败
+# （web/admin/embed.go 要求 dist/index.html 存在），见 docs/adr/0039。
+web/admin/node_modules/
+web/admin/dist/
+
+# 本地构建产物
+/bin/

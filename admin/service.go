@@ -1,13 +1,14 @@
 package admin
 
+// service.go 是管理面服务：HTTP 生命周期、路由装配（自有认证中间件），
+// Vue 产物挂在 /admin/ui/，业务 API 挂在 /admin/ops/api/。
+
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -35,80 +36,81 @@ type AdminOptions struct {
 	Plugins *plugin.Manager
 	// Listen 是数据面监听地址（host:port）：插件端口的默认建议值由它推导（+1）。
 	Listen string
-	// PublicHost 是分享链接里对外暴露的主机（server.public_host）；空表示退回
-	// 管理台请求的 Host——管理台只监听回环地址，那样生成的链接只在本机可用。
+	// PublicHost 是分享链接里对外暴露的主机；空表示退回管理台请求的 Host。
 	PublicHost string
-	// Username/Password 是管理台登录账号与口令（bcrypt 落库，见 seedAdminUser）。
+	// Username/Password 是管理台登录账号与口令（启动时 bcrypt 哈希进内存，见 newAuthService）。
 	Username string
 	Password string
-	// DB 是管理台的数据源：业务 SQL 存储的 GORM 连接（sqlite/mysql），管理台
-	// 表（steward_ 前缀）与 user_bindings 同库；nil 视为装配失败，面板拒绝启动。
+	// DB 是业务 SQL 存储的 GORM 连接（sqlite/mysql），管理台从这里读写业务表；
+	// nil 视为装配失败。
 	DB *gorm.DB
-	// Store 是持久层：管理台从这里读 user_traffic / client_traffic 两张流量表。
+	// Store 是持久层：管理台从这里读流量表。
 	Store store.Store
-	// PortMaps 是端口映射监听管理器；nil 时端口映射页只读不热更新（数据面未装配）。
+	// PortMaps 是端口映射监听管理器。
 	PortMaps *portmap.Manager
-	// LogPath 是服务端日志文件路径；空表示日志未写文件，日志页给出提示。
+	// LogPath 是服务端日志文件路径。
 	LogPath string
-	// Settings 是运行时服务配置的读写口（服务配置页）；nil 时该页只读（退回默认值）。
+	// Settings 是运行时服务配置的读写口。
 	Settings ServiceSettings
 }
 
-// AdminService 是 Web 管理面服务：steward 管理台挂在 /admin（登录、CSRF、
-// 审计、RBAC 由框架接管），业务页与动作端点经 Resource.Page 挂进同一中间件链。
-// 服务生命周期与进程一致、没有 Stop。
+// AdminService 是 Web 管理面服务：会话认证 + Vue SPA + 业务 API。
 type AdminService struct {
 	clients *transport.SessionManager
 	opts    AdminOptions
 	started time.Time
 	srv     *http.Server
-	panel   *panel
+	auth    *AuthService
 	// addr 为实际监听地址，Start 之后可用。
 	addr string
 }
 
-// legacyRedirects 是 go-packs 时代的旧路径 → steward 路径；书签与小脚本
-// 访问旧地址时 308 到新页。POST 不转（脚本需按新路径重放并携带 CSRF）。
-var legacyRedirects = []struct{ from, to string }{
-	{"/admin/Clients/Config", "/admin/ops/_client-config"},
-	{"/admin/Clients", "/admin/ops/_clients"},
-	{"/admin/Users", "/admin/ops/_users"},
-	{"/admin/Plugins", "/admin/ops/_plugins"},
-	{"/admin/Logs", "/admin/ops/_logs"},
-	{"/admin/api/status", "/admin/ops/_status"},
-	{"/admin/api/bindings", "/admin/ops/_bindings"},
-	{"/admin/api/users/limit", "/admin/ops/_user-config"},
-	{"/admin/api/clients/config", "/admin/ops/_client-config"},
-	{"/admin/api/clients/kick", "/admin/ops/_client-kick"},
-	{"/admin/api/plugins", "/admin/ops/_plugins-json"},
+// opsRoute 是业务路由的唯一声明处：method+path 注册路由。
+// path 相对 /admin/ops，不含前缀。
+type opsRoute struct {
+	method string
+	path   string
+	handle http.HandlerFunc
 }
 
-// NewAdminService 创建管理面服务：打开管理库、迁移表、种子账号并注册页面。
-// addr 为监听地址；clients 为会话管理器（在线会话唯一来源）。
+// NewAdminService 创建管理面服务：内存凭证播种与路由装配。
 func NewAdminService(addr string, clients *transport.SessionManager, opts AdminOptions) (*AdminService, error) {
+	if opts.DB == nil {
+		return nil, fmt.Errorf("admin: requires gorm db")
+	}
 	s := &AdminService{
 		clients: clients,
 		opts:    opts,
 		started: time.Now(),
 	}
-	p, err := newPanel(opts, s)
+
+	auth, err := newAuthService(opts)
 	if err != nil {
 		return nil, err
 	}
-	s.panel = p
+	s.auth = auth
 
 	mux := http.NewServeMux()
-	for _, lr := range legacyRedirects {
-		to := lr.to
-		mux.HandleFunc("GET "+lr.from, func(w http.ResponseWriter, r *http.Request) {
-			// 保留查询串：客户端配置页的 ?name= 在新路径下仍然有效。
-			http.Redirect(w, r, to+"?"+r.URL.RawQuery, http.StatusPermanentRedirect)
-		})
-	}
-	// steward 的路由模式自带 /admin 前缀，原样挂载即可。
-	mux.Handle("/admin", p.app)
-	mux.Handle("/admin/", p.app)
+
+	// Vue 管理台（/admin/ui/）
+	mountUI(mux)
+
+	// 登录页（公开）
+	mux.HandleFunc("GET /admin/auth/login", s.handleLoginPage)
+	mux.HandleFunc("POST /admin/auth/login", s.handleLoginSubmit)
+	mux.HandleFunc("POST /admin/auth/logout", s.handleLogout)
+
+	// 业务 API（需登录 + CSRF）
+	opsMux := http.NewServeMux()
+	s.registerOpsRoutes(opsMux)
+	mux.Handle("/admin/ops/", s.wrapOps(opsMux))
+
+	// 根路径重定向到管理台
+	mux.HandleFunc("GET /admin/{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, uiPath, http.StatusFound)
+	})
 	mux.Handle("/", http.RedirectHandler("/admin/", http.StatusSeeOther))
+
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -117,7 +119,63 @@ func NewAdminService(addr string, clients *transport.SessionManager, opts AdminO
 	return s, nil
 }
 
-// Name 返回服务名，用于启动日志与诊断。
+// wrapOps 给 /admin/ops 下的路由套上全局中间件：auth 注入 → 会话加载 → 登录校验 → CSRF。
+// 从内到外依次包裹，请求从外到内走：withAuth → session → requireAuth → csrf → handler。
+func (s *AdminService) wrapOps(next http.Handler) http.Handler {
+	h := csrfMiddleware(next)
+	h = requireAuth(h)
+	h = sessionMiddleware(h)
+	h = withAuth(s.auth, h)
+	return h
+}
+
+// registerOpsRoutes 注册所有业务 API 路由。
+func (s *AdminService) registerOpsRoutes(mux *http.ServeMux) {
+	for _, r := range s.opsRoutes() {
+		mux.HandleFunc(r.method+" /admin/ops/"+r.path, r.handle)
+	}
+}
+
+// opsRoutes 声明全部 JSON 接口。
+func (s *AdminService) opsRoutes() []opsRoute {
+	return []opsRoute{
+		{"GET", "api/session", s.apiSession},
+		{"GET", "api/status", s.apiStatus},
+
+		{"GET", "api/clients", s.apiClients},
+		{"GET", "api/clients/{name}", s.apiClientDetail},
+		{"PUT", "api/clients/{name}/config", s.apiClientConfigSave},
+		{"PUT", "api/clients/{name}/hosts", s.apiClientHostsSave},
+		{"POST", "api/clients/{id}/kick", s.apiClientKick},
+
+		{"GET", "api/users", s.apiUsers},
+		{"POST", "api/users", s.apiUserSave},
+		{"DELETE", "api/users", s.apiUserDelete},
+		{"POST", "api/users/status", s.apiUserStatus},
+		{"PUT", "api/users/limits", s.apiUserLimits},
+
+		{"GET", "api/portmaps", s.apiPortMaps},
+		{"POST", "api/portmaps", s.apiPortMapSave},
+		{"PUT", "api/portmaps/{id}", s.apiPortMapSave},
+		{"POST", "api/portmaps/{id}/toggle", s.apiPortMapToggle},
+		{"DELETE", "api/portmaps/{id}", s.apiPortMapDelete},
+
+		{"GET", "api/plugins", s.apiPlugins},
+		{"POST", "api/plugins/{name}/start", s.apiPluginStart},
+		{"POST", "api/plugins/{name}/stop", s.apiPluginStop},
+		{"PUT", "api/plugins/{name}/port", s.apiPluginPort},
+
+		{"GET", "api/keys", s.apiKeys},
+		{"POST", "api/keys", s.apiKeySave},
+		{"DELETE", "api/keys", s.apiKeyDelete},
+
+		{"GET", "api/logs", s.apiLogs},
+		{"GET", "api/service-config", s.apiServiceConfig},
+		{"PUT", "api/service-config", s.apiServiceConfigSave},
+	}
+}
+
+// Name 返回服务名。
 func (s *AdminService) Name() string { return "AdminService" }
 
 // Start 启动 HTTP 服务并立即返回；ctx 只用于打开监听。
@@ -128,9 +186,9 @@ func (s *AdminService) Start(ctx context.Context) error {
 		return fmt.Errorf("webadmin listen %s: %w", s.srv.Addr, err)
 	}
 	s.addr = ln.Addr().String()
-	logging.Info("admin: web admin started", "addr", s.addr, "panel", "/admin/")
+	logging.Info("admin: web admin started", "addr", s.addr, "ui", uiPath)
+	s.auth.Start(ctx)
 	routine.Go("admin.service.serve", func() {
-		// Serve 只在 Shutdown 后返回 ErrServerClosed，错误语义由 Drain 负责。
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.Error("admin: web admin stopped", "err", err)
 		}
@@ -138,17 +196,14 @@ func (s *AdminService) Start(ctx context.Context) error {
 	return nil
 }
 
-// Drain 实现 extension.Drainer：优雅关闭管理端，等在途请求处理完（ctx 无 deadline 时用
-// shutdownTimeout），随后停采样协程并释放管理库。
+// Drain 实现 extension.Drainer：优雅关闭管理端。
 func (s *AdminService) Drain(ctx context.Context) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, shutdownTimeout)
 		defer cancel()
 	}
-	err := s.srv.Shutdown(ctx)
-	s.panel.close()
-	return err
+	return s.srv.Shutdown(ctx)
 }
 
 // Addr 返回实际监听地址；未启动时返回配置地址。
@@ -159,33 +214,111 @@ func (s *AdminService) Addr() string {
 	return s.srv.Addr
 }
 
-// panelActiveTunnels 暴露当前活跃隧道数给客户端看板。
-func (s *AdminService) panelActiveTunnels() int64 {
-	_, active := transport.TunnelStats()
-	return active
+// --- 登录/登出 ---
+
+// handleLoginPage 处理 GET /admin/auth/login：重定向到 SPA 的登录页。
+// 登录页是前端路由 /admin/ui/login，登录提交走 POST /admin/auth/login。
+func (s *AdminService) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	// 已登录直接进管理台
+	if sess := sessionFromRequest(r); sess != "" {
+		if _, ok := s.auth.SessionByToken(sess); ok {
+			http.Redirect(w, r, uiPath, http.StatusSeeOther)
+			return
+		}
+	}
+	http.Redirect(w, r, "/admin/ui/login", http.StatusSeeOther)
 }
 
-// statusJSON 是 _status 的响应结构。
-type statusJSON struct {
-	Version       string       `json:"version"`
-	StartedAt     time.Time    `json:"started_at"`
-	UptimeSeconds int64        `json:"uptime_seconds"`
-	ClientCount   int          `json:"client_count"`
-	Clients       []ClientInfo `json:"clients"`
+type loginIn struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-func (s *AdminService) status() statusJSON {
-	return statusJSON{
-		Version:       s.opts.Version,
-		StartedAt:     s.started,
-		UptimeSeconds: int64(time.Since(s.started).Seconds()),
-		ClientCount:   s.clients.ClientCount(),
-		Clients:       s.clientsSnapshot(),
+// handleLoginSubmit 处理登录请求：JSON 格式，成功设置 cookie 并返回 CSRF。
+func (s *AdminService) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	var in loginIn
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		if !apiDecode(w, r, &in) {
+			return
+		}
+	} else {
+		in.Username = strings.TrimSpace(r.FormValue("username"))
+		in.Password = r.FormValue("password")
+	}
+
+	// 按 IP+用户名 限速：窗口内连续失败达到阈值后锁定一段时间
+	key := limiterKey(r, in.Username)
+	if ok, wait := s.auth.LoginAllowed(key); !ok {
+		msg := fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", int(wait.Minutes())+1)
+		if wantsJSON(r) {
+			apiFail(w, http.StatusTooManyRequests, msg)
+		} else {
+			http.Error(w, msg, http.StatusTooManyRequests)
+		}
+		return
+	}
+
+	sessionToken, csrfToken, err := s.auth.Login(in.Username, in.Password)
+	if err != nil {
+		s.auth.LoginFailed(key)
+		if wantsJSON(r) {
+			apiFail(w, http.StatusUnauthorized, err.Error())
+		} else {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		}
+		return
+	}
+	s.auth.LoginSucceeded(key)
+
+	// 设置会话 cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    sessionToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(sessionTTL.Seconds()),
+	})
+
+	if wantsJSON(r) {
+		apiOK(w, map[string]any{"csrf": csrfToken})
+	} else {
+		http.Redirect(w, r, uiPath, http.StatusSeeOther)
 	}
 }
 
-// clientsSnapshot 从会话管理器组装管理台的客户端视图：静态字段取登记项，
-// 请求数与心跳结果由会话实时持有，这里读取而不是事件推送。
+// handleLogout 处理登出。
+func (s *AdminService) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := sessionFromRequest(r)
+	if token != "" {
+		s.auth.Logout(token)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:   sessionCookieName,
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	if wantsJSON(r) {
+		apiOK(w, map[string]any{"ok": true})
+	} else {
+		http.Redirect(w, r, "/admin/auth/login", http.StatusSeeOther)
+	}
+}
+
+// limiterKey 生成登录限速的键：远端 IP + 用户名。
+func limiterKey(r *http.Request, username string) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return host + "\x00" + strings.ToLower(strings.TrimSpace(username))
+}
+
+// --- 共用业务方法 ---
+
+// clientsSnapshot 从会话管理器组装客户端视图。
 func (s *AdminService) clientsSnapshot() []ClientInfo {
 	entries := s.clients.Clients()
 	out := make([]ClientInfo, 0, len(entries))
@@ -215,7 +348,7 @@ func (s *AdminService) pluginsList() []plugin.Status {
 	return s.opts.Plugins.List()
 }
 
-// bindings 返回转发绑定快照；未配置绑定表时返回空列表。
+// bindings 返回转发绑定快照。
 func (s *AdminService) bindings() []Binding {
 	if s.opts.Bindings == nil {
 		return nil
@@ -223,380 +356,7 @@ func (s *AdminService) bindings() []Binding {
 	return s.opts.Bindings.Snapshot()
 }
 
-func (s *AdminService) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.status())
-}
-
-// handleBindingsGet 提供转发绑定的 JSON 快照（脚本采集用）。
-func (s *AdminService) handleBindingsGet(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Bindings == nil {
-		http.Error(w, "forward bindings are not configured", http.StatusNotFound)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.bindings())
-}
-
-// handleBindingsPost 提供转发绑定的写入口：POST 按 action=set/delete/enable/disable 修改。
-// enable/disable 是列表行内的开关，只翻转 status，其余字段原样保留。
-func (s *AdminService) handleBindingsPost(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Bindings == nil {
-		http.Error(w, "forward bindings are not configured", http.StatusNotFound)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	key := strings.TrimSpace(r.PostFormValue("user_key"))
-	client := strings.TrimSpace(r.PostFormValue("client"))
-	name := strings.TrimSpace(r.PostFormValue("name"))
-	p := store.Protocol(strings.TrimSpace(r.PostFormValue("protocol")))
-	if p == "" {
-		p = store.ProtocolVNV1
-	}
-	if key == "" || !p.Valid() {
-		http.Error(w, "a known protocol and a non-empty user_key are required", http.StatusBadRequest)
-		return
-	}
-	switch r.PostFormValue("action") {
-	case "delete":
-		deleted, err := s.opts.Bindings.DeleteUser(p, key)
-		if err != nil {
-			logging.Error("admin: user binding delete failed", "protocol", p, "user_key", key, "err", err)
-			http.Error(w, "delete failed: storage error", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: user binding deleted",
-			"protocol", p, "user_key", key, "existed", deleted)
-	case "enable", "disable":
-		cur, ok := s.opts.Bindings.Lookup(p, key)
-		if !ok {
-			http.Error(w, "user is not registered", http.StatusNotFound)
-			return
-		}
-		cur.Status = store.UserEnabled
-		if r.PostFormValue("action") == "disable" {
-			cur.Status = store.UserDisabled
-		}
-		if err := s.opts.Bindings.SetUser(cur); err != nil {
-			logging.Error("admin: user status update failed",
-				"protocol", p, "user_key", key, "status", cur.Status, "err", err)
-			http.Error(w, "save failed: storage error", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: user status updated",
-			"protocol", p, "user_key", key, "status", cur.Status)
-	default:
-		if client == "" {
-			http.Error(w, "client must not be empty", http.StatusBadRequest)
-			return
-		}
-		if name == "" {
-			http.Error(w, "name must not be empty", http.StatusBadRequest)
-			return
-		}
-		// vmess/vless 用户的密钥就是 uuid：格式不对时入站验证器装不进，
-		// 会出现"表里有、连不上"，在这里就拒掉。
-		if err := plugin.ValidateUserKey(p, key); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		// 身份是 (protocol, user_key)：这里按提交的协议查，查到的行其协议必然一致，
-		// 「换协议」因此表现为新增另一行（旧行仍在，需另行删除），不存在就地改协议。
-		// 覆盖时不丢既有 config（限速）：SetUser 只更新 name/status/client/config。
-		cur, ok := s.opts.Bindings.Lookup(p, key)
-		if !ok {
-			cur = Binding{UserKey: key, Protocol: p}
-		}
-		cur.Name = name
-		cur.Status = store.UserEnabled
-		if r.PostFormValue("status") == "0" {
-			cur.Status = store.UserDisabled
-		}
-		cur.Client = client
-		if err := s.opts.Bindings.SetUser(cur); err != nil {
-			logging.Error("admin: user binding save failed",
-				"protocol", p, "user_key", key, "client", client, "err", err)
-			http.Error(w, "save failed: storage error", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: user binding saved",
-			"protocol", p, "user_key", key, "name", name, "client", client)
-	}
-	http.Redirect(w, r, "/admin/ops/_users", http.StatusSeeOther)
-}
-
-// handlePlugins 返回插件状态列表（JSON，脚本采集用）。
-func (s *AdminService) handlePlugins(w http.ResponseWriter, _ *http.Request) {
-	if s.opts.Plugins == nil {
-		http.Error(w, "plugins are not configured", http.StatusNotFound)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.pluginsList())
-}
-
-// pluginFormParams 把表单里除控制字段外的项原样收成插件参数：表单字段名即参数名
-// （v2ray 的 vmess_port/vless_port，ss 的 port/method）。
-func pluginFormParams(r *http.Request) map[string]string {
-	out := make(map[string]string, len(r.PostForm))
-	for k, vs := range r.PostForm {
-		switch k {
-		case "plugin", "action", "_token":
-			continue
-		}
-		if len(vs) > 0 {
-			out[k] = vs[0]
-		}
-	}
-	return out
-}
-
-// pluginFormPorts 把表单里形如 <协议>_port 的字段解析成协议 → 端口，供多端口插件的
-// 端口热切换使用。缺少可用字段或端口非法时报错。
-func pluginFormPorts(r *http.Request) (map[store.Protocol]int, error) {
-	out := make(map[store.Protocol]int)
-	for k, vs := range r.PostForm {
-		name, ok := strings.CutSuffix(k, "_port")
-		if !ok || len(vs) == 0 {
-			continue
-		}
-		protocol := store.Protocol(name)
-		if !protocol.Valid() {
-			continue
-		}
-		port, err := strconv.Atoi(strings.TrimSpace(vs[0]))
-		if err != nil || port <= 0 || port >= 65536 {
-			return nil, fmt.Errorf("%s must be an integer in 1..65535", k)
-		}
-		out[protocol] = port
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no <protocol>_port field found")
-	}
-	return out, nil
-}
-
-// handlePluginAction 是插件控制端点（POST，表单字段 plugin + action）：start（带各端口）/
-// stop 对所有插件通用；set_port 支持运行中热切换。
-func (s *AdminService) handlePluginAction(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Plugins == nil {
-		http.Error(w, "plugins are not configured", http.StatusNotFound)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	name := strings.TrimSpace(r.PostFormValue("plugin"))
-	if name == "" {
-		http.Error(w, "missing plugin name", http.StatusNotFound)
-		return
-	}
-	p, err := s.opts.Plugins.Get(name)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	ctx := r.Context()
-	switch r.PostFormValue("action") {
-	case "start":
-		params := pluginFormParams(r)
-		if err := p.Enable(ctx, params); err != nil {
-			logging.Error("admin: plugin enable failed", "plugin", name, "params", params, "err", err)
-			http.Error(w, "enable failed: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		logging.Info("admin: plugin enabled", "plugin", name, "params", params)
-	case "stop":
-		if err := p.Disable(ctx); err != nil {
-			logging.Error("admin: plugin disable failed", "plugin", name, "err", err)
-			http.Error(w, "disable failed: storage error", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: plugin disabled", "plugin", name)
-	case "set_port":
-		if ms, ok := p.(plugin.MultiPortSetter); ok {
-			ports, err := pluginFormPorts(r)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if err := ms.SetPorts(ctx, ports); err != nil {
-				logging.Error("admin: plugin set ports failed", "plugin", name, "ports", ports, "err", err)
-				http.Error(w, "set ports failed: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			logging.Info("admin: plugin ports updated", "plugin", name, "ports", ports)
-			break
-		}
-		port, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue("port")))
-		if err != nil || port <= 0 || port >= 65536 {
-			http.Error(w, "port must be an integer in 1..65535", http.StatusBadRequest)
-			return
-		}
-		setter, ok := p.(plugin.PortSetter)
-		if !ok {
-			http.Error(w, "plugin does not support changing port at runtime", http.StatusBadRequest)
-			return
-		}
-		if err := setter.SetPort(ctx, port); err != nil {
-			logging.Error("admin: plugin set port failed", "plugin", name, "port", port, "err", err)
-			http.Error(w, "set port failed: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		logging.Info("admin: plugin port updated", "plugin", name, "port", port)
-	case "set_uuid":
-		// uuid 路由与限速已并入用户表：插件侧不再有独立写口，统一走 _bindings。
-		http.Error(w, "uuid routing moved to user bindings (POST /admin/ops/_bindings with user_type=v2ray-uuid)",
-			http.StatusGone)
-		return
-	case "del_uuid":
-		http.Error(w, "uuid routing moved to user bindings (POST /admin/ops/_bindings with user_type=v2ray-uuid)",
-			http.StatusGone)
-		return
-	case "set_limit":
-		http.Error(w, "account limits moved to user bindings (POST /admin/ops/_user-config)",
-			http.StatusGone)
-		return
-	default:
-		http.Error(w, "unknown action", http.StatusBadRequest)
-		return
-	}
-	http.Redirect(w, r, "/admin/ops/_plugins", http.StatusSeeOther)
-}
-
-func parseLimitKB(raw string) (int64, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, nil
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 0 || n > (1<<63-1)/1024 {
-		return 0, fmt.Errorf("limit must be between 0 and %d KB/s", int64((1<<63-1)/1024))
-	}
-	return n, nil
-}
-
-// parseLogLevel 归一化日志级别：空与 info 都视为默认（存空串，读时按 info），
-// 其余只接受 debug/warn/error——写进配置的必须是能解析的级别，否则会话会静默退回 info。
-func parseLogLevel(raw string) (string, error) {
-	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
-	case "", "info":
-		return "", nil
-	case "debug", "warn", "error":
-		return v, nil
-	default:
-		return "", fmt.Errorf("log_level must be debug, info, warn or error, got %q", raw)
-	}
-}
-
-// handleUserConfig 把用户限速与日志级别写入唯一配置源，再由观察者更新运行态。
-func (s *AdminService) handleUserConfig(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Bindings == nil {
-		http.Error(w, "forward bindings are not configured", http.StatusNotFound)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	key := strings.TrimSpace(r.PostFormValue("user_key"))
-	p := store.Protocol(strings.TrimSpace(r.PostFormValue("protocol")))
-	if p == "" {
-		p = store.ProtocolVNV1
-	}
-	if key == "" || !p.Valid() {
-		http.Error(w, "a known protocol and a non-empty user_key are required", http.StatusBadRequest)
-		return
-	}
-	upKB, err1 := parseLimitKB(r.PostFormValue("up_kbps"))
-	downKB, err2 := parseLimitKB(r.PostFormValue("down_kbps"))
-	if err1 != nil || err2 != nil {
-		http.Error(w, "up_kbps/down_kbps must be non-negative integers", http.StatusBadRequest)
-		return
-	}
-	concurrency, err := parseConcurrency(r.PostFormValue("concurrency"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	level, err := parseLogLevel(r.PostFormValue("log_level"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	// 限额与日志级别都挂在既有绑定行上，因此该用户必须已登记（客户端的归属不能凭空捏造）。
-	cur, ok := s.opts.Bindings.Lookup(p, key)
-	if !ok {
-		http.Error(w, fmt.Sprintf("%s user %q is not registered", p, key), http.StatusNotFound)
-		return
-	}
-	cur.Config = store.UserConfig{UpLimit: upKB * 1024, DownLimit: downKB * 1024, LogLevel: level, Concurrency: concurrency}
-	if err := s.opts.Bindings.SetUser(cur); err != nil {
-		logging.Error("admin: user config save failed", "protocol", p, "user_key", key, "err", err)
-		http.Error(w, "save failed: storage error", http.StatusInternalServerError)
-		return
-	}
-	logging.Info("admin: user config saved", "protocol", p, "user_key", key,
-		"up_kbps", upKB, "down_kbps", downKB, "log_level", level, "concurrency", concurrency)
-	http.Redirect(w, r, "/admin/ops/_users", http.StatusSeeOther)
-}
-
-// parseConcurrency 解析非负整数并发上限；空串视为 0（不限）。
-func parseConcurrency(raw string) (int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("concurrency must be a non-negative integer")
-	}
-	return n, nil
-}
-
-// handleClientKick 断开一个在线客户端：按管理台编号找到会话并关闭其数据面连接。
-// 客户端若开启了自动重连，稍后会重新接入并获得新编号。
-func (s *AdminService) handleClientKick(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	id, err := strconv.ParseUint(strings.TrimSpace(r.PostFormValue("id")), 10, 64)
-	if err != nil {
-		http.Error(w, "bad client id", http.StatusBadRequest)
-		return
-	}
-	for _, e := range s.clients.Clients() {
-		if e.ID != id {
-			continue
-		}
-		name := ""
-		if e.Info != nil {
-			name = e.Info.Name
-		}
-		if err := e.Client.Close(); err != nil {
-			logging.Error("admin: kick client failed", "id", id, "err", err)
-			http.Error(w, "kick failed", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: client kicked", "id", id, "name", name)
-		http.Redirect(w, r, "/admin/ops/_clients", http.StatusSeeOther)
-		return
-	}
-	http.Error(w, "no such client", http.StatusNotFound)
-}
-
-// serverPort 返回数据面监听端口（AdminOptions.Listen 的端口部分）；解析失败返回 0，
-// 插件端口的默认建议随之退化为"当前端口"，由服务端校验兜底。
+// serverPort 返回数据面监听端口。
 func (s *AdminService) serverPort() int {
 	_, portStr, err := net.SplitHostPort(s.opts.Listen)
 	if err != nil {
@@ -609,176 +369,7 @@ func (s *AdminService) serverPort() int {
 	return port
 }
 
-// handleClientConfig 保存客户端的服务端配置（client_bindings 记录）：表单 name +
-// config（JSON 文本，空串表示清除）。与客户端上报配置相互独立——上报配置只读，
-// 客户端的生效配置由其 YAML 决定。
-func (s *AdminService) handleClientConfig(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Bindings == nil {
-		http.Error(w, "forward bindings are not configured", http.StatusNotFound)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	name := strings.TrimSpace(r.PostFormValue("name"))
-	config := strings.TrimSpace(r.PostFormValue("config"))
-	if name == "" {
-		http.Error(w, "client name must not be empty", http.StatusBadRequest)
-		return
-	}
-	level, err := parseLogLevel(r.PostFormValue("log_level"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var obj map[string]any
-	if config != "" {
-		if err := json.Unmarshal([]byte(config), &obj); err != nil || obj == nil {
-			http.Error(w, "config must be a JSON object", http.StatusBadRequest)
-			return
-		}
-	}
-	if obj == nil {
-		obj = map[string]any{}
-	}
-	// 日志级别的下拉框是唯一写口：只有它与文本域里的值不同时才重写 JSON，
-	// 否则原样保存，免得把运维写的排版整体重排。
-	current, _ := obj["log_level"].(string)
-	if norm, _ := parseLogLevel(current); norm != level {
-		if level == "" {
-			delete(obj, "log_level")
-		} else {
-			obj["log_level"] = level
-		}
-		merged, err := json.MarshalIndent(obj, "", "  ")
-		if err != nil {
-			http.Error(w, "config must be a JSON object", http.StatusBadRequest)
-			return
-		}
-		config = string(merged)
-	}
-	cur, ok := s.opts.Bindings.LookupClient(name)
-	if !ok {
-		cur = ClientBinding{ClientKey: name, ClientType: store.ClientTypeProxy}
-	}
-	// 管理页编辑的是服务端下发的运维值；config 列留给客户端上报的快照。
-	cur.ServerConfig = config
-	if err := s.opts.Bindings.SetClient(cur); err != nil {
-		logging.Error("admin: client config save failed", "client", name, "err", err)
-		http.Error(w, "save failed: storage error", http.StatusInternalServerError)
-		return
-	}
-	logging.Info("admin: client config saved", "client", name, "bytes", len(config))
-	http.Redirect(w, r, "/admin/ops/_client-config?name="+url.QueryEscape(name), http.StatusSeeOther)
-}
-
-// handleClientHosts 是客户端自定义配置（host 表 + IP 段映射）的读写口：
-//   - GET ?name= 返回该客户端当前的自定义 host 表与 IP 段映射（JSON，弹窗预填用）；
-//   - POST 接收表单 domain/ip 与 ip_from/ip_to 两个并列组，校验后写穿 server_config
-//     的 custom_hosts 与 ip_maps 键，再推送给在线客户端。
-func (s *AdminService) handleClientHosts(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Bindings == nil {
-		http.Error(w, "forward bindings are not configured", http.StatusNotFound)
-		return
-	}
-	if r.Method == http.MethodGet {
-		name := strings.TrimSpace(r.URL.Query().Get("name"))
-		if name == "" {
-			http.Error(w, "client name is required", http.StatusBadRequest)
-			return
-		}
-		cfg := s.opts.Bindings.PushConfig(name)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"hosts": cfg.CustomHosts, "ip_maps": cfg.IPMaps,
-			"concurrency": s.opts.Bindings.ClientConcurrency(name),
-		})
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	name := strings.TrimSpace(r.PostFormValue("name"))
-	if name == "" {
-		http.Error(w, "client name must not be empty", http.StatusBadRequest)
-		return
-	}
-	hosts, err := parseCustomHosts(r.PostForm["domain"], r.PostForm["ip"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	ipMaps, err := parseIPMaps(r.PostForm["ip_from"], r.PostForm["ip_to"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	concurrency, err := parseConcurrency(r.PostFormValue("concurrency"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// 读改写 server_config：只动 custom_hosts / ip_maps / concurrency 三键，其余运维字段原样保留。
-	cur, ok := s.opts.Bindings.LookupClient(name)
-	if !ok {
-		cur = ClientBinding{ClientKey: name, ClientType: store.ClientTypeProxy}
-	}
-	obj := map[string]any{}
-	if cur.ServerConfig != "" {
-		if err := json.Unmarshal([]byte(cur.ServerConfig), &obj); err != nil || obj == nil {
-			http.Error(w, "existing server config is not valid JSON; fix it on the client config page first", http.StatusBadRequest)
-			return
-		}
-	}
-	if len(hosts) == 0 {
-		delete(obj, "custom_hosts")
-	} else {
-		obj["custom_hosts"] = hosts
-	}
-	if len(ipMaps) == 0 {
-		delete(obj, "ip_maps")
-	} else {
-		obj["ip_maps"] = ipMaps
-	}
-	if concurrency == 0 {
-		delete(obj, "concurrency")
-	} else {
-		obj["concurrency"] = concurrency
-	}
-	merged, err := json.MarshalIndent(obj, "", "  ")
-	if err != nil {
-		http.Error(w, "server config is not a valid JSON object", http.StatusBadRequest)
-		return
-	}
-	cur.ServerConfig = string(merged)
-	if err := s.opts.Bindings.SetClient(cur); err != nil {
-		logging.Error("admin: client custom config save failed", "client", name, "err", err)
-		http.Error(w, "save failed: storage error", http.StatusInternalServerError)
-		return
-	}
-	logging.Info("admin: client custom config saved", "client", name,
-		"custom_hosts", len(hosts), "ip_maps", len(ipMaps), "concurrency", concurrency)
-	// 在线客户端立即生效：自定义 host / IP 段映射走数据面下发帧，并发上限走服务端会话热改。
-	if pushed := s.pushConfig(name, protocol.PushConfig{CustomHosts: hosts, IPMaps: ipMaps}); pushed {
-		s.applyClientConcurrency(name, concurrency)
-		logging.Info("admin: client push config done", "client", name)
-	}
-	// 离线客户端并发上限在 auth 建立会话时按 server_config 读取，无需在此处理。
-	http.Redirect(w, r, "/admin/ops/_clients", http.StatusSeeOther)
-}
-
-// applyClientConcurrency 把 client 级并发上限热更到在线会话；找不到在线会话时静默跳过
-// （离线客户端在下次认证建立会话时按 server_config 读取）。
+// applyClientConcurrency 把 client 级并发上限热更到在线会话。
 func (s *AdminService) applyClientConcurrency(name string, max int) {
 	for _, e := range s.clients.ClientSessions() {
 		if e.Info().Name == name {
@@ -788,8 +379,7 @@ func (s *AdminService) applyClientConcurrency(name string, max int) {
 	}
 }
 
-// parseIPMaps 校验并归一化表单提交的 IP 段映射行：from/to 按行对齐，
-// 全空行视为占位跳过，只有一栏为空报错。
+// parseIPMaps 校验并归一化 IP 段映射行。
 func parseIPMaps(froms, tos []string) ([]protocol.IPMap, error) {
 	var maps []protocol.IPMap
 	for i := range froms {
@@ -812,8 +402,7 @@ func parseIPMaps(froms, tos []string) ([]protocol.IPMap, error) {
 	return maps, nil
 }
 
-// parseCustomHosts 校验并归一化表单提交的自定义 host 行：domain 与 ip 按行对齐，
-// 全空行视为占位跳过，只有一栏为空报错。域名去尾点、转小写存储（查表时同样归一化）。
+// parseCustomHosts 校验并归一化自定义 host 行。
 func parseCustomHosts(domains, ips []string) ([]protocol.CustomHost, error) {
 	var hosts []protocol.CustomHost
 	for i := range domains {
@@ -842,7 +431,19 @@ func parseCustomHosts(domains, ips []string) ([]protocol.CustomHost, error) {
 	return hosts, nil
 }
 
-// pushConfig 把服务端下发的全量配置推送给在线客户端；该客户端不在线时返回 false。
+// parseLogLevel 归一化日志级别。
+func parseLogLevel(raw string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", "info":
+		return "", nil
+	case "debug", "warn", "error":
+		return v, nil
+	default:
+		return "", fmt.Errorf("log_level must be debug, info, warn or error, got %q", raw)
+	}
+}
+
+// pushConfig 把服务端下发的全量配置推送给在线客户端。
 func (s *AdminService) pushConfig(name string, cfg protocol.PushConfig) bool {
 	for _, e := range s.clients.ClientSessions() {
 		if e.Info().Name != name {
@@ -857,7 +458,7 @@ func (s *AdminService) pushConfig(name string, cfg protocol.PushConfig) bool {
 	return false
 }
 
-// syncPortMaps 热更新端口映射监听器；管理器未装配（数据面未启用）时静默跳过。
+// syncPortMaps 热更新端口映射监听器。
 func (s *AdminService) syncPortMaps() {
 	if s.opts.PortMaps == nil {
 		return
@@ -867,107 +468,17 @@ func (s *AdminService) syncPortMaps() {
 	s.opts.PortMaps.Sync(ctx)
 }
 
-// handlePortMapsPost 是端口映射的写入口（POST，表单 action=save/toggle/delete）：
-// 写穿 port_mappings 表后热更新服务端监听器集合。
-func (s *AdminService) handlePortMapsPost(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Store == nil {
-		http.Error(w, "port mappings are not configured", http.StatusNotFound)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
-	defer cancel()
-	switch r.PostFormValue("action") {
-	case "delete":
-		id, err := strconv.ParseUint(strings.TrimSpace(r.PostFormValue("id")), 10, 64)
-		if err != nil || id == 0 {
-			http.Error(w, "bad mapping id", http.StatusBadRequest)
-			return
-		}
-		deleted, err := s.opts.Store.DeletePortMapping(ctx, id)
-		if err != nil {
-			logging.Error("admin: port mapping delete failed", "id", id, "err", err)
-			http.Error(w, "delete failed: storage error", http.StatusInternalServerError)
-			return
-		}
-		logging.Info("admin: port mapping deleted", "id", id, "existed", deleted)
-	case "toggle":
-		id, err := strconv.ParseUint(strings.TrimSpace(r.PostFormValue("id")), 10, 64)
-		if err != nil || id == 0 {
-			http.Error(w, "bad mapping id", http.StatusBadRequest)
-			return
-		}
-		m, ok, err := s.opts.Store.GetPortMapping(ctx, id)
-		switch {
-		case err != nil:
-			http.Error(w, "load failed: storage error", http.StatusInternalServerError)
-			return
-		case !ok:
-			http.Error(w, "no such mapping", http.StatusNotFound)
-			return
-		}
-		m.Enabled = !m.Enabled
-		if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		logging.Info("admin: port mapping toggled", "id", id, "enabled", m.Enabled)
-	case "save":
-		client := strings.TrimSpace(r.PostFormValue("client"))
-		remotePort, errRemote := strconv.Atoi(strings.TrimSpace(r.PostFormValue("remote_port")))
-		localHost := strings.TrimSpace(r.PostFormValue("local_host"))
-		localPort, errLocal := strconv.Atoi(strings.TrimSpace(r.PostFormValue("local_port")))
-		remark := strings.TrimSpace(r.PostFormValue("remark"))
-		enabled := r.PostFormValue("enabled") == "on"
-		id, _ := strconv.ParseUint(strings.TrimSpace(r.PostFormValue("id")), 10, 64)
-		upKB, errUp := parseLimitKB(r.PostFormValue("up_kbps"))
-		downKB, errDown := parseLimitKB(r.PostFormValue("down_kbps"))
-		if client == "" || errRemote != nil || localHost == "" || errLocal != nil || errUp != nil || errDown != nil {
-			http.Error(w, "client、远程端口、本地地址都必须填写，端口与限速必须是非负整数", http.StatusBadRequest)
-			return
-		}
-		m := store.PortMapping{ID: id, Client: client, RemotePort: remotePort,
-			LocalHost: localHost, LocalPort: localPort,
-			Config:  store.PortConfig{UpLimit: upKB * 1024, DownLimit: downKB * 1024},
-			Enabled: enabled, Remark: remark}
-		if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		logging.Info("admin: port mapping saved", "id", id, "client", client,
-			"remote_port", remotePort,
-			"target", net.JoinHostPort(localHost, strconv.Itoa(localPort)),
-			"up_kbps", upKB, "down_kbps", downKB, "enabled", enabled)
-	default:
-		http.Error(w, "unknown action", http.StatusBadRequest)
-		return
-	}
-	s.syncPortMaps()
-	http.Redirect(w, r, "/admin/ops/_portmaps", http.StatusSeeOther)
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// ClientInfo 是单个客户端会话的只读视图（管理台 _status 的数据行）。
+// ClientInfo 是管理台展示的客户端视图。
 type ClientInfo struct {
-	ID          uint64    `json:"id"`
-	Remote      string    `json:"remote"`
-	ConnectedAt time.Time `json:"connected_at"`
-	// Client 是客户端在认证时上报的配置与环境摘要。
-	Client protocol.ClientInfo `json:"client"`
-	// LastHeartbeat 是最近一次心跳应答的本地时刻；尚未测到时为 time.Time 零值。
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	// LastRTTMs 是最近一次心跳测得的往返时延（毫秒）；尚未测到时为 0。
-	LastRTTMs float64 `json:"last_rtt_ms"`
+	ID            uint64              `json:"id"`
+	Remote        string              `json:"remote"`
+	ConnectedAt   time.Time           `json:"connected_at"`
+	Client        protocol.ClientInfo `json:"client"`
+	LastHeartbeat time.Time           `json:"last_heartbeat"`
+	LastRTTMs     float64             `json:"last_rtt_ms"`
+}
+
+// DB 返回 GORM 连接，供测试用。
+func (s *AdminService) DB() *gorm.DB {
+	return s.opts.DB
 }

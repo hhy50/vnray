@@ -72,8 +72,8 @@ const (
 	// DefaultTrafficFlushInterval 是流量增量落库的默认周期，与 traffic.FlushInterval 一致。
 	DefaultTrafficFlushInterval = 10 * time.Second
 	// DefaultLogRotateMaxSizeMB/DefaultLogRotateMaxBackups/DefaultLogRotateMaxAgeDays
-	// 与 logging 里 lumberjack 的默认值一致。
-	DefaultLogRotateMaxSizeMB  = 500
+	// 是日志文件轮转的默认参数。
+	DefaultLogRotateMaxSizeMB  = 10
 	DefaultLogRotateMaxBackups = 3
 	DefaultLogRotateMaxAgeDays = 28
 	// minStreamWindow 是 yamux 对单流窗口的硬性下限。

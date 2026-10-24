@@ -27,20 +27,20 @@ type authKeySeed struct{ key, scope string }
 // TestVerifyKeyScopedKeys 覆盖接入密钥的判定优先级：密钥表已配置时只认范围匹配的
 // 条目（配置文件密钥不再生效）；表为空时回退配置文件密钥；两者皆空则放行。
 func TestVerifyKeyScopedKeys(t *testing.T) {
-	newService := func(legacy string, keys []authKeySeed) *ConnectorService {
+	newService := func(shared string, keys []authKeySeed) *ConnectorService {
 		b := testBindings(t)
 		for _, k := range keys {
 			if err := b.SetAuthKey(k.key, k.scope); err != nil {
 				t.Fatalf("seed auth key %q: %v", k.key, err)
 			}
 		}
-		return &ConnectorService{authKey: legacy, sessionCfg: b}
+		return &ConnectorService{authKey: shared, sessionCfg: b}
 	}
 
 	for _, tt := range []struct {
 		name    string
 		keys    []authKeySeed
-		legacy  string
+		shared  string
 		client  string
 		present string
 		allow   bool
@@ -55,17 +55,17 @@ func TestVerifyKeyScopedKeys(t *testing.T) {
 			client: "team2:group:solo", present: "key-solo-33", allow: true},
 		{name: "exact client other name", keys: []authKeySeed{{"key-solo-33", "team2:group:solo"}},
 			client: "team2:group:other", present: "key-solo-33", allow: false},
-		{name: "configured table ignores legacy key", keys: []authKeySeed{{"key-solo-33", "*"}},
-			legacy: "legacy-key-9", client: "any:g:a", present: "legacy-key-9", allow: false},
-		{name: "empty table falls back to legacy key", legacy: "legacy-key-9",
-			client: "any:g:a", present: "legacy-key-9", allow: true},
-		{name: "empty table legacy mismatch", legacy: "legacy-key-9",
+		{name: "configured table ignores config key", keys: []authKeySeed{{"key-solo-33", "*"}},
+			shared: "shared-key-9", client: "any:g:a", present: "shared-key-9", allow: false},
+		{name: "empty table falls back to config key", shared: "shared-key-9",
+			client: "any:g:a", present: "shared-key-9", allow: true},
+		{name: "empty table config key mismatch", shared: "shared-key-9",
 			client: "any:g:a", present: "other-key", allow: false},
 		{name: "nothing configured allows all",
 			client: "any:g:a", present: "", allow: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := newService(tt.legacy, tt.keys)
+			svc := newService(tt.shared, tt.keys)
 			err := svc.verifyKey(tt.client, tt.present)
 			if tt.allow && err != nil {
 				t.Fatalf("verifyKey(%q, %q) = %v, want allow", tt.client, tt.present, err)

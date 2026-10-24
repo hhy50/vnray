@@ -170,7 +170,7 @@ func (s *ConnectorService) userAuthReply(clientName string) protocol.Reply {
 
 // verifyKey 校验客户端认证。密钥表已配置（管理台可管）时按范围 key 判定：客户端名
 // 落在某条记录的范围里且密钥相等才放行；表为空时回退配置文件的共享密钥，两者都没
-// 配就放行——维持未启用认证的部署行为。
+// 配就放行（未启用认证的部署）。
 func (s *ConnectorService) verifyKey(clientName, key string) error {
 	if s.sessionCfg != nil {
 		configured, ok := s.sessionCfg.MatchClientAuthKey(clientName, key)

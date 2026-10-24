@@ -2,9 +2,6 @@ package admin
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -24,42 +21,40 @@ func (f *fakeSettings) Apply(next config.ServiceSettings) error {
 	return nil
 }
 
-// TestHandleServiceConfigPost 断言表单解析、校验与成功重定向。
-func TestHandleServiceConfigPost(t *testing.T) {
+// TestServiceConfigSave 断言接口层的解析、校验与落库。
+func TestServiceConfigSave(t *testing.T) {
 	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
 	service := &AdminService{opts: AdminOptions{Settings: fake}}
 
-	post := func(fields url.Values) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodPost, "/admin/ops/_service-config", strings.NewReader(fields.Encode()))
-		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		w := httptest.NewRecorder()
-		service.handleServiceConfigPost(w, r)
-		return w
+	save := func(body apiDurationFields) int {
+		w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", body, nil)
+		service.apiServiceConfigSave(w, r)
+		return w.Code
 	}
 
-	for name, fields := range map[string]url.Values{
-		"bad duration":    {"heartbeat_interval": {"nope"}},
-		"bad level":       {"log_level": {"verbose"}},
-		"public host url": {"public_host": {"https://x"}},
-		"zero flush":      {"traffic_flush_interval": {"0s"}},
-		"small window":    {"max_stream_window_kb": {"128"}},
+	for name, body := range map[string]apiDurationFields{
+		"bad duration":    {HeartbeatInterval: "nope"},
+		"bad level":       {LogLevel: "verbose", HeartbeatInterval: "2s"},
+		"public host url": {PublicHost: "https://x"},
+		"zero flush":      {TrafficFlushInterval: "0s"},
+		"small window":    {MaxStreamWindowKB: intPtr(128)},
 	} {
-		if w := post(fields); w.Code != http.StatusBadRequest {
-			t.Fatalf("%s: status = %d, want 400", name, w.Code)
+		if code := save(body); code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", name, code)
 		}
 	}
 
-	w := post(url.Values{
-		"heartbeat_enabled":      {"on"},
-		"heartbeat_interval":     {"2s"},
-		"heartbeat_timeout":      {"1s"},
-		"public_host":            {"vpn.example.com"},
-		"log_level":              {"warn"},
-		"traffic_flush_interval": {"3s"},
-		"max_stream_window_kb":   {"256"},
+	code := save(apiDurationFields{
+		HeartbeatEnabled:     true,
+		HeartbeatInterval:    "2s",
+		HeartbeatTimeout:     "1s",
+		PublicHost:           "vpn.example.com",
+		LogLevel:             "warn",
+		TrafficFlushInterval: "3s",
+		MaxStreamWindowKB:    intPtr(256),
 	})
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("save: status = %d, want 303", w.Code)
+	if code != http.StatusOK {
+		t.Fatalf("save: status = %d, want 200", code)
 	}
 	if !fake.applied {
 		t.Fatal("settings were not applied")
@@ -68,20 +63,18 @@ func TestHandleServiceConfigPost(t *testing.T) {
 		t.Fatalf("applied = %+v", fake.cur)
 	}
 	if fake.cur.Heartbeat.Interval.Std() != 2*time.Second || !fake.cur.Heartbeat.Enabled {
-		t.Fatalf("applied heartbeat = %+v", fake.cur.Heartbeat)
+		t.Fatalf("applied heartbeat = %+v", fake.cur)
 	}
 	if fake.cur.Session.MaxStreamWindow != 256*1024 {
 		t.Fatalf("applied window = %d, want %d", fake.cur.Session.MaxStreamWindow, 256*1024)
 	}
 }
 
-// TestHandleServiceConfigPostNoSettings 断言未装配 Settings 时写入返回 503。
-func TestHandleServiceConfigPostNoSettings(t *testing.T) {
+// TestServiceConfigSaveNoSettings 断言未装配 Settings 时写入返回 503。
+func TestServiceConfigSaveNoSettings(t *testing.T) {
 	service := &AdminService{}
-	r := httptest.NewRequest(http.MethodPost, "/admin/ops/_service-config", strings.NewReader(""))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	service.handleServiceConfigPost(w, r)
+	w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{}, nil)
+	service.apiServiceConfigSave(w, r)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}

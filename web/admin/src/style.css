@@ -1,0 +1,113 @@
+/* 全局样式 */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  background: var(--el-bg-color-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--el-border-color);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--el-border-color-hover);
+}
+
+/* 卡片容器通用样式 */
+.page-card {
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+/* 表格工具栏 */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.table-toolbar .spacer {
+  flex: 1;
+}
+
+/* 统计卡片 */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.stat-card .stat-label {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 8px;
+}
+
+.stat-card .stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+/* 等宽字体 */
+.mono {
+  font-family: Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+/* 标签页间距修正（全局覆盖 Element Plus） */
+.page-tabs .el-tabs__header {
+  margin-bottom: 16px !important;
+}
+
+/* 表单紧凑模式 */
+.compact-form .el-form-item {
+  margin-bottom: 16px !important;
+}
