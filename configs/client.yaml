@@ -13,7 +13,7 @@ server:
 
 # 本客户端在服务端侧的名字，格式 namespace:group:name，供转发绑定与范围密钥选中；
 # 留空时默认为 default:default:${hostname}-${ip}（IP 取首个非回环 IPv4）。
-name: default:default:edge-1
+name: 
 
 # 分发网络访问控制（支持 CIDR、IPv4 尾部通配、单 IP，逗号分隔）：
 public: ""
