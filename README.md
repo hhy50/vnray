@@ -36,8 +36,6 @@ go build -o bin/vnray-client ./cmd/client
 
 管理台账号分权限：`admin` 持内建 administrator 角色（全权，也是唯一能进「Administrators / Roles / Permissions」的账号）；日常运维另建账号并在 Roles 页分配角色即可。首启会播种两个预设角色——`运维`（可改配置、启停插件、踢客户端）与 `只读`（只看页面，没有任何写入口）。权限目录与路由的对应关系见 [docs/adr/0038-admin-rbac.md](docs/adr/0038-admin-rbac.md)。
 
-管理台界面是 Vue（`http://127.0.0.1:8080/admin/ui/`），业务页全部在这里：客户端、用户、端口映射、插件、认证密钥、服务配置、日志。`/admin/` 会 302 到 `/admin/ui/`；`/admin/auth/*` 仍是 steward 的登录页，账号/角色/权限/审计几个系统页也由 steward 渲染（侧边栏「系统」里进）。迁移记录与接口清单见 [docs/adr/0039-admin-vue-spa.md](docs/adr/0039-admin-vue-spa.md)。
-
 前端产物是**编译前置条件**：`web/admin/dist` 不入库，缺 `dist/index.html` 时 `go build`
 会直接报 `pattern dist/index.html: no matching files found`，不会产出没有界面的二进制。
 

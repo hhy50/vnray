@@ -24,10 +24,9 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '客户端' },
       },
       {
+        // 旧深链兜底：客户端配置已改成列表里的弹窗，不再有独立页面。
         path: 'clients/:name',
-        name: 'client-detail',
-        component: () => import('./views/ClientDetail.vue'),
-        meta: { title: '客户端配置' },
+        redirect: { name: 'clients' },
       },
       {
         path: 'users',

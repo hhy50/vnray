@@ -1,12 +1,11 @@
 <script setup lang="ts">
+// 客户端列表：会话状态与流量概览，配置在弹窗里就地编辑（不跳页）。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { Client } from '../api/types'
-import { bytes, clock } from '../lib/format'
-
-const router = useRouter()
+import { bytes, clock, shortName } from '../lib/format'
+import ClientConfigDialog from '../components/ClientConfigDialog.vue'
 
 const clients = ref<Client[]>([])
 const platforms = ref<string[]>([])
@@ -15,6 +14,10 @@ const loadError = ref('')
 const q = ref('')
 const platform = ref('')
 const busyId = ref(0)
+
+// 客户端配置以弹窗呈现：列表页保持不动，关掉弹窗即回到原上下文。
+const configOpen = ref(false)
+const configName = ref('')
 
 let timer: number | undefined
 
@@ -47,10 +50,15 @@ async function load(silent = false) {
   }
 }
 
+function openConfig(client: Client) {
+  configName.value = client.name
+  configOpen.value = true
+}
+
 async function kick(client: Client) {
   try {
     await ElMessageBox.confirm(
-      `断开 ${client.name || '该客户端'} 的会话？客户端若开了自动重连会重新接入。`,
+      `断开 ${shortName(client.name)} 的会话？开了自动重连的客户端会重新接入。`,
       '断开连接',
       { type: 'warning', confirmButtonText: '断开', cancelButtonText: '取消' },
     )
@@ -69,7 +77,7 @@ async function kick(client: Client) {
   }
 }
 
-// 轮询只在页面可见时跑；标签页切走就停，回来立刻补一次。
+// 轮询只在页面可见时跑，避免后台标签页空转。
 function startPolling() {
   stopPolling()
   timer = window.setInterval(() => {
@@ -108,6 +116,11 @@ function ifaceDetail(c: Client): string {
     .map((i) => `${i.name}${i.mac ? ' [' + i.mac + ']' : ''} ${i.addrs.join(', ')}`.trim())
     .join('\n')
 }
+
+function timeDetail(c: Client): string {
+  const parts = [`接入 ${c.connected_at ?? '—'}`, `心跳 ${c.last_heartbeat ?? '—'}`]
+  return parts.join('\n')
+}
 </script>
 
 <template>
@@ -122,9 +135,9 @@ function ifaceDetail(c: Client): string {
           placeholder="搜索名称 / 地址 / 主机名 / 版本 / 网卡"
           clearable
           :prefix-icon="Search"
-          style="width: 20rem"
+          style="width: 19rem"
         />
-        <el-select v-model="platform" placeholder="全部平台" clearable style="width: 9rem">
+        <el-select v-model="platform" placeholder="全部平台" clearable style="width: 8.5rem">
           <el-option label="全部平台" value="" />
           <el-option v-for="p in platforms" :key="p" :label="p" :value="p" />
         </el-select>
@@ -142,7 +155,7 @@ function ifaceDetail(c: Client): string {
       size="small"
       empty-text="没有符合条件的客户端。客户端接入后会出现在这里，每 5 秒自动刷新。"
     >
-      <el-table-column label="状态" width="86">
+      <el-table-column label="状态" width="78">
         <template #default="{ row }">
           <el-tag v-if="row.local" size="small" type="info">本机</el-tag>
           <el-tag v-else-if="row.online" size="small" type="success">在线</el-tag>
@@ -150,83 +163,97 @@ function ifaceDetail(c: Client): string {
         </template>
       </el-table-column>
 
-      <el-table-column label="ID" width="70">
+      <el-table-column label="客户端" min-width="200">
         <template #default="{ row }">
-          <span class="faint">{{ row.online ? row.id : '—' }}</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="客户端" min-width="170">
-        <template #default="{ row }">
-          <div>{{ row.name || '—' }}</div>
-          <div v-if="row.version" class="faint">
-            {{ row.version }} · {{ row.os }}/{{ row.arch }}
-            <template v-if="row.hostname"> · {{ row.hostname }}</template>
+          <div class="client-name" :title="row.name || '未命名客户端'">
+            <span v-if="row.name" class="client-short">{{ shortName(row.name) }}</span>
+            <span v-else class="faint">未命名客户端</span>
+            <span v-if="row.online && !row.local" class="faint">#{{ row.id }}</span>
+          </div>
+          <div class="faint" :title="row.hostname">
+            {{ row.version || '未知版本' }} · {{ row.os }}/{{ row.arch }}
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="地址" min-width="140">
+      <el-table-column label="地址" min-width="132">
         <template #default="{ row }"><span class="mono">{{ row.remote || '—' }}</span></template>
       </el-table-column>
 
-      <el-table-column label="网卡" min-width="140" show-overflow-tooltip>
+      <el-table-column label="网卡" min-width="124" show-overflow-tooltip>
         <template #default="{ row }">
           <el-tooltip :content="ifaceDetail(row)" placement="top" :disabled="!row.interfaces.length">
-            <span class="faint">{{ ifaceText(row) }}</span>
+            <span class="faint mono">{{ ifaceText(row) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
 
-      <el-table-column label="接入" width="130">
-        <template #default="{ row }"><span class="faint">{{ clock(row.connected_at) }}</span></template>
+      <el-table-column label="心跳" width="104">
+        <template #default="{ row }">
+          <el-tooltip :content="timeDetail(row)" placement="top">
+            <span class="faint">{{ clock(row.last_heartbeat) }}</span>
+          </el-tooltip>
+        </template>
       </el-table-column>
 
-      <el-table-column label="心跳" width="130">
-        <template #default="{ row }"><span class="faint">{{ clock(row.last_heartbeat) }}</span></template>
-      </el-table-column>
-
-      <el-table-column label="延迟" width="86">
+      <el-table-column label="延迟" width="82">
         <template #default="{ row }">
           <span class="faint">{{ row.last_heartbeat ? row.rtt_ms.toFixed(1) + ' ms' : '—' }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="累计流量" width="108">
+      <el-table-column label="累计流量" width="100">
         <template #default="{ row }">
           <div class="faint">↑ {{ bytes(row.up_bytes) }}</div>
           <div class="faint">↓ {{ bytes(row.down_bytes) }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="出站" min-width="120" show-overflow-tooltip>
+      <el-table-column label="出站" min-width="110" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="faint">{{ row.outbounds.length ? row.outbounds.join(', ') : '—' }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="150" align="right">
+      <el-table-column label="操作" width="126" align="right" fixed="right">
         <template #default="{ row }">
-          <el-button
-            v-if="row.name && !row.local"
-            link
-            type="primary"
-            @click="router.push('/clients/' + encodeURIComponent(row.name))"
-          >配置</el-button>
+          <el-button v-if="row.name && !row.local" link type="primary" @click="openConfig(row)">
+            配置
+          </el-button>
           <el-button
             v-if="row.online && !row.local"
             link
             type="danger"
             :loading="busyId === row.id"
             @click="kick(row)"
-          >断开</el-button>
+          >
+            断开
+          </el-button>
         </template>
       </el-table-column>
     </el-table>
 
     <p class="page-hint">
-      在线行来自当前会话；离线行是已注册但此刻没接进来的客户端。「本机」是服务端本机出口，常驻可用、不是会话。
-      数据每 5 秒刷新，标签页不可见时暂停。
+      在线行来自当前会话，每 5 秒刷新（标签页不可见时暂停）；离线行是注册过但此刻没接进来的客户端。
+      「本机」指服务端自身的出口，常驻可用、不是会话。
     </p>
   </el-card>
+
+  <ClientConfigDialog v-model="configOpen" :name="configName" @saved="load(true)" />
 </template>
+
+<style scoped>
+.client-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.client-short {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>

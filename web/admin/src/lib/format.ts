@@ -23,6 +23,13 @@ export function clock(raw: string | null | undefined): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+// 客户端名是 namespace:group:name，列表里只显示末段，完整值挂在 title 上。
+export function shortName(name: string | null | undefined): string {
+  if (!name) return '—'
+  const idx = name.lastIndexOf(':')
+  return idx >= 0 ? name.slice(idx + 1) : name
+}
+
 export function uptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
   const d = Math.floor(seconds / 86400)

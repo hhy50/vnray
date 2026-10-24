@@ -1,8 +1,6 @@
 package admin
 
 // middleware.go 定义管理台 HTTP 上下文与认证中间件。
-// 用标准库 http.Handler 风格，替换 steward 的 Context / 中间件链。
-
 import (
 	"context"
 	"encoding/json"

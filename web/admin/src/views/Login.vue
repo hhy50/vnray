@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// 登录页：独立布局，不走 AdminLayout，登录成功后回跳原地址。
 import { reactive, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { User, Lock, View, Hide } from '@element-plus/icons-vue'
@@ -9,10 +10,7 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 
-const form = reactive({
-  username: '',
-  password: '',
-})
+const form = reactive({ username: '', password: '' })
 const loading = ref(false)
 const showPassword = ref(false)
 
@@ -28,7 +26,6 @@ async function onSubmit() {
   loading.value = true
   try {
     await userStore.login(form.username.trim(), form.password)
-    ElMessage.success('登录成功')
     const redirect = route.query.redirect as string | undefined
     router.replace(redirect || '/clients')
   } catch (e) {
@@ -41,200 +38,259 @@ async function onSubmit() {
 
 <template>
   <div class="login-page">
-    <div class="login-bg">
-      <div class="bg-shape shape-1"></div>
-      <div class="bg-shape shape-2"></div>
-      <div class="bg-shape shape-3"></div>
-    </div>
+    <section class="brand-panel">
+      <div class="brand-inner">
+        <div class="brand-logo">V</div>
+        <h1>vnray</h1>
+        <p class="brand-sub">流量调度管理台</p>
+        <ul class="brand-points">
+          <li>客户端接入与会话状态</li>
+          <li>用户、限速与端口映射</li>
+          <li>入站插件与服务配置</li>
+        </ul>
+      </div>
+      <div class="brand-glow" />
+    </section>
 
-    <div class="login-card">
-      <div class="login-header">
-        <div class="logo">
-          <div class="logo-icon">V</div>
-          <div class="logo-text">
-            <h1>vnray</h1>
-            <p>流量调度管理台</p>
+    <section class="form-panel">
+      <div class="login-card">
+        <header class="card-head">
+          <div class="logo-mark">V</div>
+          <div>
+            <h2>登录管理台</h2>
+            <p>使用管理员账号继续</p>
           </div>
-        </div>
+        </header>
+
+        <el-form :model="form" class="login-form" @keyup.enter="onSubmit">
+          <el-form-item>
+            <el-input
+              v-model="form.username"
+              placeholder="用户名"
+              size="large"
+              :prefix-icon="User"
+              autocomplete="username"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <el-input
+              v-model="form.password"
+              :type="showPassword ? 'text' : 'password'"
+              placeholder="密码"
+              size="large"
+              :prefix-icon="Lock"
+              autocomplete="current-password"
+            >
+              <template #suffix>
+                <el-icon class="password-icon" @click="showPassword = !showPassword">
+                  <View v-if="!showPassword" />
+                  <Hide v-else />
+                </el-icon>
+              </template>
+            </el-input>
+          </el-form-item>
+
+          <el-button type="primary" size="large" class="login-btn" :loading="loading" @click="onSubmit">
+            登 录
+          </el-button>
+        </el-form>
+
+        <footer class="card-foot">
+          <span>© {{ new Date().getFullYear() }} vnray</span>
+          <span class="dot" />
+          <span>流量调度系统</span>
+        </footer>
       </div>
-
-      <el-form :model="form" class="login-form" @keyup.enter="onSubmit">
-        <el-form-item>
-          <el-input
-            v-model="form.username"
-            placeholder="用户名"
-            size="large"
-            :prefix-icon="User"
-            autocomplete="username"
-          />
-        </el-form-item>
-
-        <el-form-item>
-          <el-input
-            v-model="form.password"
-            :type="showPassword ? 'text' : 'password'"
-            placeholder="密码"
-            size="large"
-            :prefix-icon="Lock"
-            autocomplete="current-password"
-          >
-            <template #suffix>
-              <el-icon class="password-icon" @click="showPassword = !showPassword">
-                <View v-if="!showPassword" />
-                <Hide v-else />
-              </el-icon>
-            </template>
-          </el-input>
-        </el-form-item>
-
-        <el-button
-          type="primary"
-          size="large"
-          class="login-btn"
-          :loading="loading"
-          @click="onSubmit"
-        >
-          登 录
-        </el-button>
-      </el-form>
-
-      <div class="login-footer">
-        <p>© 2024 vnray · 流量调度系统</p>
-      </div>
-    </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
 .login-page {
-  position: relative;
-  width: 100%;
+  display: flex;
   min-height: 100vh;
+  background: var(--el-bg-color-page);
+}
+
+.brand-panel {
+  position: relative;
+  flex: 1 1 46%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   overflow: hidden;
+  color: #fff;
+  background: linear-gradient(150deg, #1f6feb 0%, #2f9bff 45%, #14b8a6 100%);
 }
 
-.login-bg {
+.brand-glow {
   position: absolute;
-  inset: 0;
-  overflow: hidden;
-}
-
-.bg-shape {
-  position: absolute;
+  width: 520px;
+  height: 520px;
+  right: -160px;
+  bottom: -200px;
   border-radius: 50%;
-  opacity: 0.1;
-  background: white;
+  background: rgba(255, 255, 255, 0.16);
+  filter: blur(2px);
 }
 
-.shape-1 {
-  width: 600px;
-  height: 600px;
-  top: -200px;
-  left: -100px;
+.brand-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 320px;
+  padding: 40px;
 }
 
-.shape-2 {
-  width: 400px;
-  height: 400px;
-  bottom: -100px;
-  right: -50px;
+.brand-logo {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 22px;
 }
 
-.shape-3 {
-  width: 200px;
-  height: 200px;
-  top: 40%;
-  right: 20%;
+.brand-inner h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: 0.5px;
+}
+
+.brand-sub {
+  margin: 6px 0 26px;
+  font-size: 13px;
+  opacity: 0.85;
+  letter-spacing: 1px;
+}
+
+.brand-points {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.brand-points li {
+  padding-left: 16px;
+  position: relative;
+}
+
+.brand-points li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.form-panel {
+  flex: 1 1 54%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
 }
 
 .login-card {
-  position: relative;
-  width: 400px;
-  padding: 40px;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  width: 100%;
+  max-width: 400px;
+  padding: 34px 32px 28px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
 }
 
-.login-header {
-  margin-bottom: 32px;
-}
-
-.logo {
+.card-head {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  margin-bottom: 28px;
 }
 
-.logo-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  color: white;
-  font-size: 24px;
-  font-weight: bold;
-  display: flex;
+.logo-mark {
+  display: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #409eff, #36cfc9);
+  color: #fff;
+  font-weight: 700;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  flex-shrink: 0;
 }
 
-.logo-text h1 {
+.card-head h2 {
   margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  color: #303133;
-  line-height: 1.2;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
 }
 
-.logo-text p {
+.card-head p {
   margin: 4px 0 0;
-  font-size: 13px;
-  color: #909399;
-}
-
-.login-form {
-  margin-bottom: 24px;
+  font-size: 12.5px;
+  color: var(--el-text-color-secondary);
 }
 
 .login-form :deep(.el-form-item) {
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .login-btn {
   width: 100%;
-  height: 44px;
-  font-size: 16px;
-  font-weight: 500;
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  border: none;
-}
-.login-btn:hover {
-  opacity: 0.9;
+  height: 42px;
+  font-size: 15px;
+  letter-spacing: 2px;
+  margin-top: 4px;
 }
 
 .password-icon {
   cursor: pointer;
-  color: #909399;
-  font-size: 16px;
+  color: var(--el-text-color-placeholder);
 }
+
 .password-icon:hover {
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
-.login-footer {
-  text-align: center;
-  color: #c0c4cc;
-  font-size: 12px;
+.card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 28px;
+  font-size: 11.5px;
+  color: var(--el-text-color-placeholder);
 }
 
-.login-footer p {
-  margin: 0;
+.card-foot .dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+@media (max-width: 860px) {
+  .brand-panel {
+    display: none;
+  }
+
+  .logo-mark {
+    display: flex;
+  }
 }
 </style>

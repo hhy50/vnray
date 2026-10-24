@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { Plus, Search } from '@element-plus/icons-vue'
+// 用户：协议 × user_key 的绑定记录，限速/并发/日志级别集中在这里配置。
+import { computed, onMounted, reactive, ref } from 'vue'
+import { Plus, Search, CopyDocument } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { User } from '../api/types'
-import { bytes, copyText, rate } from '../lib/format'
+import { bytes, copyText, rate, shortName } from '../lib/format'
 
 const users = ref<User[]>([])
 const clients = ref<{ name: string; label: string }[]>([])
@@ -15,7 +16,7 @@ const loadError = ref('')
 
 const showAdd = ref(false)
 const saving = ref(false)
-const addForm = reactive({ name: '', protocol: 'vmess', client: '', user_key: '' })
+const addForm = reactive({ name: '', protocol: 'vless', client: '', user_key: '' })
 
 const limitsFor = ref<User | null>(null)
 const limitsSaving = ref(false)
@@ -30,6 +31,16 @@ const logLevels = [
 
 // 同一个 user_key 可以在不同协议下各有一条，行键必须带协议。
 const rowKey = (row: User) => row.protocol + ':' + row.user_key
+
+const selectedClientLabel = computed(() => {
+  const hit = clients.value.find((c) => c.name === addForm.client)
+  return hit ? hit.label : addForm.client
+})
+
+const emptyText = computed(() => {
+  if (q.value.trim() || protocol.value) return '没有符合条件的用户，换个关键字或协议试试。'
+  return '还没有用户。点右上角「添加用户」，把某个协议的 user_key 绑定到出口客户端。'
+})
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -48,9 +59,10 @@ async function load(silent = false) {
 
 function openAdd() {
   addForm.name = ''
-  addForm.protocol = 'vmess'
+  // 默认 vless：新接入以 vless 为主，省得每次手动切协议再点生成。
+  addForm.protocol = 'vless'
   addForm.client = ''
-  addForm.user_key = generateKey('vmess')
+  addForm.user_key = generateKey('vless')
   showAdd.value = true
 }
 
@@ -94,12 +106,15 @@ async function submitAdd() {
   }
 }
 
-async function toggleStatus(u: User) {
+// 开关是即时生效的：先改本地再回滚，避免等接口时开关自己弹回去。
+async function toggleStatus(u: User, enabled: boolean) {
+  const previous = u.enabled
+  u.enabled = enabled
   try {
-    await api.userStatus(u.protocol, u.user_key, !u.enabled)
-    ElMessage.success(u.enabled ? '已停用' : '已启用')
-    await load(true)
+    await api.userStatus(u.protocol, u.user_key, enabled)
+    ElMessage.success(enabled ? '已启用' : '已停用')
   } catch (err) {
+    u.enabled = previous
     ElMessage.error(err instanceof ApiError ? err.message : '操作失败')
   }
 }
@@ -161,6 +176,11 @@ async function copyLink(u: User) {
   else ElMessage.error('复制失败')
 }
 
+async function copyKey(u: User) {
+  if (await copyText(u.user_key)) ElMessage.success('user_key 已复制')
+  else ElMessage.error('复制失败')
+}
+
 onMounted(load)
 </script>
 
@@ -169,16 +189,17 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>共 {{ users.length }} 个用户</strong>
+        <span class="faint">同一 user_key 可在不同协议下各有一条</span>
         <div class="spacer" />
         <el-input
           v-model="q"
           placeholder="搜索 user_key / 名称 / 出口客户端"
           clearable
           :prefix-icon="Search"
-          style="width: 16rem"
+          style="width: 17rem"
           @keyup.enter="load()"
         />
-        <el-select v-model="protocol" placeholder="全部协议" style="width: 8rem" @change="load()">
+        <el-select v-model="protocol" placeholder="全部协议" style="width: 7.5rem" @change="load()">
           <el-option label="全部协议" value="" />
           <el-option v-for="p in protocols" :key="p" :label="p" :value="p" />
         </el-select>
@@ -195,86 +216,89 @@ onMounted(load)
       :data="users"
       size="small"
       :row-key="rowKey"
-      empty-text="没有符合条件的用户。"
+      :empty-text="emptyText"
     >
-      <el-table-column label="协议" width="86">
-        <template #default="{ row }"><span class="faint">{{ row.protocol }}</span></template>
+      <el-table-column label="协议" width="78">
+        <template #default="{ row }">
+          <el-tag size="small" type="info" effect="plain">{{ row.protocol }}</el-tag>
+        </template>
       </el-table-column>
 
       <el-table-column label="user_key" min-width="230">
-        <template #default="{ row }"><span class="mono">{{ row.user_key }}</span></template>
+        <template #default="{ row }">
+          <div class="key-cell">
+            <span class="mono ellipsis" :title="row.user_key">{{ row.user_key }}</span>
+            <el-tooltip content="复制 user_key" placement="top">
+              <el-icon class="copy-btn" @click="copyKey(row)"><CopyDocument /></el-icon>
+            </el-tooltip>
+          </div>
+        </template>
       </el-table-column>
 
-      <el-table-column label="名称" min-width="110">
+      <el-table-column label="名称" min-width="100" show-overflow-tooltip>
         <template #default="{ row }">{{ row.name || '—' }}</template>
       </el-table-column>
 
-      <el-table-column label="状态" width="84">
+      <el-table-column label="状态" width="86">
         <template #default="{ row }">
-          <el-tag :type="row.enabled ? 'success' : 'info'" size="small" :effect="row.enabled ? 'light' : 'plain'">
-            {{ row.enabled ? '启用' : '停用' }}
-          </el-tag>
+          <el-switch
+            :model-value="row.enabled"
+            size="small"
+            inline-prompt
+            active-text="启用"
+            inactive-text="停用"
+            @change="(v: string | number | boolean) => toggleStatus(row, Boolean(v))"
+          />
         </template>
       </el-table-column>
 
-      <el-table-column label="出口客户端" min-width="130">
-        <template #default="{ row }"><span class="mono">{{ row.client }}</span></template>
+      <el-table-column label="出口客户端" min-width="130" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span class="mono">{{ shortName(row.client) }}</span>
+        </template>
       </el-table-column>
 
-      <el-table-column label="限速" width="104">
+      <el-table-column label="限速 / 并发" width="120">
         <template #default="{ row }">
           <div class="faint">↑ {{ rate(row.limit_up_kb) }}</div>
           <div class="faint">↓ {{ rate(row.limit_down_kb) }}</div>
+          <div class="faint">并发 {{ row.concurrency || '不限' }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="并发" width="70">
-        <template #default="{ row }">
-          <span class="faint">{{ row.concurrency || '不限' }}</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="累计转发" width="104">
+      <el-table-column label="累计转发" width="96">
         <template #default="{ row }">
           <div class="faint">↑ {{ bytes(row.up_bytes) }}</div>
           <div class="faint">↓ {{ bytes(row.down_bytes) }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="日志" width="70">
-        <template #default="{ row }"><span class="faint">{{ row.log_level || 'info' }}</span></template>
-      </el-table-column>
-
-      <el-table-column label="操作" width="220" align="right">
+      <el-table-column label="操作" width="196" align="right" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openLimits(row)">配置</el-button>
-          <el-button link @click="toggleStatus(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
-          <el-button link type="danger" @click="removeUser(row)">删除</el-button>
           <el-tooltip
             :disabled="!!row.share_link"
-            :content="'v2ray 插件还没有对应协议的监听端口'"
+            :content="'该协议还没有对应的监听端口'"
             placement="top"
           >
             <span>
-              <el-button
-                v-if="row.shareable"
-                link
-                :disabled="!row.share_link"
-                @click="copyLink(row)"
-              >复制链接</el-button>
+              <el-button v-if="row.shareable" link :disabled="!row.share_link" @click="copyLink(row)">
+                复制链接
+              </el-button>
             </span>
           </el-tooltip>
+          <el-button link type="danger" @click="removeUser(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
 
     <p class="page-hint">
-      限速按用户计（同用户多条隧道共享配额）；绑定、限速、日志级别都写穿到持久存储。
-      改绑后需重连生效，限速与停用即时生效，日志级别下次连接生效。协议是身份的一部分：同一个 user_key 可以在不同协议下各有一条记录。
+      限速按用户计，同一用户的多条隧道共享配额；绑定、限速、日志级别都写穿到持久存储。
+      限速与停用即时生效，改绑和日志级别下次连接生效。
     </p>
   </el-card>
 
-  <el-dialog v-model="showAdd" title="添加用户" width="560px">
+  <el-dialog v-model="showAdd" title="添加用户" width="min(600px, 94vw)" :close-on-click-modal="false">
     <el-form label-position="top" @submit.prevent="submitAdd">
       <el-form-item label="名称">
         <el-input v-model="addForm.name" placeholder="给这个用户起个一眼能认出的名字" />
@@ -298,13 +322,13 @@ onMounted(load)
         </el-form-item>
       </div>
       <el-form-item label="user_key / uuid / 密码">
-        <div style="display: flex; gap: 8px; width: 100%">
+        <div class="key-row">
           <el-input v-model="addForm.user_key" class="mono" />
           <el-button @click="addForm.user_key = generateKey(addForm.protocol)">生成</el-button>
         </div>
       </el-form-item>
-      <p class="page-hint">
-        vmess/vless 的密钥必须是合法 UUID；vn-v1 是共享密钥，ss 是连接密码。新增用户默认启用，协议创建后不可修改。
+      <p class="hint-inline">
+        当前出口：<span class="mono">{{ selectedClientLabel || '未选择' }}</span>
       </p>
     </el-form>
     <template #footer>
@@ -316,7 +340,7 @@ onMounted(load)
   <el-dialog
     :model-value="!!limitsFor"
     :title="limitsFor ? `配置 · ${limitsFor.user_key}（${limitsFor.protocol}）` : '配置'"
-    width="520px"
+    width="min(560px, 94vw)"
     @update:model-value="limitsFor = null"
   >
     <el-form label-position="top">
@@ -338,7 +362,6 @@ onMounted(load)
           </el-select>
         </el-form-item>
       </div>
-      <p class="page-hint">限速与并发即时生效；超限时新连接排队等待空位。日志级别只作用于该用户会话。</p>
     </el-form>
     <template #footer>
       <el-button @click="limitsFor = null">取消</el-button>
@@ -351,5 +374,45 @@ onMounted(load)
 .form-row {
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.key-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  color: var(--el-text-color-placeholder);
+  cursor: pointer;
+}
+
+.copy-btn:hover {
+  color: var(--el-color-primary);
+}
+
+.key-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.hint-inline {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.hint-inline .mono {
+  color: var(--el-text-color-regular);
 }
 </style>

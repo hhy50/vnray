@@ -1,9 +1,10 @@
 <script setup lang="ts">
+// 端口映射：服务端远程端口 → 客户端本地目标，保存即热更新监听器。
 import { onMounted, reactive, ref } from 'vue'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { PortMap } from '../api/types'
-import { rate } from '../lib/format'
+import { rate, shortName } from '../lib/format'
 
 const rows = ref<PortMap[]>([])
 const clients = ref<{ name: string; label: string }[]>([])
@@ -67,6 +68,14 @@ function openEdit(m: PortMap) {
 }
 
 async function save() {
+  if (!form.client) {
+    ElMessage.warning('请选择客户端')
+    return
+  }
+  if (!form.remote_port || !form.local_port) {
+    ElMessage.warning('远程端口与本地端口都必须大于 0')
+    return
+  }
   saving.value = true
   try {
     await api.portMapSave({ ...form }, editing.value)
@@ -116,6 +125,7 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>共 {{ rows.length }} 条映射</strong>
+        <span v-if="publicHost" class="faint">对外地址 {{ publicHost }}:远程端口</span>
         <div class="spacer" />
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加映射</el-button>
@@ -132,49 +142,53 @@ onMounted(load)
       row-key="id"
       empty-text="还没有配置端口映射。添加后服务端立即在远程端口上监听，外部访问「服务器地址:远程端口」会被转发到客户端本地目标。"
     >
-      <el-table-column label="远程端口" width="96">
-        <template #default="{ row }"><span class="mono">{{ row.remote_port }}</span></template>
+      <el-table-column label="远程端口" width="92">
+        <template #default="{ row }"><span class="mono port">{{ row.remote_port }}</span></template>
       </el-table-column>
 
-      <el-table-column label="客户端" min-width="180">
+      <el-table-column label="客户端" min-width="168">
         <template #default="{ row }">
-          <span class="mono">{{ row.client }}</span>
-          <span class="faint">（{{ row.client_online ? '在线' : '离线' }}）</span>
+          <div class="client-cell" :title="row.client">
+            <span class="dot" :class="row.client_online ? 'on' : 'off'" />
+            <span class="mono ellipsis">{{ shortName(row.client) }}</span>
+          </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="本地目标" min-width="160">
+      <el-table-column label="本地目标" min-width="176">
         <template #default="{ row }">
           <span class="mono">{{ row.local_host }}:{{ row.local_port }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="限速 ↑/↓" width="112">
+      <el-table-column label="限速 ↑ / ↓" width="112">
         <template #default="{ row }">
           <span class="faint">{{ rate(row.limit_up_kb) }} / {{ rate(row.limit_down_kb) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" min-width="190">
+      <el-table-column label="状态" width="126">
         <template #default="{ row }">
           <el-tag v-if="!row.enabled" size="small" type="info" effect="plain">已停用</el-tag>
           <el-tag v-else-if="row.listening" size="small" type="success">运行中</el-tag>
-          <el-tag v-else size="small" type="danger" effect="plain">未运行（端口被占或启动失败）</el-tag>
+          <el-tooltip v-else content="端口被占用或监听启动失败，检查服务端日志" placement="top">
+            <el-tag size="small" type="danger" effect="plain">未监听</el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
 
-      <el-table-column label="备注" min-width="140" show-overflow-tooltip>
+      <el-table-column label="备注" min-width="130" show-overflow-tooltip>
         <template #default="{ row }"><span class="faint">{{ row.remark || '—' }}</span></template>
       </el-table-column>
 
-      <el-table-column label="更新时间" width="160">
+      <el-table-column label="更新时间" width="146">
         <template #default="{ row }"><span class="faint">{{ row.updated_at }}</span></template>
       </el-table-column>
 
-      <el-table-column label="操作" width="170" align="right">
+      <el-table-column label="操作" width="156" align="right" fixed="right">
         <template #default="{ row }">
-          <el-button link @click="toggle(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+          <el-button link @click="toggle(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
           <el-button link type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -182,19 +196,35 @@ onMounted(load)
 
     <p class="page-hint">
       链路：外部访问 {{ publicHost || '服务器地址' }}:远程端口 → 服务端 → 该客户端隧道 → 客户端本地拨号。
-      规则持久化在数据库，保存/启停/删除即时生效；改限速不中断在途连接（同一映射的所有连接共享配额）。
-      客户端离线时监听仍在，新连接会被拒绝。远程端口全表唯一，且不能与数据面、插件端口冲突。
+      规则持久化在数据库，保存 / 启停 / 删除即时生效；改限速不中断在途连接。客户端离线时监听仍在，新连接会被拒绝。
     </p>
   </el-card>
 
-  <el-dialog v-model="showForm" :title="editing ? '编辑映射' : '添加映射'" width="560px">
+  <el-dialog
+    v-model="showForm"
+    :title="editing ? '编辑映射' : '添加映射'"
+    width="min(600px, 94vw)"
+    :close-on-click-modal="false"
+  >
     <el-form label-position="top">
       <div class="form-row">
         <el-form-item label="远程端口（服务端监听）" style="flex: 1">
-          <el-input-number v-model="form.remote_port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
+          <el-input-number
+            v-model="form.remote_port"
+            :min="1"
+            :max="65535"
+            controls-position="right"
+            style="width: 100%"
+          />
         </el-form-item>
         <el-form-item label="本地端口" style="flex: 1">
-          <el-input-number v-model="form.local_port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
+          <el-input-number
+            v-model="form.local_port"
+            :min="1"
+            :max="65535"
+            controls-position="right"
+            style="width: 100%"
+          />
         </el-form-item>
       </div>
       <el-form-item label="客户端">
@@ -203,7 +233,7 @@ onMounted(load)
         </el-select>
       </el-form-item>
       <el-form-item label="本地主机（客户端侧）">
-        <el-input v-model="form.local_host" />
+        <el-input v-model="form.local_host" class="mono" />
       </el-form-item>
       <div class="form-row">
         <el-form-item label="上行限速 KB/s（0 = 不限）" style="flex: 1">
@@ -214,7 +244,7 @@ onMounted(load)
         </el-form-item>
       </div>
       <el-form-item label="备注">
-        <el-input v-model="form.remark" />
+        <el-input v-model="form.remark" placeholder="例如：办公室 NAS" />
       </el-form-item>
       <el-form-item label="启用">
         <el-switch v-model="form.enabled" />
@@ -228,8 +258,43 @@ onMounted(load)
 </template>
 
 <style scoped>
+.port {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-color-primary);
+}
+
+.client-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot.on {
+  background: var(--el-color-success);
+}
+
+.dot.off {
+  background: var(--el-border-color-darker);
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .form-row {
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
 }
 </style>

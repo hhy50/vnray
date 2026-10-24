@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 export interface TabItem {
   path: string
@@ -7,15 +7,27 @@ export interface TabItem {
   closable: boolean
 }
 
+const THEME_KEY = 'vnray.theme'
+
+// 主题存在 localStorage：刷新后 element 变量与自定义样式同时生效，不会闪回浅色。
+const storedDark = typeof localStorage !== 'undefined' && localStorage.getItem(THEME_KEY) === 'dark'
+
 export const useAppStore = defineStore('app', () => {
   const sidebarCollapsed = ref(false)
-  const tabs = ref<TabItem[]>([
-    { path: '/clients', title: '客户端', closable: false },
-  ])
+  const tabs = ref<TabItem[]>([{ path: '/clients', title: '客户端', closable: false }])
   const activeTab = ref('/clients')
-  const darkMode = ref(false)
+  const darkMode = ref(storedDark)
 
   const sidebarWidth = computed(() => (sidebarCollapsed.value ? 64 : 220))
+
+  watch(
+    darkMode,
+    (dark) => {
+      document.documentElement.classList.toggle('dark', dark)
+      localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light')
+    },
+    { immediate: true },
+  )
 
   function toggleSidebar() {
     sidebarCollapsed.value = !sidebarCollapsed.value
@@ -48,11 +60,6 @@ export const useAppStore = defineStore('app', () => {
 
   function toggleDark() {
     darkMode.value = !darkMode.value
-    if (darkMode.value) {
-      document.documentElement.classList.add('dark')
-    } else {
-      document.documentElement.classList.remove('dark')
-    }
   }
 
   return {

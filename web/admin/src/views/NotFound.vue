@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// 404：独立布局，给出返回上一页与回首页两个出口。
 import { useRouter, useRoute } from 'vue-router'
 import { computed } from 'vue'
 import { HomeFilled, ArrowLeft, Search } from '@element-plus/icons-vue'
@@ -45,8 +46,9 @@ function goHome() {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 70vh;
+  min-height: 100vh;
   padding: 40px 20px;
+  background: var(--el-bg-color-page);
 }
 
 .notfound-card {
