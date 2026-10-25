@@ -1,4 +1,7 @@
-.github/
+# .github 下只放行 CI 工作流，其余（AI 工具目录、本地配置）不入库
+.github/*
+!.github/workflows
+!.github/workflows/**
 .vscode/
 .idea/
 .claude/
@@ -6,6 +9,7 @@
 .trae/
 .roo/
 .workbuddy/
+.workbuddy-ai/
 docs/
 logs/
 log/
