@@ -1,79 +1,71 @@
 <div align="center">
   <h1>vnray</h1>
-  <p>A V2Ray-based reverse proxy for NAT traversal and remote access.</p>
-  <p>Expose the network access available to a client and centrally manage multiple egress clients.</p>
+  <p>一个基于V2ray协议的内网穿透服务，适合远程访问内网应用、统一管理多台出口客户端。</p>
   <p>
-    <a href="README.md"><strong>English</strong></a> ·
-    <a href="README.zh-CN.md">简体中文</a>
+    <a href="README.en.md">English</a> ·
   </p>
   <p>
-    <a href="https://go.dev/"><img src="https://img.shields.io/github/go-mod/go-version/hhy50/vnray?style=flat-square" alt="Go version"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/github/go-mod/go-version/hhy50/vnray?style=flat-square" alt="Go 版本"></a>
   </p>
 </div>
 
 ---
 
-## What problem does it solve?
+## 它解决什么问题？
 
-Many services run inside a home, office, or cloud private network:
+- 家庭宽带没有公网 IP，无法直接访问 NAS、路由器或家里的开发环境；
+- 公司内网的测试 API、数据库或 SSH 服务，不应该直接暴露在公网；
+- 多台机器分别能访问不同网络，想从一个公网入口统一接入；
+- 只开放出站连接，不方便在防火墙或 NAT 上配置入站端口。
 
-- A home connection has no public IP, so a NAS, router, or development environment cannot be reached directly.
-- Internal APIs, databases, or SSH services should not be exposed directly to the public Internet.
-- Several machines can reach different networks, but users want one public entry point.
-- The network only allows outbound connections, making inbound firewall or NAT rules inconvenient.
+一般的内网穿透实现都是 **端口映射** 和 **组网**
 
-Typical private-network access solutions usually fall into two categories: **port mapping** and **network overlaying**.
+- 端口映射，每个客户端都需要占用服务端的一个端口，并且强依赖客户端的配置
+- 组网，主要是配置繁琐
 
-- With port mapping, every client usually needs its own server-side port, and the setup is tightly coupled to the client configuration.
-- With network overlaying, users and machines are placed into a virtual network, but the configuration and operational model can be complicated.
+### Vnray
 
-### The vnray approach
+- **Vnray的核心逻辑就是通过一个客户端，把客户端的网络环境暴露出来**
+- **他的核心原理就是服务端只负责把用户的流量转发给具体的客户端，最后客户端把流量转发给目标服务**
+- 从架构上来看, 它就像是在客户端装了一个v2ray服务端, 然后通过端口映射的形式, 让公网可以访问到客户端的v2ray服务端, 实际上并不是这种实现
 
-vnray takes a more focused approach: **one client exposes the network access available to that client**.
+## 核心能力
 
-The server does not need to enter the private network. It only authenticates users, selects the target client, and forwards their traffic. The client then connects to the destination service from its own network and sends the response back through the tunnel.
+- **客户端主动建隧道**：服务端不需要主动访问内网，适合 NAT 和仅允许出站连接的网络。
+- **VLESS / VMess 接入**：可使用标准 v2ray 客户端连接；管理台可分别配置两个入站端口。
+- **Shadowsocks 接入**：提供 AEAD TCP 入站，默认加密方法为 `aes-256-gcm`。
+- **端口映射**：把客户端侧能访问的 TCP 服务映射到公网端口，适合 SSH、数据库和内部 Web 服务。
+- **按客户端选择出口**：同一个服务端可以连接多台客户端，并把不同用户绑定到不同客户端。
+- **路由与 Host 映射**：客户端可以配置直连、拒绝规则，以及自定义域名到 IP 的映射。
+- **带宽与并发控制**：按用户限制上下行带宽和并发连接数。
+- **管理台**：查看客户端在线状态、延迟、流量和配置，在线管理用户、插件、密钥与端口映射。
+- **可持久化存储**：支持 SQLite，也支持 MySQL；默认示例使用 SQLite。
+- **服务端出口**: 服务端也可以像v2ray服务端一样，自己负责处理出站流量，而不是只负责转发流量。（默认关闭）
 
-Architecturally, this may look like installing a V2Ray server inside the client network and exposing it through a public port mapping. That is not how vnray works internally: the client maintains an outbound tunnel to vnray, and the public server routes user traffic through that tunnel.
-
-> vnray is not a traditional layer-2 VPN that places two machines on the same LAN. It is better suited to request-level routing: **user request → selected client → destination service**.
-
-## Core capabilities
-
-- **Client-initiated tunnels** — The server does not need inbound access to the private network, which works well with NAT and outbound-only networks.
-- **VLESS / VMess access** — Connect with standard V2Ray clients; the two inbound protocols can be configured with separate ports in the admin console.
-- **Shadowsocks access** — Provides an AEAD TCP inbound; the default cipher is `aes-256-gcm`.
-- **Port mapping** — Expose a TCP service reachable by the client on a public port, such as SSH, a database, or an internal web service.
-- **Per-client egress selection** — Connect multiple clients to one server and bind different users to different clients.
-- **Routing and host mapping** — Configure direct or reject rules, and map custom domains to specific IP addresses on the client side.
-- **Bandwidth and concurrency controls** — Limit upload/download bandwidth and concurrent connections per user.
-- **Admin console** — View client online status, latency, traffic, and configuration; manage users, plugins, keys, and port mappings online.
-- **Persistent storage** — Supports SQLite and MySQL; the example configuration uses SQLite.
-
-## How it works
+## 工作原理
 
 ```text
 ┌────────┐        ┌──────────────┐        ┌──────────────┐        ┌──────────┐
-│  User  │ ─────▶ │ Public server │ ◀───── │ Private client│ ─────▶ │ Target   │
-└────────┘        │ Auth / route │  tunnel  │ Access network│        │ service  │
-                  │ / management │        └──────────────┘        └──────────┘
-                  └──────────────┘
+│  用户  │ ─────▶ │ 公网服务端    │ ◀───── │ 内网客户端    │ ─────▶ │ 目标服务 │
+└────────┘        │ 认证/路由/管理 │  主动隧道 │ 访问目标网络  │        └──────────┘
+                  └──────────────┘        └──────────────┘
 ```
 
-| Component | Typical location | Main responsibility |
+| 组件 | 部署位置 | 主要职责 |
 | --- | --- | --- |
-| **Server** | A machine with a public entry point | Accepts user connections, maintains client sessions, routes requests according to bindings, and serves the admin console |
-| **Client** | A private or target network | Connects to the server proactively and accesses services on the local machine or its surrounding network |
-| **User client** | The user's device | Connects to the server with VLESS, VMess, or Shadowsocks |
+| **服务端** | 有公网入口的机器 | 接收用户连接，维护客户端会话，按绑定关系转发请求，并提供管理台 |
+| **客户端** | 内网或目标网络 | 主动连接服务端，访问本机或所在网络中的目标服务 |
+| **用户客户端** | 用户设备 | 使用 VLESS、VMess 或 Shadowsocks 连接服务端 |
 
-## Quick start
+## 快速开始
 
-The steps below use the example configuration included in the repository. For a minimal test, the server and client can run on the same machine. In a real deployment, place the client on a private-network machine that can reach the target service.
+下面用仓库内的示例配置启动一个最小环境。假设服务端和客户端运行在同一台机器上；实际部署时，把客户端放到能访问目标服务的内网机器即可。
 
-Alternatively, download prebuilt binaries from the [GitHub Releases page](https://github.com/hhy50/vnray/releases).
+或者下载构建好的二进制文件：[https://github.com/hhy50/vnray/releases](https://github.com/hhy50/vnray/releases)
 
-### 1. Prepare the binaries
+### 1. 准备程序
 
-Go `1.26+` is required. The server embeds the Vue admin console, so build the frontend assets before the first Go build:
+需要 Go `1.26+`。服务端会内置 Vue 管理台，因此首次构建前还需要构建前端资源：
 
 ```bash
 cd web/admin
@@ -82,118 +74,118 @@ npm run build
 cd ../..
 ```
 
-Then build the server and client from the repository root:
+然后在项目根目录编译服务端和客户端：
 
 ```bash
 go build -o vnserver ./cmd/server
 go build -o vnclient ./cmd/client
 ```
 
-> `web/admin/dist` contains the embedded admin console assets and is not committed to the repository by default. Run the frontend build again after cloning a fresh copy.
+> `web/admin/dist` 是服务端构建所需的内置资源目录，且默认不提交到仓库。拉取新副本后需要重新执行一次前端构建。
 
-If you prefer to run the source directly, complete the frontend build above first and then run:
+如果只想直接运行源码，也需要先完成上面的前端构建，然后执行：
 
 ```bash
 go run ./cmd/server -c configs/server.yaml
 go run ./cmd/client -c configs/client.yaml
 ```
 
-### 2. Start the server
+### 2. 启动服务端
 
-The example server configuration is [`configs/server.yaml`](configs/server.yaml). It uses:
+示例服务端配置位于 [`configs/server.yaml`](configs/server.yaml)，默认使用：
 
-- `9000` for client connections;
-- `8080` for the admin console;
-- `bindings.db` as the SQLite database;
-- `admin/admin` as the example admin credentials.
+- `9000`：客户端连接端口；
+- `8080`：管理台端口；
+- `bindings.db`：SQLite 数据库；
+- `admin/admin`：示例管理台账号。
 
-Start the server:
+启动服务端：
 
 ```bash
 ./vnserver -c configs/server.yaml
 ```
 
-### 3. Start the client
+### 3. 启动客户端
 
-Edit [`configs/client.yaml`](configs/client.yaml):
+编辑 [`configs/client.yaml`](configs/client.yaml)：
 
 ```yaml
 server:
-  addr: <public-server-address>:9000
-  auth_key: <same-key-as-the-server>
+  addr: <服务端公网地址>:9000
+  auth_key: <与服务端相同的密钥>
 ```
 
-The client's `auth_key` must match `server.auth.key` in the server configuration. Start the client on a machine that can reach the target service:
+示例配置中的 `auth_key` 必须与服务端 `server.auth.key` 一致。然后在能够访问目标服务的机器上启动客户端：
 
 ```bash
 ./vnclient -c configs/client.yaml
 ```
 
-The client maintains a long-lived connection and reconnects automatically after a disconnection by default.
+客户端默认会保持长连接，并在断线后自动重连。
 
-### 4. Open the admin console and create a user
+### 4. 打开管理台并创建用户
 
-Open:
+访问：
 
 ```text
-http://<server-address>:8080
+http://<服务端地址>:8080
 ```
 
-Sign in with the configured admin account, then:
+使用配置中的管理员账号登录，然后：
 
-1. Open **Clients** and confirm that the client is online.
-2. Open **Plugins**, enable the inbound protocol you need, and set its listening port.
-3. Open **Users**, create a user, and select the protocol and egress client.
-4. Copy the generated connection information and import it into the corresponding V2Ray or Shadowsocks client.
-5. If you need to expose a TCP service in the client's network, create a mapping in **Port Mappings**.
+1. 在**客户端**页面确认客户端已在线；
+2. 在**插件**页面启用需要的入站协议，并设置监听端口；
+3. 在**用户**页面创建用户，选择协议和出口客户端；
+4. 复制生成的连接信息，导入对应的 v2ray 或 Shadowsocks 客户端；
+5. 如果要访问客户端所在网络中的 TCP 服务，再到**端口映射**页面创建映射。
 
 <div align="center">
-  <img src="admin_client_tab.png" alt="vnray admin console showing connected clients" width="900">
+  <img src="admin_client_tab.png" alt="vnray 管理台中的在线客户端列表" width="900">
 </div>
 
-## Ports and protocols
+## 端口与协议
 
-| Purpose | Default port / configuration | Description |
+| 用途 | 默认端口 / 配置位置 | 说明 |
 | --- | --- | --- |
-| Client tunnel | `9000`, `server.listen` | The port that clients use to connect proactively; it does not directly carry user protocol traffic |
-| Admin console | `8080`, `admin.listen` | Manage clients, users, plugins, and port mappings after signing in |
-| VMess inbound | Configured in the admin console; defaults to `11120` | For VMess client connections |
-| VLESS inbound | Configured in the admin console; defaults to `11121` | For VLESS client connections |
-| Shadowsocks inbound | Configured in the admin console | For Shadowsocks client connections |
+| 客户端隧道 | `9000`，`server.listen` | 客户端主动连接服务端的端口，不直接承载用户协议 |
+| 管理台 | `8080`，`admin.listen` | 登录后管理客户端、用户、插件和端口映射 |
+| VMess 入站 | 管理台配置，默认预填 `11120` | 供 VMess 客户端连接 |
+| VLESS 入站 | 管理台配置，默认预填 `11121` | 供 VLESS 客户端连接 |
+| Shadowsocks 入站 | 管理台配置 | 供 Shadowsocks 客户端连接 |
 
-## Configuration files
+## 配置文件
 
-- [`configs/server.yaml`](configs/server.yaml): server listener, authentication key, admin console, storage, plugin, and logging settings.
-- [`configs/client.yaml`](configs/client.yaml): server address, authentication key, reconnect policy, access controls, and outbound routing settings.
+- [`configs/server.yaml`](configs/server.yaml)：服务端监听、认证密钥、管理台、存储、插件和日志配置。
+- [`configs/client.yaml`](configs/client.yaml)：客户端连接地址、认证密钥、重连策略、访问控制和出站路由配置。
 
-Command-line option:
+命令行参数：
 
 ```text
--c, --config  YAML configuration file; use built-in defaults when omitted
+-c, --config  配置文件路径（YAML）；不传时使用内置默认值
 ```
 
-The client also supports temporarily overriding the server address from the command line:
+客户端还支持用 `--server` 临时覆盖配置文件里的服务端地址：
 
 ```bash
-./vnclient -c configs/client.yaml --server <server-address>:9000
+./vnclient -c configs/client.yaml --server <服务端地址>:9000
 ```
 
-## Port mapping or protocol access?
+## 什么时候选端口映射，什么时候选协议接入？
 
-- **You want multiple users to connect with standard proxy clients**: create VLESS, VMess, or Shadowsocks users in the admin console.
-- **You only need to expose one internal TCP service**: use port mapping, for example to expose an internal SSH service on a public port.
-- **You want traffic to leave through a specific network**: bind the user to the corresponding client; one server can connect multiple clients.
+- **想让多个用户使用标准代理客户端接入**：在管理台创建 VLESS/VMess 或 Shadowsocks 用户。
+- **只想把一个内网 TCP 服务暴露出来**：使用端口映射，例如把内网 SSH 映射到公网端口。
+- **想让请求从某台特定网络出口发出**：创建用户后绑定对应客户端；同一服务端可以连接多台客户端。
 
-## Security
+## 安全提示
 
-The example configuration is intended for local verification and contains public default credentials and a shared key. Before exposing the service to the public Internet:
+示例配置仅用于本地验证，包含公开的默认凭据和共享密钥。将服务暴露到公网前，请至少完成以下操作：
 
-- Change the admin username and password.
-- Change the shared authentication key used by the server and clients.
-- Open only the ports you actually need and restrict access to the admin console.
-- Set reasonable bandwidth, concurrency, and client access limits for each user.
-- For production use, prefer VLESS with TLS and protect the certificates and private keys carefully.
+- 修改管理台账号和密码；
+- 修改服务端与客户端共享密钥；
+- 只开放实际需要的端口，并限制管理台的访问来源；
+- 为用户设置合理的带宽、并发和客户端访问范围；
+- 生产环境优先启用 VLESS TLS，并妥善保管证书与密钥。
 
-## Project status
+## 项目状态
 
-vnray is under active development. Protocols, configuration, and admin console APIs may change. Issues and improvement suggestions are welcome.
+vnray 仍在持续开发中，协议、配置和管理台接口可能发生变化。欢迎通过 Issue 反馈问题或提出改进建议。
