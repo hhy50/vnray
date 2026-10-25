@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/hhy50/vnray/admin"
@@ -47,6 +48,12 @@ func (h *Instance) Run() error {
 		if err := s.Start(ctx); err != nil {
 			return fmt.Errorf("start service %s: %w", s.Name(), err)
 		}
+	}
+
+	target := logging.OutputTarget()
+	logging.Info("server started successfully", "log", target)
+	if !logging.MirrorsConsole() {
+		fmt.Fprintf(os.Stdout, "vnray server started successfully, logs: %s\n", target)
 	}
 
 	<-h.ctx.Done()

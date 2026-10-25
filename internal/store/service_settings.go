@@ -2,15 +2,16 @@ package store
 
 import "time"
 
-// serviceSettingsRowID 是单行运行时配置的固定主键：整份配置一次读写，不需要按段分行。
-const serviceSettingsRowID = 1
+// ServiceSettingsInitializedKey 是"默认值已落库"的标记键：表里存在这一行即表示初始化
+// 做过，重启不再重刷，避免覆盖用户改过的值。
+const ServiceSettingsInitializedKey = "initialized"
 
-// serviceSettingsModel 是 vn_service_settings 表的 GORM 模型：单行保存管理台在线
-// 修改的服务端运行时配置（整份 JSON 文本，避免同类 KV 的定长列装不下）。
+// serviceSettingsModel 是 vn_service_settings 表的一行：一段运行时配置。
+// 整份配置按段拆成多行（public_host / heartbeat / vless …），写一段只动一行。
 type serviceSettingsModel struct {
-	ID        uint   `gorm:"primaryKey"`
-	Value     string `gorm:"column:setting_value;type:text"`
-	UpdatedAt time.Time
+	Key       string    `gorm:"column:setting_key;primaryKey;size:64"`
+	Value     string    `gorm:"column:setting_value;type:text"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
 
 func (serviceSettingsModel) TableName() string { return "vn_service_settings" }

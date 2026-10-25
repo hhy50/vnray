@@ -10,10 +10,12 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hhy50/vnray/admin"
+	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
@@ -277,6 +279,159 @@ func TestSetPortsWhileStopped(t *testing.T) {
 	}
 }
 
+// fakeTLSStore 是 VLESSTLSStore 的内存实现：断言 TLS 参数确实写进了服务端配置。
+type fakeTLSStore struct {
+	cur *config.VLESSTLS
+}
+
+func (f *fakeTLSStore) VLESSTLS() *config.VLESSTLS {
+	if f.cur == nil {
+		return nil
+	}
+	cp := *f.cur
+	return &cp
+}
+
+func (f *fakeTLSStore) SetVLESSTLS(t config.VLESSTLS) error {
+	f.cur = &t
+	return nil
+}
+
+// TestVlessTLSRoundTrip 覆盖 vless TLS 的签发、状态回读、持久化与关闭：启用后证书
+// PEM 写进服务端配置、Status 带指纹；关掉只改开关，证书材料保留（再次打开指纹不变）。
+func TestVlessTLSRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	tlsStore := &fakeTLSStore{}
+	mgr.SetVLESSTLS(tlsStore)
+	p, err := mgr.Get("v2ray")
+	if err != nil {
+		t.Fatalf("get v2ray: %v", err)
+	}
+	setter, ok := p.(plugin.TLSSetter)
+	if !ok {
+		t.Fatal("v2ray plugin should implement plugin.TLSSetter")
+	}
+	if err := p.Enable(ctx, map[string]string{
+		"vmess_port":    strconv.Itoa(freePort(t)),
+		"vless_port":    strconv.Itoa(freePort(t)),
+		"vless_tls":     "on",
+		"vless_tls_sni": "vpn.example.com",
+	}); err != nil {
+		t.Fatalf("enable with tls: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Disable(context.Background()) })
+
+	info := p.Status().TLS
+	if info == nil || !info.Enabled || !info.SelfSigned || info.ServerName != "vpn.example.com" {
+		t.Fatalf("tls info = %+v, want enabled self-signed vpn.example.com", info)
+	}
+	if info.Fingerprint == "" || info.NotAfter == "" {
+		t.Fatalf("tls info = %+v, want fingerprint and expiry", info)
+	}
+	stored := tlsStore.VLESSTLS()
+	if stored == nil || !stored.Enabled {
+		t.Fatalf("saved tls = %+v, want enabled", stored)
+	}
+	if !strings.Contains(stored.CertPEM, "BEGIN CERTIFICATE") ||
+		!strings.Contains(stored.KeyPEM, "BEGIN EC PRIVATE KEY") {
+		t.Fatal("cert and key should be saved in the service settings")
+	}
+	if pluginRow, _, _ := st.GetPlugin(ctx, "v2ray"); pluginRow.Config.Encode() != "" &&
+		strings.Contains(pluginRow.Config.Encode(), "cert_pem") {
+		t.Fatalf("plugin config should not carry tls: %s", pluginRow.Config.Encode())
+	}
+
+	if err := setter.SetTLS(ctx, false, ""); err != nil {
+		t.Fatalf("disable tls: %v", err)
+	}
+	if info := p.Status().TLS; info == nil || info.Enabled {
+		t.Fatalf("tls info after disable = %+v, want disabled", info)
+	}
+	off := tlsStore.VLESSTLS()
+	if off == nil || off.Enabled {
+		t.Fatalf("saved tls = %+v, want an explicit disabled record", off)
+	}
+	if off.CertPEM == "" {
+		t.Fatal("disabling tls should keep the cert so re-enabling keeps the fingerprint")
+	}
+}
+
+// TestVlessTLSDefaultsOn 新部署启用 v2ray 时不传 TLS 参数，vless 也应当是加密的。
+func TestVlessTLSDefaultsOn(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	tlsStore := &fakeTLSStore{}
+	mgr.SetVLESSTLS(tlsStore)
+	p, err := mgr.Get("v2ray")
+	if err != nil {
+		t.Fatalf("get v2ray: %v", err)
+	}
+	if err := p.Enable(ctx, map[string]string{
+		"vmess_port": strconv.Itoa(freePort(t)),
+		"vless_port": strconv.Itoa(freePort(t)),
+	}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Disable(context.Background()) })
+
+	info := p.Status().TLS
+	if info == nil || !info.Enabled || info.Fingerprint == "" {
+		t.Fatalf("tls info = %+v, want tls on by default", info)
+	}
+	if saved := tlsStore.VLESSTLS(); saved == nil || saved.CertPEM == "" {
+		t.Fatalf("saved tls = %+v, want a signed cert", saved)
+	}
+}
+
+// TestRestoreRenewsBrokenCert 配置里的证书坏了要在启动时重签并回写，否则每次启动都换证书。
+func TestRestoreRenewsBrokenCert(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	tlsStore := &fakeTLSStore{}
+	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	mgr.SetVLESSTLS(tlsStore)
+	p, err := mgr.Get("v2ray")
+	if err != nil {
+		t.Fatalf("get v2ray: %v", err)
+	}
+	if err := p.Enable(ctx, map[string]string{
+		"vmess_port": strconv.Itoa(freePort(t)),
+		"vless_port": strconv.Itoa(freePort(t)),
+		"vless_tls":  "on",
+	}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Disable(context.Background()) })
+
+	broken := tlsStore.VLESSTLS()
+	if broken == nil {
+		t.Fatal("tls should be configured after enable")
+	}
+	broken.CertPEM = "broken"
+	broken.KeyPEM = "broken"
+	if err := tlsStore.SetVLESSTLS(*broken); err != nil {
+		t.Fatalf("corrupt cert: %v", err)
+	}
+
+	restartedMgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	restartedMgr.SetVLESSTLS(tlsStore)
+	restarted, err := restartedMgr.Get("v2ray")
+	if err != nil {
+		t.Fatalf("get v2ray after restart: %v", err)
+	}
+	restarted.Restore(ctx)
+	t.Cleanup(func() { restarted.Stop() })
+	if info := restarted.Status().TLS; info == nil || info.Fingerprint == "" {
+		t.Fatalf("tls info after restore = %+v, want a renewed cert", info)
+	}
+	if got := tlsStore.VLESSTLS(); got.CertPEM == "broken" {
+		t.Fatal("renewed cert should be written back to the service settings")
+	}
+}
+
 // TestRestoreKeepsPortsWhileDisabled 回归：停用态的插件重启后仍要认得上次配的端口。
 // 丢了端口，管理台端口列会退回默认值，用户页的分享链接也跟着变。
 func TestRestoreKeepsPortsWhileDisabled(t *testing.T) {
@@ -351,9 +506,11 @@ func TestDisabledUserIsRejectedByInbound(t *testing.T) {
 		t.Fatalf("get v2ray: %v", err)
 	}
 	vmessPort, vlessPort := freePort(t), freePort(t)
+	// 这条用例只验认证，探测走明文：TLS 默认开启，必须显式关掉。
 	if err := p.Enable(context.Background(), map[string]string{
 		"vmess_port": strconv.Itoa(vmessPort),
 		"vless_port": strconv.Itoa(vlessPort),
+		"vless_tls":  "off",
 	}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}

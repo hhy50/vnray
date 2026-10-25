@@ -357,11 +357,11 @@ type Store interface {
 	// ListPlugins 返回全部插件的状态，按 Name 升序。
 	ListPlugins(ctx context.Context) ([]PluginState, error)
 
-	// GetServiceSettings 读取管理台保存的服务端运行时配置快照（整份 JSON 文本）；
-	// 不存在时 ok 为 false。
-	GetServiceSettings(ctx context.Context) (string, bool, error)
-	// SetServiceSettings 覆盖服务端运行时配置快照。
-	SetServiceSettings(ctx context.Context, raw string) error
+	// GetServiceSettings 读取全部运行时配置段：段名 → 原文（标量存原文，复合段存 JSON），
+	// 含 ServiceSettingsInitializedKey 这一行初始化标记。
+	GetServiceSettings(ctx context.Context) (map[string]string, error)
+	// SetServiceSettings 按段写入运行时配置：只动给定段，其它段保持原值；空值删除该段。
+	SetServiceSettings(ctx context.Context, values map[string]string) error
 
 	// AddUserTraffic 把一次增量累加进用户流量表（无则新建）；两个增量都为 0 时不写库。
 	AddUserTraffic(ctx context.Context, p Protocol, key string, up, down int64) error

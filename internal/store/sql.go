@@ -411,26 +411,44 @@ func (s *sqlStore) ListPlugins(ctx context.Context) ([]PluginState, error) {
 	return rows, nil
 }
 
-// GetServiceSettings 实现 Store：读取单行运行时配置快照。
-func (s *sqlStore) GetServiceSettings(ctx context.Context) (string, bool, error) {
-	var m serviceSettingsModel
-	err := s.db.WithContext(ctx).Where("id = ?", serviceSettingsRowID).First(&m).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", false, nil
+// GetServiceSettings 实现 Store：读取全部运行时配置段（段名 → 原文，含初始化标记行）。
+func (s *sqlStore) GetServiceSettings(ctx context.Context) (map[string]string, error) {
+	var rows []serviceSettingsModel
+	if err := s.db.WithContext(ctx).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("store: get service settings: %w", err)
 	}
-	if err != nil {
-		return "", false, fmt.Errorf("store: get service settings: %w", err)
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[row.Key] = row.Value
 	}
-	return m.Value, true, nil
+	return out, nil
 }
 
-// SetServiceSettings 实现 Store：按固定主键 upsert 单行运行时配置快照。
-func (s *sqlStore) SetServiceSettings(ctx context.Context, raw string) error {
-	m := serviceSettingsModel{ID: serviceSettingsRowID, Value: raw, UpdatedAt: time.Now()}
-	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"setting_value", "updated_at"}),
-	}).Create(&m).Error; err != nil {
+// SetServiceSettings 实现 Store：按段 upsert，其它段保持不动；值为空串表示删除该段。
+// 整批在一个事务里写，避免半套配置被读到。
+func (s *sqlStore) SetServiceSettings(ctx context.Context, values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for key, value := range values {
+			if value == "" {
+				if err := tx.Where("setting_key = ?", key).Delete(&serviceSettingsModel{}).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			row := serviceSettingsModel{Key: key, Value: value, UpdatedAt: time.Now()}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "setting_key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"setting_value", "updated_at"}),
+			}).Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("store: set service settings: %w", err)
 	}
 	return nil

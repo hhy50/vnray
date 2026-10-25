@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
@@ -36,13 +37,27 @@ type PortKV struct {
 	Port     int            `json:"port"`
 }
 
+// TLSInfo 是入站 TLS 的运行态快照（管理台展示与分享链接用）。证书材料存库，这里只给
+// 指纹与到期时间，私钥永不外露。
+type TLSInfo struct {
+	Protocol   store.Protocol `json:"protocol"`
+	Enabled    bool           `json:"enabled"`
+	ServerName string         `json:"server_name"`
+	// SelfSigned 表示证书由服务端自签，客户端必须关闭证书校验（链接带 allowInsecure）。
+	SelfSigned  bool   `json:"self_signed"`
+	NotAfter    string `json:"not_after,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
 // Status 是插件的运行状态快照。Ports 按插件声明的槽位顺序给出——管理台据此渲染端口列
-// 与启用对话框里的输入框（字段名 `<协议>_port`）。
+// 与启用对话框里的输入框（字段名 `<协议>_port`）。TLS 为该插件的 TLS 能力与当前参数，
+// nil 表示这个插件不支持 TLS。
 type Status struct {
 	Name    string            `json:"name"`
 	Enabled bool              `json:"enabled"`
 	Ports   []PortKV          `json:"ports,omitempty"`
 	Params  map[string]string `json:"params,omitempty"`
+	TLS     *TLSInfo          `json:"tls,omitempty"`
 }
 
 // Manager 持有全部插件并作为服务接入生命周期：Start 恢复已启用插件，Drain 全部停止。
@@ -73,6 +88,13 @@ func (m *Manager) SetTraffic(t *traffic.Meter) {
 	}
 }
 
+// SetVLESSTLS 注入 vless TLS 参数的读写口；须在 Start 之前调用。
+func (m *Manager) SetVLESSTLS(s VLESSTLSStore) {
+	if p, ok := m.plugins[pluginV2Ray].(*V2RayPlugin); ok {
+		p.tlsStore = s
+	}
+}
+
 // UserSyncer 是接收用户表变更的插件能力（v2ray 与 ss 实现它）：用户在用户页增删或
 // 启用/停用后，入站认证必须随之更新，否则会出现"表里有、连不上"或"删了还能连"的偏斜。
 type UserSyncer interface {
@@ -80,6 +102,7 @@ type UserSyncer interface {
 }
 
 var _ UserSyncer = (*V2RayPlugin)(nil)
+var _ TLSSetter = (*V2RayPlugin)(nil)
 var _ UserSyncer = (*SSPlugin)(nil)
 
 // MultiPortSetter 是支持运行中热切换多端口插件的各协议端口的能力（v2ray 实现它）：
@@ -92,6 +115,19 @@ type MultiPortSetter interface {
 // 对话框经它热切换；运行中的插件换端口时旧监听上的存量连接不受影响。
 type PortSetter interface {
 	SetPort(ctx context.Context, port int) error
+}
+
+// TLSSetter 是支持运行中切换 TLS 的插件能力（v2ray 的 vless 入站实现它）：管理台
+// 「TLS」对话框经它把明文入站切成 TLS，或切回明文。
+type TLSSetter interface {
+	SetTLS(ctx context.Context, enabled bool, serverName string) error
+}
+
+// VLESSTLSStore 是 vless TLS 参数的唯一读写口（装配层注入 serviceConfig）：参数存在
+// 服务端配置表里，插件表只留端口。Get 返回 nil 表示从未配置过。
+type VLESSTLSStore interface {
+	VLESSTLS() *config.VLESSTLS
+	SetVLESSTLS(config.VLESSTLS) error
 }
 
 // ValidateUserKey 校验用户密钥格式：vmess/vless 用户的密钥是 uuid，须为合法 UUID；

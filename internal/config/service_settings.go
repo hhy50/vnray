@@ -25,6 +25,24 @@ type ServiceSettings struct {
 	LogRotation          LogRotation     `json:"log_rotation"`
 	// ServerProxy 是服务端本机出口的运行期配置（原先在配置文件里，现由管理台管理）。
 	ServerProxy ServerProxySettings `json:"server_proxy"`
+	// VLESS 是 vless 入站的私有参数：证书材料随服务端配置存库，不占插件表。
+	VLESS VLESSSettings `json:"vless"`
+}
+
+// VLESSSettings 是 vless 入站的私有参数。
+type VLESSSettings struct {
+	TLS *VLESSTLS `json:"tls,omitempty"`
+}
+
+// VLESSTLS 是 vless 入站的 TLS 参数。nil 表示从未配置过（与 Enabled=false 的
+// "显式关闭"不是一回事），因此证书材料在关闭后仍会保留。
+type VLESSTLS struct {
+	Enabled bool `json:"enabled"`
+	// ServerName 是自签证书覆盖的域名（客户端 SNI 用它）；空取内置默认名。
+	ServerName string `json:"server_name,omitempty"`
+	// CertPEM/KeyPEM 是自签证书与私钥的 PEM 文本。
+	CertPEM string `json:"cert_pem,omitempty"`
+	KeyPEM  string `json:"key_pem,omitempty"`
 }
 
 // ServerProxySettings 是服务端本机出口（保留名 server:self）的运行期配置：
@@ -165,127 +183,91 @@ func (l LogRotation) Validate() error {
 	return nil
 }
 
-// EncodeServiceSettings 序列化整份运行时配置（时长以 "5s" 文本表达）。
-func EncodeServiceSettings(s ServiceSettings) (string, error) {
-	b, err := json.Marshal(s)
+// 运行时配置在 vn_service_settings 里的段名（setting_key）：标量段存原文，复合段存 JSON。
+const (
+	SettingPublicHost   = "public_host"
+	SettingHeartbeat    = "heartbeat"
+	SettingLogLevel     = "log_level"
+	SettingTrafficFlush = "traffic_flush_interval"
+	SettingSession      = "session"
+	SettingLogRotation  = "log_rotation"
+	SettingServerProxy  = "server_proxy"
+	SettingVLESS        = "vless"
+)
+
+// EncodeServiceSettings 把整份运行时配置摊成按段的 KV。
+func EncodeServiceSettings(s ServiceSettings) (map[string]string, error) {
+	out := map[string]string{
+		SettingPublicHost:   s.PublicHost,
+		SettingLogLevel:     s.LogLevel,
+		SettingTrafficFlush: s.TrafficFlushInterval.String(),
+	}
+	sections := map[string]any{
+		SettingHeartbeat:   s.Heartbeat,
+		SettingSession:     s.Session,
+		SettingLogRotation: s.LogRotation,
+		SettingServerProxy: s.ServerProxy,
+		SettingVLESS:       s.VLESS,
+	}
+	for key, section := range sections {
+		b, err := json.Marshal(section)
+		if err != nil {
+			return nil, fmt.Errorf("encode service setting %s: %w", key, err)
+		}
+		out[key] = string(b)
+	}
+	return out, nil
+}
+
+// DecodeServiceSettings 把按段存放的 KV 覆盖到 base 上：只覆盖出现过的段，缺段保留基线；
+// 未知段忽略（留给版本回滚）。任何一段解析失败都返回错误。
+func DecodeServiceSettings(kv map[string]string, base ServiceSettings) (ServiceSettings, error) {
+	out := base
+	for key, raw := range kv {
+		var err error
+		switch key {
+		case SettingPublicHost:
+			out.PublicHost = raw
+		case SettingLogLevel:
+			out.LogLevel = raw
+		case SettingTrafficFlush:
+			out.TrafficFlushInterval, err = parseDurationText(key, raw)
+		case SettingHeartbeat:
+			err = json.Unmarshal([]byte(raw), &out.Heartbeat)
+		case SettingSession:
+			err = json.Unmarshal([]byte(raw), &out.Session)
+		case SettingLogRotation:
+			err = json.Unmarshal([]byte(raw), &out.LogRotation)
+		case SettingServerProxy:
+			err = json.Unmarshal([]byte(raw), &out.ServerProxy)
+		case SettingVLESS:
+			err = json.Unmarshal([]byte(raw), &out.VLESS)
+		default:
+			continue
+		}
+		if err != nil {
+			return ServiceSettings{}, fmt.Errorf("decode service setting %s: %w", key, err)
+		}
+	}
+	return out, nil
+}
+
+// EncodeVLESSSettings 把 vless 段编码成落库值（插件只写这一段，不动其它段）。
+func EncodeVLESSSettings(v VLESSSettings) (string, error) {
+	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("encode service settings: %w", err)
+		return "", fmt.Errorf("encode service setting %s: %w", SettingVLESS, err)
 	}
 	return string(b), nil
 }
 
-// serviceSettingsPatch 是解码用的指针视图：只有出现过的键才覆盖 base，缺键保留默认，
-// 保证后续给 ServiceSettings 新增字段时，库里的旧记录不会把新字段清零。
-type serviceSettingsPatch struct {
-	PublicHost           *string           `json:"public_host"`
-	Heartbeat            *heartbeatPatch   `json:"heartbeat"`
-	LogLevel             *string           `json:"log_level"`
-	TrafficFlushInterval *string           `json:"traffic_flush_interval"`
-	Session              *sessionPatch     `json:"session"`
-	LogRotation          *logRotationPatch `json:"log_rotation"`
-	ServerProxy          *serverProxyPatch `json:"server_proxy"`
-}
-
-type heartbeatPatch struct {
-	Enabled  *bool   `json:"enabled"`
-	Interval *string `json:"interval"`
-	Timeout  *string `json:"timeout"`
-}
-
-type sessionPatch struct {
-	KeepAliveInterval *string `json:"keepalive_interval"`
-	KeepAliveTimeout  *string `json:"keepalive_timeout"`
-	MaxStreamWindow   *int    `json:"max_stream_window"`
-	AcceptBacklog     *int    `json:"accept_backlog"`
-	StreamOpenTimeout *string `json:"stream_open_timeout"`
-}
-
-type logRotationPatch struct {
-	MaxSizeMB  *int `json:"max_size_mb"`
-	MaxBackups *int `json:"max_backups"`
-	MaxAgeDays *int `json:"max_age_days"`
-}
-
-type serverProxyPatch struct {
-	Enabled *bool    `json:"enabled"`
-	Public  *string  `json:"public"`
-	Private *string  `json:"private"`
-	Routing *Routing `json:"routing"`
-}
-
-// DecodeServiceSettings 把管理台保存的 JSON 快照覆盖到 base 上；raw 为空时返回 base。
-func DecodeServiceSettings(raw string, base ServiceSettings) (ServiceSettings, error) {
-	if strings.TrimSpace(raw) == "" {
-		return base, nil
+// parseDurationText 解析时长段（库里存 "10s" 这样的原文）。
+func parseDurationText(key, raw string) (Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("decode service setting %s: %w", key, err)
 	}
-	var p serviceSettingsPatch
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return ServiceSettings{}, fmt.Errorf("decode service settings: %w", err)
-	}
-	out := base
-	if p.PublicHost != nil {
-		out.PublicHost = *p.PublicHost
-	}
-	if p.LogLevel != nil {
-		out.LogLevel = *p.LogLevel
-	}
-	if p.Heartbeat != nil {
-		if p.Heartbeat.Enabled != nil {
-			out.Heartbeat.Enabled = *p.Heartbeat.Enabled
-		}
-		if err := overlayDuration(&out.Heartbeat.Interval, p.Heartbeat.Interval); err != nil {
-			return ServiceSettings{}, err
-		}
-		if err := overlayDuration(&out.Heartbeat.Timeout, p.Heartbeat.Timeout); err != nil {
-			return ServiceSettings{}, err
-		}
-	}
-	if err := overlayDuration(&out.TrafficFlushInterval, p.TrafficFlushInterval); err != nil {
-		return ServiceSettings{}, err
-	}
-	if p.Session != nil {
-		if err := overlayDuration(&out.Session.KeepAliveInterval, p.Session.KeepAliveInterval); err != nil {
-			return ServiceSettings{}, err
-		}
-		if err := overlayDuration(&out.Session.KeepAliveTimeout, p.Session.KeepAliveTimeout); err != nil {
-			return ServiceSettings{}, err
-		}
-		if err := overlayDuration(&out.Session.StreamOpenTimeout, p.Session.StreamOpenTimeout); err != nil {
-			return ServiceSettings{}, err
-		}
-		if p.Session.MaxStreamWindow != nil {
-			out.Session.MaxStreamWindow = *p.Session.MaxStreamWindow
-		}
-		if p.Session.AcceptBacklog != nil {
-			out.Session.AcceptBacklog = *p.Session.AcceptBacklog
-		}
-	}
-	if p.LogRotation != nil {
-		if p.LogRotation.MaxSizeMB != nil {
-			out.LogRotation.MaxSizeMB = *p.LogRotation.MaxSizeMB
-		}
-		if p.LogRotation.MaxBackups != nil {
-			out.LogRotation.MaxBackups = *p.LogRotation.MaxBackups
-		}
-		if p.LogRotation.MaxAgeDays != nil {
-			out.LogRotation.MaxAgeDays = *p.LogRotation.MaxAgeDays
-		}
-	}
-	if p.ServerProxy != nil {
-		if p.ServerProxy.Enabled != nil {
-			out.ServerProxy.Enabled = *p.ServerProxy.Enabled
-		}
-		if p.ServerProxy.Public != nil {
-			out.ServerProxy.Public = *p.ServerProxy.Public
-		}
-		if p.ServerProxy.Private != nil {
-			out.ServerProxy.Private = *p.ServerProxy.Private
-		}
-		if p.ServerProxy.Routing != nil {
-			out.ServerProxy.Routing = *p.ServerProxy.Routing
-		}
-	}
-	return out, nil
+	return Duration(d), nil
 }
 
 // EncodeRoutingText 把路由配置渲染成 YAML 文本（管理台文本框用）。

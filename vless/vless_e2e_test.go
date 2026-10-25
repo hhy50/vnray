@@ -6,6 +6,7 @@ package vless_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -46,16 +47,28 @@ func testStore(t *testing.T) store.Store {
 // TestVlessPluginEndToEnd 跑 TCP 直达链路。
 func TestVlessPluginEndToEnd(t *testing.T) {
 	t.Parallel()
-	runVlessPluginEndToEnd(t, false)
+	runVlessPluginEndToEnd(t, false, false)
 }
 
 // TestVlessPluginMuxEndToEnd 跑 mux 主连接链路：一条连接复用两条子连接。
 func TestVlessPluginMuxEndToEnd(t *testing.T) {
 	t.Parallel()
-	runVlessPluginEndToEnd(t, true)
+	runVlessPluginEndToEnd(t, true, false)
 }
 
-func runVlessPluginEndToEnd(t *testing.T, mux bool) {
+// TestVlessPluginTLSEndToEnd 跑 TLS 链路：自签证书 + 客户端跳过校验，数据面与明文一致。
+func TestVlessPluginTLSEndToEnd(t *testing.T) {
+	t.Parallel()
+	runVlessPluginEndToEnd(t, false, true)
+}
+
+// TestVlessPluginTLSMuxEndToEnd 是实际部署最常见的一种：TLS 上的 mux 主连接。
+func TestVlessPluginTLSMuxEndToEnd(t *testing.T) {
+	t.Parallel()
+	runVlessPluginEndToEnd(t, true, true)
+}
+
+func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("hello-from-origin"))
 	}))
@@ -119,10 +132,17 @@ func runVlessPluginEndToEnd(t *testing.T, mux bool) {
 		t.Fatalf("get plugin: %v", err)
 	}
 	vmessPort, vlessPort := freePort(t), freePort(t)
-	if err := p.Enable(context.Background(), map[string]string{
+	// TLS 现在是默认开启的，明文链路必须显式关掉。
+	enableParams := map[string]string{
 		"vmess_port": strconv.Itoa(vmessPort),
 		"vless_port": strconv.Itoa(vlessPort),
-	}); err != nil {
+		"vless_tls":  "off",
+	}
+	if useTLS {
+		enableParams["vless_tls"] = "on"
+		enableParams["vless_tls_sni"] = "vpn.example.com"
+	}
+	if err := p.Enable(context.Background(), enableParams); err != nil {
 		t.Fatalf("enable v2ray: %v", err)
 	}
 	// vless 用户以 protocol=vless 登记：该协议只进 vless 入站的验证器。
@@ -133,10 +153,7 @@ func runVlessPluginEndToEnd(t *testing.T, mux bool) {
 		t.Fatalf("register uuid: %v", err)
 	}
 
-	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(vlessPort))
-	if err != nil {
-		t.Fatalf("dial vless: %v", err)
-	}
+	conn := dialVless(t, vlessPort, useTLS)
 	defer func() { _ = conn.Close() }()
 
 	if mux {
@@ -144,6 +161,29 @@ func runVlessPluginEndToEnd(t *testing.T, mux bool) {
 		return
 	}
 	runSingleConnection(t, conn, host, originPort)
+}
+
+// dialVless 连接 vless 入站；useTLS 时先完成 TLS 握手（自签证书故跳过校验，
+// 与客户端 allowInsecure 等价）。
+func dialVless(t *testing.T, port int, useTLS bool) net.Conn {
+	t.Helper()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if !useTLS {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial vless: %v", err)
+		}
+		return conn
+	}
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         "vpn.example.com",
+		NextProtos:         []string{"h2", "http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("tls dial vless: %v", err)
+	}
+	return conn
 }
 
 // vlessRequest 按 VLESS 头布局拼请求头；command 为 Mux 时不带地址段。

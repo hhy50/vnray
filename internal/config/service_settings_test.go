@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestServiceSettingsRoundTrip 断言整份运行时配置经 JSON 编解码后不丢字段。
+// TestServiceSettingsRoundTrip 断言整份运行时配置按段摊成 KV 后能原样解回来。
 func TestServiceSettingsRoundTrip(t *testing.T) {
 	in := DefaultServiceSettings()
 	in.PublicHost = "vpn.example.com"
@@ -19,12 +19,19 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	in.Session.AcceptBacklog = 128
 	in.Session.StreamOpenTimeout = Duration(60 * time.Second)
 	in.LogRotation = LogRotation{MaxSizeMB: 100, MaxBackups: 5, MaxAgeDays: 7}
+	in.VLESS.TLS = &VLESSTLS{Enabled: true, ServerName: "node.example.com", CertPEM: "CERT", KeyPEM: "KEY"}
 
-	raw, err := EncodeServiceSettings(in)
+	kv, err := EncodeServiceSettings(in)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	out, err := DecodeServiceSettings(raw, DefaultServiceSettings())
+	if len(kv) != 8 {
+		t.Fatalf("kv has %d sections, want 8: %v", len(kv), kv)
+	}
+	if kv[SettingPublicHost] != "vpn.example.com" || kv[SettingTrafficFlush] != "3s" {
+		t.Fatalf("scalar sections should be stored as plain text: %v", kv)
+	}
+	out, err := DecodeServiceSettings(kv, DefaultServiceSettings())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -33,11 +40,11 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDecodeServiceSettingsKeepsDefaults 断言缺键保留基线：后续给值对象加字段时，
-// 库里旧记录不会把新字段清零。
+// TestDecodeServiceSettingsKeepsDefaults 断言缺段保留基线：后续给值对象加字段时，
+// 库里旧记录不会把新字段清零；未知段忽略，坏值报错。
 func TestDecodeServiceSettingsKeepsDefaults(t *testing.T) {
 	base := DefaultServiceSettings()
-	out, err := DecodeServiceSettings(`{"log_level":"warn"}`, base)
+	out, err := DecodeServiceSettings(map[string]string{SettingLogLevel: "warn"}, base)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -46,12 +53,20 @@ func TestDecodeServiceSettingsKeepsDefaults(t *testing.T) {
 	}
 	if out.Heartbeat != base.Heartbeat || out.Session != base.Session || out.LogRotation != base.LogRotation ||
 		!reflect.DeepEqual(out.ServerProxy, base.ServerProxy) {
-		t.Fatalf("missing keys were not kept: %+v", out)
+		t.Fatalf("missing sections were not kept: %+v", out)
 	}
 
-	// 空串直接用基线。
-	if got, err := DecodeServiceSettings("  ", base); err != nil || !reflect.DeepEqual(got, base) {
-		t.Fatalf("empty raw = %+v, %v; want the base unchanged", got, err)
+	if got, err := DecodeServiceSettings(nil, base); err != nil || !reflect.DeepEqual(got, base) {
+		t.Fatalf("empty kv = %+v, %v; want the base unchanged", got, err)
+	}
+	if got, err := DecodeServiceSettings(map[string]string{"future_section": "x"}, base); err != nil || !reflect.DeepEqual(got, base) {
+		t.Fatalf("unknown section should be ignored, got %+v err %v", got, err)
+	}
+	if _, err := DecodeServiceSettings(map[string]string{SettingHeartbeat: "{oops"}, base); err == nil {
+		t.Fatal("broken section must be rejected")
+	}
+	if _, err := DecodeServiceSettings(map[string]string{SettingTrafficFlush: "soon"}, base); err == nil {
+		t.Fatal("broken duration must be rejected")
 	}
 }
 

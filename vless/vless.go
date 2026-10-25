@@ -1,6 +1,7 @@
 package vless
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -122,6 +123,15 @@ func (s *Server) Serve(ln net.Listener) error {
 			s.handle(conn)
 		})
 	}
+}
+
+// ServeTLS 在监听器外包一层 TLS 后交给 Serve；cfg 为 nil 时等价于 Serve。
+// 握手失败只体现为单条连接的读错误，不影响监听器。
+func (s *Server) ServeTLS(ln net.Listener, cfg *tls.Config) error {
+	if cfg == nil {
+		return s.Serve(ln)
+	}
+	return s.Serve(tls.NewListener(ln, cfg))
 }
 
 // Close 停止接受新连接；已在处理的连接由各自协程收尾。

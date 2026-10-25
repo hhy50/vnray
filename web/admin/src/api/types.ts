@@ -145,6 +145,15 @@ export interface PortSlot {
   value: number
 }
 
+export interface PluginTLS {
+  protocol: string
+  enabled: boolean
+  server_name: string
+  self_signed: boolean
+  not_after?: string
+  fingerprint?: string
+}
+
 export interface Plugin {
   name: string
   enabled: boolean
@@ -152,6 +161,7 @@ export interface Plugin {
   params: Record<string, string>
   slots: PortSlot[]
   accepts_users: boolean
+  tls?: PluginTLS
 }
 
 export interface PluginList {

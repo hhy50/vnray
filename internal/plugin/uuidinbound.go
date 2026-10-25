@@ -6,6 +6,7 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 
@@ -39,11 +40,15 @@ func (in *uuidInbound) effectivePort(def int) int {
 	return def
 }
 
-// start 在给定端口起监听；调用方必须持插件锁。
-func (in *uuidInbound) start(port int) error {
+// start 在给定端口起监听；tlsCfg 非 nil 时在监听器外再包一层 TLS（vless 用）。
+// 调用方必须持插件锁。
+func (in *uuidInbound) start(port int, tlsCfg *tls.Config) error {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("plugin: %s listen :%d: %w", in.proto, port, err)
+	}
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
 	}
 	// 监听器的生命周期只由 stop 管理，不随调用方 ctx 消亡：管理台的 Enable/SetPorts
 	// 带的是 HTTP 请求 ctx，请求返回即取消，绑上去会把刚起的监听立刻关掉。
@@ -52,7 +57,7 @@ func (in *uuidInbound) start(port int) error {
 	in.listener = ln
 	in.port = port
 	in.running = true
-	logging.Info("v2ray: inbound started", "protocol", in.proto, "port", port)
+	logging.Info("v2ray: inbound started", "protocol", in.proto, "port", port, "tls", tlsCfg != nil)
 
 	name := "plugin.v2ray." + string(in.proto)
 	routine.Go(name+".watch", func() {

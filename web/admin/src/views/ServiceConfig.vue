@@ -118,7 +118,7 @@ onMounted(load)
 
       <el-card shadow="never" class="config-card">
         <template #header>
-          <div class="card-title">日志与记账</div>
+          <div class="card-title">日志</div>
         </template>
         <div class="form-row">
           <el-form-item label="全局日志级别">
@@ -151,7 +151,7 @@ onMounted(load)
 
       <el-card shadow="never" class="config-card">
         <template #header>
-          <div class="card-title">多路复用会话参数</div>
+          <div class="card-title">多路复用</div>
         </template>
         <el-alert
           type="warning"

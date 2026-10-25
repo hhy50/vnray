@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -30,6 +31,8 @@ type dynamicWriter struct {
 	closer  io.Closer
 	file    string
 	console bool
+	// stream 是标准流输出时的去向（"stdout"/"stderr"），file 非空时不参与。
+	stream string
 }
 
 func (d *dynamicWriter) Write(p []byte) (int, error) {
@@ -39,10 +42,10 @@ func (d *dynamicWriter) Write(p []byte) (int, error) {
 }
 
 // swap 替换 sink 并释放旧的（标准输出没有 closer，保持原状）。
-func (d *dynamicWriter) swap(w io.Writer, closer io.Closer, file string, console bool) {
+func (d *dynamicWriter) swap(w io.Writer, closer io.Closer, file string, console bool, stream string) {
 	d.mu.Lock()
 	old := d.closer
-	d.w, d.closer, d.file, d.console = w, closer, file, console
+	d.w, d.closer, d.file, d.console, d.stream = w, closer, file, console, stream
 	d.mu.Unlock()
 	if old != nil {
 		_ = old.Close()
@@ -88,9 +91,9 @@ func Init(cfg *config.Log) error {
 	d := out.Load()
 	if cfg.IsStdOutput() {
 		if cfg.Output == "stdout" {
-			d.swap(os.Stdout, nil, "", false)
+			d.swap(os.Stdout, nil, "", false, "stdout")
 		} else {
-			d.swap(os.Stderr, nil, "", false)
+			d.swap(os.Stderr, nil, "", false, "stderr")
 		}
 		return nil
 	}
@@ -100,8 +103,35 @@ func Init(cfg *config.Log) error {
 		MaxAgeDays: config.DefaultLogRotateMaxAgeDays,
 	}
 	w, closer := newFileSink(cfg.Output, rotate, cfg.Console)
-	d.swap(w, closer, cfg.Output, cfg.Console)
+	d.swap(w, closer, cfg.Output, cfg.Console, "")
 	return nil
+}
+
+// OutputTarget 返回日志的实际去向，供启动横幅与排障使用：标准流返回 "stderr"/"stdout"，
+// 文件输出返回绝对路径（相对路径按进程工作目录展开）。
+func OutputTarget() string {
+	d := out.Load()
+	d.mu.RLock()
+	file, stream := d.file, d.stream
+	d.mu.RUnlock()
+	if file == "" {
+		if stream == "" {
+			return "stderr"
+		}
+		return stream
+	}
+	if abs, err := filepath.Abs(file); err == nil {
+		return abs
+	}
+	return file
+}
+
+// MirrorsConsole 报告日志是否同时出现在终端：标准流输出，或文件输出且开了 console 镜像。
+func MirrorsConsole() bool {
+	d := out.Load()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.file == "" || d.console
 }
 
 // SetLevel 热更新全局日志级别；会话级（Scoped）日志器有各自门槛，不受影响。
@@ -124,7 +154,7 @@ func SetLogRotation(rotate config.LogRotation) error {
 		return errors.New("logging: log output is not a file, rotation settings have no effect")
 	}
 	w, closer := newFileSink(path, rotate, console)
-	d.swap(w, closer, path, console)
+	d.swap(w, closer, path, console, "")
 	return nil
 }
 

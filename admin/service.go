@@ -164,6 +164,7 @@ func (s *AdminService) opsRoutes() []opsRoute {
 		{"POST", "api/plugins/{name}/start", s.apiPluginStart},
 		{"POST", "api/plugins/{name}/stop", s.apiPluginStop},
 		{"PUT", "api/plugins/{name}/port", s.apiPluginPort},
+		{"PUT", "api/plugins/{name}/tls", s.apiPluginTLS},
 
 		{"GET", "api/keys", s.apiKeys},
 		{"POST", "api/keys", s.apiKeySave},

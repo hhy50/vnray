@@ -214,6 +214,7 @@ type apiPluginDTO struct {
 	Params       map[string]string `json:"params"`
 	Slots        []apiPortSlot     `json:"slots"`
 	AcceptsUsers bool              `json:"accepts_users"`
+	TLS          *plugin.TLSInfo   `json:"tls,omitempty"`
 }
 
 // apiPlugins 返回插件状态、端口槽位与是否托管账号。
@@ -227,6 +228,7 @@ func (s *AdminService) apiPlugins(w http.ResponseWriter, r *http.Request) {
 			Ports:   st.Ports,
 			Params:  st.Params,
 			Slots:   portSlots(st.Ports, serverPort),
+			TLS:     st.TLS,
 		}
 		if dto.Ports == nil {
 			dto.Ports = []plugin.PortKV{}
@@ -263,6 +265,11 @@ func (s *AdminService) apiPluginStop(w http.ResponseWriter, r *http.Request) {
 // apiPluginPort 运行中热切换端口。
 func (s *AdminService) apiPluginPort(w http.ResponseWriter, r *http.Request) {
 	s.apiPluginAction(w, r, "port")
+}
+
+// apiPluginTLS 运行中切换 TLS（目前只有 vless 入站支持）。
+func (s *AdminService) apiPluginTLS(w http.ResponseWriter, r *http.Request) {
+	s.apiPluginAction(w, r, "tls")
 }
 
 func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -340,6 +347,24 @@ func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, a
 			return
 		}
 		logging.Info("admin: plugin port updated", "plugin", name, "port", port, "actor", actorOf(r))
+	case "tls":
+		setter, ok := p.(plugin.TLSSetter)
+		if !ok {
+			apiFail(w, http.StatusBadRequest, "该插件不支持 TLS")
+			return
+		}
+		enabled, err := parseOnOff(in.Params["enabled"])
+		if err != nil {
+			apiFail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		sni := strings.TrimSpace(in.Params["sni"])
+		if err := setter.SetTLS(ctx, enabled, sni); err != nil {
+			logging.Error("admin: plugin set tls failed", "plugin", name, "enabled", enabled, "sni", sni, "err", err)
+			apiFail(w, http.StatusBadRequest, "配置 TLS 失败: "+err.Error())
+			return
+		}
+		logging.Info("admin: plugin tls updated", "plugin", name, "enabled", enabled, "sni", sni, "actor", actorOf(r))
 	default:
 		apiFail(w, http.StatusBadRequest, "不支持的动作")
 		return
@@ -366,6 +391,18 @@ func portsFromParams(params map[string]string) (map[store.Protocol]int, error) {
 		out[p] = port
 	}
 	return out, nil
+}
+
+// parseOnOff 解析管理台开关字段：接受 on/off、true/false、1/0，空串视为关闭；其余
+// 值报错而不是静默取默认——配置写错要让人看见。
+func parseOnOff(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on", "true", "1":
+		return true, nil
+	case "off", "false", "0", "":
+		return false, nil
+	}
+	return false, fmt.Errorf("开关值 %q 无法识别（用 on/off）", raw)
 }
 
 // --- 认证密钥 ---

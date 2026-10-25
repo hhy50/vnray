@@ -27,7 +27,7 @@ type PluginState struct {
 func (PluginState) TableName() string { return "vn_plugin" }
 
 // PluginConfig 是插件私有参数的 JSON 结构：Ports 按协议名索引各自的监听端口，
-// Method 是 ss 的加密方法（其余插件不用）。
+// Method 是 ss 的加密方法。协议级参数（如 vless 的 TLS）不放这里，见 config.ServiceSettings。
 type PluginConfig struct {
 	Ports  map[Protocol]int `json:"ports,omitempty"`
 	Method string           `json:"method,omitempty"`

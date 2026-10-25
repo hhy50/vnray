@@ -146,6 +146,8 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	meter.SetFlushInterval(settings.TrafficFlushInterval.Std())
 	applyStartupLogging(cfg, settings)
 	runtimeCfg := newServiceConfig(st, svc, meter, exits, bindings, settings)
+	// vless 的 TLS 参数存在服务端配置表里，插件经这一个写口读写。
+	plugins.SetVLESSTLS(runtimeCfg)
 	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg)
 	if err != nil {
 		return nil, err

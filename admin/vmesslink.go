@@ -31,11 +31,11 @@ type vmessShare struct {
 	TLS  string `json:"tls"`
 }
 
-// vmessLink 把一条 v2ray 用户记录编码成 vmess:// 链接。本服务的入站是纯 TCP 上的
-// VMess AEAD（alterId=0，无 TLS/WS），传输相关字段因此全为空值。
-func vmessLink(host string, port int, uuid, name string) string {
+// vmessLink 把一条 v2ray 用户记录编码成 vmess:// 链接。本服务的 vmess 入站是纯 TCP
+// 上的 VMess AEAD（alterId=0，无 TLS/WS），传输相关字段因此全为空值。
+func vmessLink(t shareTarget, uuid, name string) string {
 	payload := vmessShare{
-		V: "2", PS: name, Add: host, Port: strconv.Itoa(port),
+		V: "2", PS: name, Add: t.Host, Port: strconv.Itoa(t.Port),
 		ID: uuid, Aid: "0", Scy: "auto", Net: "tcp", Type: "none",
 	}
 	raw, err := json.Marshal(payload)
@@ -84,27 +84,57 @@ func bareHost(raw string) string {
 	return strings.Trim(h, "[]")
 }
 
-// vlessLink 把一条 vless 用户记录编码成 vless:// 链接（各家客户端通用）。本服务的
-// 入站是纯 TCP 上的 VLESS（无 TLS/WS），传输参数因此取 none/tcp。
-func vlessLink(host string, port int, uuid, name string) string {
+// shareTLS 是分享链接的 TLS 参数；nil 表示明文入站。
+type shareTLS struct {
+	// ServerName 是链接里的 sni；空则退回分享主机。
+	ServerName string
+	// SelfSigned 表示证书自签，链接需带 allowInsecure=1，否则客户端直接握手失败。
+	SelfSigned bool
+}
+
+// shareTarget 是一条分享链接的入站目标：服务器地址、端口与（vless 的）TLS 参数。
+type shareTarget struct {
+	Host string
+	Port int
+	TLS  *shareTLS
+}
+
+// vlessLink 把一条 vless 用户记录编码成 vless:// 链接（各家客户端通用）。TLS 参数
+// 与 v2ray 客户端的默认值对齐：alpn=h2,http/1.1 是服务端 tls.Config 的默认 ALPN，
+// fp=chrome 走 uTLS 指纹，自签证书另加 allowInsecure=1。
+func vlessLink(t shareTarget, uuid, name string) string {
 	q := url.Values{}
 	q.Set("encryption", "none")
 	q.Set("type", "tcp")
-	q.Set("security", "none")
-	return "vless://" + uuid + "@" + net.JoinHostPort(host, strconv.Itoa(port)) +
+	if t.TLS == nil {
+		q.Set("security", "none")
+	} else {
+		sni := t.TLS.ServerName
+		if sni == "" {
+			sni = t.Host
+		}
+		q.Set("security", "tls")
+		q.Set("sni", sni)
+		q.Set("fp", "chrome")
+		q.Set("alpn", "h2,http/1.1")
+		if t.TLS.SelfSigned {
+			q.Set("allowInsecure", "1")
+		}
+	}
+	return "vless://" + uuid + "@" + net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) +
 		"?" + q.Encode() + "#" + url.QueryEscape(name)
 }
 
 // linkForPort 按协议生成分享链接；端口为 0（插件未启用或未配该协议）时返回空串。
-func linkForPort(port int, host, uuid string, vmess bool) string {
-	if port <= 0 {
+func linkForPort(t shareTarget, uuid string, vmess bool) string {
+	if t.Port <= 0 {
 		return ""
 	}
 	name := shareName(uuid)
 	if vmess {
-		return vmessLink(host, port, uuid, name)
+		return vmessLink(t, uuid, name)
 	}
-	return vlessLink(host, port, uuid, name)
+	return vlessLink(t, uuid, name)
 }
 
 // v2rayPorts 返回 v2ray 插件两个入站的当前端口（vmess / vless）；插件未装配或该协议
@@ -126,4 +156,20 @@ func (s *AdminService) v2rayPorts() (vmessPort, vlessPort int) {
 		}
 	}
 	return vmessPort, vlessPort
+}
+
+// vlessShareTLS 返回 vless 入站的 TLS 链接参数；未启用 TLS 时返回 nil（链接走明文）。
+func (s *AdminService) vlessShareTLS() *shareTLS {
+	if s.opts.Plugins == nil {
+		return nil
+	}
+	p, err := s.opts.Plugins.Get("v2ray")
+	if err != nil {
+		return nil
+	}
+	info := p.Status().TLS
+	if info == nil || !info.Enabled {
+		return nil
+	}
+	return &shareTLS{ServerName: info.ServerName, SelfSigned: info.SelfSigned}
 }

@@ -493,6 +493,7 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 	userTraffic, _ := s.trafficMaps()
 	shareHost := s.shareHost(r)
 	vmessPort, vlessPort := s.v2rayPorts()
+	vlessTLS := s.vlessShareTLS()
 
 	rows := make([]apiUserDTO, 0, len(bindings))
 	for _, b := range bindings {
@@ -521,9 +522,10 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		if row.Shareable && shareHost != "" {
 			if b.Protocol == store.ProtocolVMess {
-				row.ShareLink = linkForPort(vmessPort, shareHost, b.UserKey, true)
+				row.ShareLink = linkForPort(shareTarget{Host: shareHost, Port: vmessPort}, b.UserKey, true)
 			} else {
-				row.ShareLink = linkForPort(vlessPort, shareHost, b.UserKey, false)
+				row.ShareLink = linkForPort(
+					shareTarget{Host: shareHost, Port: vlessPort, TLS: vlessTLS}, b.UserKey, false)
 			}
 		}
 		if tr, ok := userTraffic[userTrafficKey(b.Protocol, b.UserKey)]; ok {

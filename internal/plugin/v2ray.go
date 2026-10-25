@@ -6,13 +6,16 @@ package plugin
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/identity"
 	"github.com/hhy50/vnray/internal/logging"
@@ -69,6 +72,16 @@ type V2RayPlugin struct {
 	limits   *ratelimit.Registry
 	traffic  *traffic.Meter
 	inbounds []*uuidInbound
+	tls      vlessTLS
+	tlsStore VLESSTLSStore
+}
+
+// vlessTLS 是 vless 入站的 TLS 运行态：settings 是已落库的参数，cfg 为 nil 表示明文。
+// 证书在 Enable/SetTLS/Restore 时签发或加载，运行期只读。
+type vlessTLS struct {
+	settings config.VLESSTLS
+	cfg      *tls.Config
+	cert     vless.Cert
 }
 
 // setTraffic 注入流量记账器（插件管理器在装配时调用）。
@@ -121,7 +134,7 @@ func (p *V2RayPlugin) inbound(proto store.Protocol) *uuidInbound {
 // Name 返回插件名。
 func (p *V2RayPlugin) Name() string { return pluginV2Ray }
 
-// Status 返回当前状态：两个入站各自的端口与全部 uuid 路由。
+// Status 返回当前状态：两个入站各自的端口、全部 uuid 路由与 vless 的 TLS 参数。
 func (p *V2RayPlugin) Status() Status {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -136,7 +149,27 @@ func (p *V2RayPlugin) Status() Status {
 			Port:     p.inbound(slot.proto).effectivePort(slot.defPort),
 		})
 	}
-	return Status{Name: pluginV2Ray, Enabled: p.runningLocked(), Ports: ports, Params: params}
+	return Status{
+		Name: pluginV2Ray, Enabled: p.runningLocked(),
+		Ports: ports, Params: params, TLS: p.tlsInfoLocked(),
+	}
+}
+
+// tlsInfoLocked 返回 vless 入站的 TLS 快照。调用方必须持锁。
+func (p *V2RayPlugin) tlsInfoLocked() *TLSInfo {
+	info := &TLSInfo{
+		Protocol:   store.ProtocolVLESS,
+		Enabled:    p.tls.settings.Enabled,
+		SelfSigned: p.tls.cert.Leaf != nil,
+	}
+	if p.tls.cert.Leaf == nil {
+		info.ServerName = p.tls.settings.ServerName
+		return info
+	}
+	info.ServerName = p.tls.cert.ServerName
+	info.NotAfter = p.tls.cert.NotAfter.Format(time.RFC3339)
+	info.Fingerprint = p.tls.cert.Fingerprint
+	return info
 }
 
 // SyncUser 把用户表的一条 uuid 变更同步进对应协议的验证器：管理台在用户页增删或
@@ -182,6 +215,23 @@ func (p *V2RayPlugin) restoreLocked(ctx context.Context) {
 			p.inbound(slot.proto).port = port
 		}
 	}
+	stored := p.savedTLS()
+	if stored == nil {
+		// 从未配置过 TLS：保持明文。默认开启只对"新启用"生效，否则升级会把既有
+		// 明文客户端的连接全部打断。
+		p.tls = vlessTLS{}
+	} else if next, err := buildTLS(*stored); err != nil {
+		// 证书签不出来不该让 vless 端口消失：降级明文，留一条告警等人工处理。
+		logging.Warn("v2ray: vless tls unavailable, falling back to plaintext", "err", err)
+	} else {
+		p.tls = next
+		if next.settings != *stored {
+			// 续签或补齐了证书材料：回写，否则每次启动都会重签、指纹跟着跳。
+			if err := p.persistTLS(next.settings); err != nil {
+				logging.Warn("v2ray: persist vless tls cert failed", "err", err)
+			}
+		}
+	}
 	if cur.Status != store.PluginEnabled {
 		return
 	}
@@ -205,7 +255,7 @@ func (p *V2RayPlugin) seedValidators() {
 	}
 }
 
-// Enable 启用插件：校验并持久化两个端口，然后两个入站都开始监听。
+// Enable 启用插件：校验并持久化两个端口与 vless 的 TLS 参数，然后两个入站都开始监听。
 func (p *V2RayPlugin) Enable(ctx context.Context, params map[string]string) error {
 	ports := make(map[store.Protocol]int, len(uuidSlots))
 	for _, slot := range uuidSlots {
@@ -216,15 +266,29 @@ func (p *V2RayPlugin) Enable(ctx context.Context, params map[string]string) erro
 		}
 		ports[slot.proto] = port
 	}
+	// 先签发再写库：证书失败时不留脏配置。
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.saveLocked(ctx, store.PluginEnabled, ports); err != nil {
+	// 新部署默认加密：库里从未配置过 TLS 时按"开启"起手。
+	prev := config.VLESSTLS{Enabled: true}
+	if saved := p.savedTLS(); saved != nil {
+		prev = *saved
+	}
+	next, err := buildTLS(tlsParams(params, prev))
+	if err != nil {
 		return err
 	}
-	if p.runningLocked() && p.samePortsLocked(ports) {
+	if err := p.saveLocked(ctx, store.PluginEnabled, func(c *store.PluginConfig) { c.Ports = ports }); err != nil {
+		return err
+	}
+	if err := p.persistTLS(next.settings); err != nil {
+		return err
+	}
+	if p.runningLocked() && p.samePortsLocked(ports) && p.tls.settings == next.settings {
 		return nil
 	}
 	p.stopLocked()
+	p.tls = next
 	return p.startLocked(ports)
 }
 
@@ -259,7 +323,7 @@ func (p *V2RayPlugin) SetPorts(ctx context.Context, ports map[store.Protocol]int
 		return nil
 	}
 	if !p.runningLocked() {
-		if err := p.saveLocked(ctx, "", next); err != nil {
+		if err := p.saveLocked(ctx, "", func(c *store.PluginConfig) { c.Ports = next }); err != nil {
 			return err
 		}
 		for _, in := range p.inbounds {
@@ -284,10 +348,47 @@ func (p *V2RayPlugin) SetPorts(ctx context.Context, ports map[store.Protocol]int
 		}
 		return err
 	}
-	if err := p.saveLocked(ctx, store.PluginEnabled, next); err != nil {
+	if err := p.saveLocked(ctx, store.PluginEnabled, func(c *store.PluginConfig) { c.Ports = next }); err != nil {
 		return err
 	}
 	logging.Info("v2ray: ports updated", "ports", portsText(next), "running", true)
+	return nil
+}
+
+// SetTLS 切换 vless 入站的 TLS 并热生效：只重启 vless 这一个监听（vmess 与已建立的
+// 连接不受影响），证书出错时直接返回、现状不变。
+func (p *V2RayPlugin) SetTLS(ctx context.Context, enabled bool, serverName string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	settings := config.VLESSTLS{Enabled: true}
+	if saved := p.savedTLS(); saved != nil {
+		settings = *saved
+	}
+	settings.Enabled = enabled
+	settings.ServerName = strings.TrimSpace(serverName)
+	next, err := buildTLS(settings)
+	if err != nil {
+		return err
+	}
+	if err := p.persistTLS(next.settings); err != nil {
+		return err
+	}
+	prev := p.tls
+	in := p.inbound(store.ProtocolVLESS)
+	p.tls = next
+	if !in.running {
+		return nil
+	}
+	port := in.effectivePort(defaultVLESSPort)
+	in.stop()
+	if err := in.start(port, p.tlsConfig(store.ProtocolVLESS)); err != nil {
+		p.tls = prev
+		if rerr := in.start(port, p.tlsConfig(store.ProtocolVLESS)); rerr != nil {
+			logging.Error("v2ray: vless listener rollback failed", "err", rerr)
+		}
+		return err
+	}
+	logging.Info("v2ray: vless tls switched", "enabled", enabled, "server_name", next.settings.ServerName)
 	return nil
 }
 
@@ -303,7 +404,7 @@ func (p *V2RayPlugin) startLocked(ports map[store.Protocol]int) error {
 	started := make([]*uuidInbound, 0, len(p.inbounds))
 	for _, slot := range uuidSlots {
 		in := p.inbound(slot.proto)
-		if err := in.start(ports[slot.proto]); err != nil {
+		if err := in.start(ports[slot.proto], p.tlsConfig(slot.proto)); err != nil {
 			for _, done := range started {
 				done.stop()
 			}
@@ -312,6 +413,14 @@ func (p *V2RayPlugin) startLocked(ports map[store.Protocol]int) error {
 		started = append(started, in)
 	}
 	return nil
+}
+
+// tlsConfig 返回该协议入站应使用的 TLS 配置；只有 vless 支持 TLS，其余恒为明文。
+func (p *V2RayPlugin) tlsConfig(proto store.Protocol) *tls.Config {
+	if proto != store.ProtocolVLESS {
+		return nil
+	}
+	return p.tls.cfg
 }
 
 // stopLocked 停止两个入站；调用方必须持锁。
@@ -350,9 +459,9 @@ func (p *V2RayPlugin) samePortsLocked(next map[store.Protocol]int) bool {
 	return true
 }
 
-// saveLocked 把启停状态与端口写进 vn_plugin；status 为空串表示沿用库中原值。
-// 只改端口时不动 status，避免"停用态改端口"被误写成启用。调用方必须持锁。
-func (p *V2RayPlugin) saveLocked(ctx context.Context, status store.PluginStatus, ports map[store.Protocol]int) error {
+// saveLocked 把插件配置写进 vn_plugin：status 为空串表示沿用库中原值（只改端口或
+// 证书时不要顺手把"停用"写成"启用"），mutate 就地改 Config。调用方必须持锁。
+func (p *V2RayPlugin) saveLocked(ctx context.Context, status store.PluginStatus, mutate func(*store.PluginConfig)) error {
 	cur, ok, _ := p.store.GetPlugin(ctx, pluginV2Ray)
 	if !ok {
 		cur = store.PluginState{Name: pluginV2Ray}
@@ -361,10 +470,69 @@ func (p *V2RayPlugin) saveLocked(ctx context.Context, status store.PluginStatus,
 	if status != "" {
 		cur.Status = status
 	}
-	if ports != nil {
-		cur.Config.Ports = ports
+	if mutate != nil {
+		mutate(&cur.Config)
 	}
 	return p.store.SetPlugin(ctx, cur)
+}
+
+// savedTLS 返回已保存的 TLS 参数；未注入读写口或从未配置时返回 nil。
+func (p *V2RayPlugin) savedTLS() *config.VLESSTLS {
+	if p.tlsStore == nil {
+		return nil
+	}
+	return p.tlsStore.VLESSTLS()
+}
+
+// persistTLS 把参数写回服务端配置表；未注入读写口时只留在内存（测试用）。
+func (p *V2RayPlugin) persistTLS(s config.VLESSTLS) error {
+	if p.tlsStore == nil {
+		return nil
+	}
+	return p.tlsStore.SetVLESSTLS(s)
+}
+
+// buildTLS 解析/签发自签证书，并把当前生效的 PEM 回填进 settings 供调用方落库。
+func buildTLS(s config.VLESSTLS) (vlessTLS, error) {
+	if !s.Enabled {
+		// 关闭时保留证书材料：再打开沿用同一张证书，指纹不跳。
+		return vlessTLS{settings: s}, nil
+	}
+	cert, err := vless.Load(s.ServerName, []byte(s.CertPEM), []byte(s.KeyPEM))
+	if err != nil {
+		return vlessTLS{}, err
+	}
+	s.ServerName = cert.ServerName
+	s.CertPEM = string(cert.CertPEM)
+	s.KeyPEM = string(cert.KeyPEM)
+	logging.Info("v2ray: vless tls ready",
+		"server_name", cert.ServerName,
+		"not_after", cert.NotAfter.Format(time.RFC3339),
+		"fingerprint", cert.Fingerprint,
+		"renewed", cert.Renewed)
+	return vlessTLS{settings: s, cfg: cert.TLSConfig(), cert: cert}, nil
+}
+
+// tlsParams 从启用参数里取 TLS 参数：vless_tls=on|off、vless_tls_sni=<域名>；
+// 缺省的键沿用 prev，管理台只传改动的字段。
+func tlsParams(params map[string]string, prev config.VLESSTLS) config.VLESSTLS {
+	out := prev
+	if raw, ok := params["vless_tls"]; ok {
+		out.Enabled = isOn(raw)
+	}
+	if raw, ok := params["vless_tls_sni"]; ok {
+		out.ServerName = strings.TrimSpace(raw)
+	}
+	return out
+}
+
+// isOn 解析管理台开关：只有明确的 on/true/1/yes 才算开启，其余一律视为关闭。
+func isOn(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on", "true", "1", "yes":
+		return true
+	}
+	return false
 }
 
 // portsText 把端口表压成一行可读文本（日志用）。

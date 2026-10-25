@@ -143,10 +143,10 @@ export const api = {
   portMapDelete: (id: number) => request(`/api/portmaps/${id}`, json('DELETE')),
 
   plugins: () => request<PluginList>('/api/plugins'),
-  pluginAction: (name: string, action: 'start' | 'stop' | 'port', params: Record<string, string> = {}) =>
+  pluginAction: (name: string, action: 'start' | 'stop' | 'port' | 'tls', params: Record<string, string> = {}) =>
     request(
       `/api/plugins/${encodeURIComponent(name)}/${action}`,
-      json(action === 'port' ? 'PUT' : 'POST', action === 'stop' ? undefined : { params }),
+      json(action === 'start' || action === 'stop' ? 'POST' : 'PUT', action === 'stop' ? undefined : { params }),
     ),
 
   keys: () => request<{ keys: KeyRow[] }>('/api/keys'),

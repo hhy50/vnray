@@ -26,19 +26,35 @@ func defaultServiceSettings(cfg *config.Server) config.ServiceSettings {
 	return s
 }
 
-// loadServiceSettings 读取管理台保存的运行时配置快照并覆盖基线。任何读取/解析/校验失败
-// 都只告警并回退基线，不拒绝启动——坏配置不该拦住服务进程。
+// loadServiceSettings 读取管理台保存的运行时配置段并覆盖基线。首次启动（库里没有初始化
+// 标记）时把生效基线整份落库，此后一律以库为准。任何读取/解析/校验失败都只告警并回退
+// 基线，不拒绝启动——坏配置不该拦住服务进程。
 func loadServiceSettings(ctx context.Context, st store.Store, cfg *config.Server) config.ServiceSettings {
 	base := defaultServiceSettings(cfg)
-	raw, ok, err := st.GetServiceSettings(ctx)
+	kv, err := st.GetServiceSettings(ctx)
 	if err != nil {
 		logging.Warnf("service settings: load failed, using defaults: %v", err)
 		return base
 	}
-	if !ok {
+	if _, initialized := kv[store.ServiceSettingsInitializedKey]; !initialized {
+		seed := kv
+		if len(seed) == 0 {
+			if seed, err = config.EncodeServiceSettings(base); err != nil {
+				logging.Warnf("service settings: encode defaults: %v", err)
+				return base
+			}
+			logging.Info("service settings: first start, seeding defaults")
+		}
+		// 已有段但没有标记（老库）：原样写回一次补标记，不覆盖用户数据。
+		seed[store.ServiceSettingsInitializedKey] = "true"
+		if err := st.SetServiceSettings(ctx, seed); err != nil {
+			logging.Warnf("service settings: seed failed: %v", err)
+		}
+	}
+	if len(kv) == 0 {
 		return base
 	}
-	out, err := config.DecodeServiceSettings(raw, base)
+	out, err := config.DecodeServiceSettings(kv, base)
 	if err != nil {
 		logging.Warnf("service settings: decode failed, using defaults: %v", err)
 		return base
@@ -105,6 +121,36 @@ func (c *serviceConfig) Current() config.ServiceSettings {
 	return c.cur
 }
 
+// VLESSTLS 返回 vless 的 TLS 参数（副本）；从未配置过时返回 nil。
+func (c *serviceConfig) VLESSTLS() *config.VLESSTLS {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cur.VLESS.TLS == nil {
+		return nil
+	}
+	cp := *c.cur.VLESS.TLS
+	return &cp
+}
+
+// SetVLESSTLS 只写 vless 这一段：证书由插件签发，不触发其它组件的热分发，也不碰其它
+// 段（并发改日志级别之类的写入不会互相覆盖）。本地快照同步更新，否则管理台以快照为
+// 基线保存服务配置时会把证书冲掉。
+func (c *serviceConfig) SetVLESSTLS(t config.VLESSTLS) error {
+	raw, err := config.EncodeVLESSSettings(config.VLESSSettings{TLS: &t})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	defer cancel()
+	if err := c.settings.SetServiceSettings(ctx, map[string]string{config.SettingVLESS: raw}); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.cur.VLESS.TLS = &t
+	c.mu.Unlock()
+	return nil
+}
+
 // Apply 校验并落库新的运行时配置；落库失败不改运行态，成功后热分发到各组件。
 func (c *serviceConfig) Apply(next config.ServiceSettings) error {
 	if err := next.Validate(); err != nil {
@@ -123,13 +169,13 @@ func (c *serviceConfig) Apply(next config.ServiceSettings) error {
 		}
 		local = l
 	}
-	raw, err := config.EncodeServiceSettings(next)
+	kv, err := config.EncodeServiceSettings(next)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
 	defer cancel()
-	if err := c.settings.SetServiceSettings(ctx, raw); err != nil {
+	if err := c.settings.SetServiceSettings(ctx, kv); err != nil {
 		return err
 	}
 	c.dispatch(next, sess, local)
