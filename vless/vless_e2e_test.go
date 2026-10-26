@@ -163,8 +163,8 @@ func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 	runSingleConnection(t, conn, host, originPort)
 }
 
-// dialVless 连接 vless 入站；useTLS 时先完成 TLS 握手（自签证书故跳过校验，
-// 与客户端 allowInsecure 等价）。
+// dialVless 连接 vless 入站；useTLS 时先完成 TLS 握手（自签证书故测试里直接跳过
+// 校验，生产客户端靠证书指纹固定）。
 func dialVless(t *testing.T, port int, useTLS bool) net.Conn {
 	t.Helper()
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))

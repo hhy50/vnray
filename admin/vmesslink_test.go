@@ -45,25 +45,103 @@ func TestVlessLink(t *testing.T) {
 	}
 }
 
-// TestVlessLinkTLS 断言 TLS 链接带齐客户端要用的参数：自签证书必须带 allowInsecure，
-// 否则客户端证书校验直接失败。
+// TestVlessLinkTLS 断言 TLS 链接带齐客户端要用的参数：自签证书必须带证书指纹，
+// 且不能再出现 allowInsecure——新版 Xray 见到这个字段会直接拒绝启动。
 func TestVlessLinkTLS(t *testing.T) {
 	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	const fp = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"
 	target := shareTarget{
 		Host: "vpn.example.com", Port: 8443,
-		TLS: &shareTLS{ServerName: "node.example.com", SelfSigned: true},
+		TLS: &shareTLS{ServerName: "node.example.com", SelfSigned: true, Fingerprint: fp},
 	}
 	link := vlessLink(target, uuid, shareName(uuid))
 	for _, want := range []string{
 		"security=tls", "sni=node.example.com", "fp=chrome",
-		"alpn=h2%2Chttp%2F1.1", "allowInsecure=1", "encryption=none",
+		"alpn=h2%2Chttp%2F1.1", "pcs=" + fp, "encryption=none",
 	} {
 		if !strings.Contains(link, want) {
 			t.Fatalf("link %q missing %q", link, want)
 		}
 	}
+	if strings.Contains(link, "allowInsecure") {
+		t.Fatalf("tls link %q still carries the removed allowInsecure", link)
+	}
 	if strings.Contains(link, "security=none") {
 		t.Fatalf("tls link %q still carries security=none", link)
+	}
+}
+
+// TestVlessLinkTLSFingerprintCase 断言指纹统一成小写：Xray 大小写不敏感，但链接
+// 需要稳定，避免同一张证书生成两种链接。
+func TestVlessLinkTLSFingerprintCase(t *testing.T) {
+	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	link := vlessLink(shareTarget{
+		Host: "vpn.example.com", Port: 8443,
+		TLS: &shareTLS{SelfSigned: true, Fingerprint: "E8E2D387FDBFFEB38E9C9065CF30A97EE23C0E3D32EE6F78FFAE40966BEFCCC9"},
+	}, uuid, shareName(uuid))
+	if !strings.Contains(link, "pcs=e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9") {
+		t.Fatalf("link %q did not lowercase the fingerprint", link)
+	}
+}
+
+// TestVlessLinkVariantsAreMutuallyExclusive 断言两代链接各自只带一种校验参数。
+// 这是硬约束：为了"兼容"把 allowInsecure 和 pcs 塞进同一条链接，会让新内核拒绝
+// 启动整个进程，而客户端所有节点共用一份配置，等于全部节点一起失效。
+func TestVlessLinkVariantsAreMutuallyExclusive(t *testing.T) {
+	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	const fp = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"
+	target := shareTarget{
+		Host: "vpn.example.com", Port: 8443,
+		TLS: &shareTLS{ServerName: "node.example.com", SelfSigned: true, Fingerprint: fp},
+	}
+	for _, tt := range []struct {
+		name     string
+		link     string
+		want     string
+		unwanted string
+	}{
+		{"新版", vlessLink(target, uuid, shareName(uuid)), "pcs=" + fp, "allowInsecure"},
+		{"旧版", vlessLinkLegacy(target, uuid, shareName(uuid)), "allowInsecure=1", "pcs="},
+	} {
+		if !strings.Contains(tt.link, tt.want) {
+			t.Fatalf("%s链接 %q 缺少 %q", tt.name, tt.link, tt.want)
+		}
+		if strings.Contains(tt.link, tt.unwanted) {
+			t.Fatalf("%s链接 %q 不应包含 %q", tt.name, tt.link, tt.unwanted)
+		}
+	}
+}
+
+// TestVlessLinkLegacyKeepsTransportParams 断言旧版链接除校验参数外与新版一致：
+// sni/fp/alpn 都不能少，否则旧客户端同样连不上。
+func TestVlessLinkLegacyKeepsTransportParams(t *testing.T) {
+	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	const fp = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"
+	link := vlessLinkLegacy(shareTarget{
+		Host: "vpn.example.com", Port: 8443,
+		TLS: &shareTLS{ServerName: "node.example.com", SelfSigned: true, Fingerprint: fp},
+	}, uuid, shareName(uuid))
+	for _, want := range []string{
+		"security=tls", "sni=node.example.com", "fp=chrome",
+		"alpn=h2%2Chttp%2F1.1", "encryption=none",
+	} {
+		if !strings.Contains(link, want) {
+			t.Fatalf("旧版链接 %q 缺少 %q", link, want)
+		}
+	}
+}
+
+// TestVlessLinkTLSNoFingerprint 断言拿不到指纹时不写任何校验参数：写 allowInsecure
+// 会让内核起不来，比握手失败更难排查。
+func TestVlessLinkTLSNoFingerprint(t *testing.T) {
+	const uuid = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	link := vlessLink(shareTarget{
+		Host: "vpn.example.com", Port: 8443, TLS: &shareTLS{SelfSigned: true},
+	}, uuid, shareName(uuid))
+	for _, unwanted := range []string{"allowInsecure", "pcs=", "insecure="} {
+		if strings.Contains(link, unwanted) {
+			t.Fatalf("link %q should not contain %q", link, unwanted)
+		}
 	}
 }
 

@@ -211,7 +211,7 @@ onMounted(load)
             type="warning"
             :closable="false"
             show-icon
-            title="自签证书需要客户端关闭证书校验：分享链接会自动带 allowInsecure=1。"
+            title="自签证书用证书固定校验：分享链接会自动带证书指纹（pcs）。新版 Xray 已移除 allowInsecure，旧链接需重新导入。"
           />
           <p v-if="tlsEnabled && dialog.plugin.tls.fingerprint" class="hint-block" style="margin-top: 12px">
             证书存于服务端配置（vn_service_settings），到期 {{ dialog.plugin.tls.not_after }}<br />

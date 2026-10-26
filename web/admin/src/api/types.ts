@@ -103,6 +103,8 @@ export interface User {
   updated_at: string
   shareable: boolean
   share_link: string
+  // 旧内核（Xray < 26.2.6）专用的链接，仅自签证书时返回；两代链接不能混用。
+  share_link_legacy?: string
 }
 
 export interface UserList {

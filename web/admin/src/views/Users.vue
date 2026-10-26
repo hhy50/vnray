@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 用户：协议 × user_key 的绑定记录，限速/并发/日志级别集中在这里配置。
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Plus, Search, CopyDocument } from '@element-plus/icons-vue'
+import { Plus, Search, CopyDocument, ArrowDown } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { User } from '../api/types'
 import { bytes, copyText, rate, shortName } from '../lib/format'
@@ -167,13 +167,22 @@ async function saveLimits() {
   }
 }
 
-async function copyLink(u: User) {
-  if (!u.share_link) {
-    ElMessage.warning('该用户没有可分享的链接（插件未设置端口或协议不适用）')
+async function copyLink(u: User, legacy = false) {
+  // 两代链接互斥：新版用证书指纹，旧版用 allowInsecure，混在一份配置里会让新内核拒绝启动。
+  const link = legacy ? u.share_link_legacy : u.share_link
+  if (!link) {
+    ElMessage.warning(
+      legacy
+        ? '没有旧版链接：只有自签证书才需要，且插件需已启用 TLS'
+        : '该用户没有可分享的链接（插件未设置端口或协议不适用）',
+    )
     return
   }
-  if (await copyText(u.share_link)) ElMessage.success('链接已复制')
-  else ElMessage.error('复制失败')
+  if (await copyText(link)) {
+    ElMessage.success(legacy ? '旧版链接已复制（仅限 Xray < 26.2.6）' : '链接已复制')
+  } else {
+    ElMessage.error('复制失败')
+  }
 }
 
 async function copyKey(u: User) {
@@ -282,9 +291,24 @@ onMounted(load)
             placement="top"
           >
             <span>
-              <el-button v-if="row.shareable" link :disabled="!row.share_link" @click="copyLink(row)">
-                复制链接
-              </el-button>
+              <el-dropdown
+                v-if="row.shareable"
+                trigger="click"
+                :disabled="!row.share_link"
+                @command="(cmd: string) => copyLink(row, cmd === 'legacy')"
+              >
+                <el-button link type="primary" :disabled="!row.share_link">
+                  复制链接<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="modern">新版内核：证书指纹</el-dropdown-item>
+                    <el-dropdown-item v-if="row.share_link_legacy" command="legacy" divided>
+                      旧版内核：允许不安全（Xray &lt; 26.2.6）
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </span>
           </el-tooltip>
           <el-button link type="danger" @click="removeUser(row)">删除</el-button>

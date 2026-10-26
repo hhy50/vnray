@@ -472,6 +472,9 @@ type apiUserDTO struct {
 	UpdatedAt   string `json:"updated_at"`
 	Shareable   bool   `json:"shareable"`
 	ShareLink   string `json:"share_link"`
+	// ShareLinkLegacy 是给旧内核（Xray < 26.2.6）的链接，仅在自签证书时给出。
+	// 两代链接绝不能合并成一条：新内核见到 allowInsecure 会拒绝启动整个进程。
+	ShareLinkLegacy string `json:"share_link_legacy,omitempty"`
 }
 
 // apiUsers 返回用户绑定列表以及新增用户需要的下拉候选。
@@ -521,11 +524,16 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 			Shareable:   b.Protocol.UsesUUID(),
 		}
 		if row.Shareable && shareHost != "" {
+			target := shareTarget{Host: shareHost, Port: vmessPort}
 			if b.Protocol == store.ProtocolVMess {
-				row.ShareLink = linkForPort(shareTarget{Host: shareHost, Port: vmessPort}, b.UserKey, true)
+				row.ShareLink = linkForPort(target, b.UserKey, true)
 			} else {
-				row.ShareLink = linkForPort(
-					shareTarget{Host: shareHost, Port: vlessPort, TLS: vlessTLS}, b.UserKey, false)
+				target.Port, target.TLS = vlessPort, vlessTLS
+				row.ShareLink = linkForPort(target, b.UserKey, false)
+				// 只有自签证书才需要旧内核的兼容链接：受信证书两代客户端都直连通过。
+				if vlessPort > 0 && vlessTLS != nil && vlessTLS.SelfSigned {
+					row.ShareLinkLegacy = vlessLinkLegacy(target, b.UserKey, shareName(b.UserKey))
+				}
 			}
 		}
 		if tr, ok := userTraffic[userTrafficKey(b.Protocol, b.UserKey)]; ok {

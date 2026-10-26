@@ -43,7 +43,7 @@ type TLSInfo struct {
 	Protocol   store.Protocol `json:"protocol"`
 	Enabled    bool           `json:"enabled"`
 	ServerName string         `json:"server_name"`
-	// SelfSigned 表示证书由服务端自签，客户端必须关闭证书校验（链接带 allowInsecure）。
+	// SelfSigned 表示证书由服务端自签，客户端须用指纹固定代替已移除的证书校验开关。
 	SelfSigned  bool   `json:"self_signed"`
 	NotAfter    string `json:"not_after,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`

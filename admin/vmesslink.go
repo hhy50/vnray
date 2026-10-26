@@ -88,8 +88,10 @@ func bareHost(raw string) string {
 type shareTLS struct {
 	// ServerName 是链接里的 sni；空则退回分享主机。
 	ServerName string
-	// SelfSigned 表示证书自签，链接需带 allowInsecure=1，否则客户端直接握手失败。
+	// SelfSigned 表示证书自签，链接需带证书指纹，否则客户端校验失败。
 	SelfSigned bool
+	// Fingerprint 是证书 DER 的 SHA-256（小写十六进制，无冒号），自签时写进 pcs 参数。
+	Fingerprint string
 }
 
 // shareTarget 是一条分享链接的入站目标：服务器地址、端口与（vless 的）TLS 参数。
@@ -101,8 +103,21 @@ type shareTarget struct {
 
 // vlessLink 把一条 vless 用户记录编码成 vless:// 链接（各家客户端通用）。TLS 参数
 // 与 v2ray 客户端的默认值对齐：alpn=h2,http/1.1 是服务端 tls.Config 的默认 ALPN，
-// fp=chrome 走 uTLS 指纹，自签证书另加 allowInsecure=1。
+// fp=chrome 走 uTLS 指纹，自签证书用 pcs（Xray 的 pinnedPeerCertSha256）做证书固定。
 func vlessLink(t shareTarget, uuid, name string) string {
+	return vlessLinkWith(t, uuid, name, false)
+}
+
+// vlessLinkLegacy 生成给旧内核（Xray < 26.2.6）的链接：那时唯一的做法是
+// allowInsecure=1。两种校验参数绝不能出现在同一条链接里——新内核见到
+// allowInsecure 会拒绝启动整个进程，而客户端把所有节点写在同一份配置里，
+// 等于全部节点一起失效。
+func vlessLinkLegacy(t shareTarget, uuid, name string) string {
+	return vlessLinkWith(t, uuid, name, true)
+}
+
+// vlessLinkWith 是两代链接的共同实现；legacy 只影响自签证书的校验参数。
+func vlessLinkWith(t shareTarget, uuid, name string, legacy bool) string {
 	q := url.Values{}
 	q.Set("encryption", "none")
 	q.Set("type", "tcp")
@@ -117,8 +132,13 @@ func vlessLink(t shareTarget, uuid, name string) string {
 		q.Set("sni", sni)
 		q.Set("fp", "chrome")
 		q.Set("alpn", "h2,http/1.1")
+		// 指纹缺失时不写任何校验参数：宁可握手时报错，也不要再产出起不来的配置。
 		if t.TLS.SelfSigned {
-			q.Set("allowInsecure", "1")
+			if legacy {
+				q.Set("allowInsecure", "1")
+			} else if fp := strings.ToLower(strings.TrimSpace(t.TLS.Fingerprint)); fp != "" {
+				q.Set("pcs", fp)
+			}
 		}
 	}
 	return "vless://" + uuid + "@" + net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) +
@@ -171,5 +191,5 @@ func (s *AdminService) vlessShareTLS() *shareTLS {
 	if info == nil || !info.Enabled {
 		return nil
 	}
-	return &shareTLS{ServerName: info.ServerName, SelfSigned: info.SelfSigned}
+	return &shareTLS{ServerName: info.ServerName, SelfSigned: info.SelfSigned, Fingerprint: info.Fingerprint}
 }

@@ -37,13 +37,21 @@ const (
 	pumpMux    = "plugin.v2ray.mux"
 )
 
+// boundClientMessage 返回出口未命中时的告警文案。绑了本机出口却连不上是配置问题
+// （server_proxy 没启用），报"客户端离线"会把排查方向带偏：ss 入站早已按这个口径区分。
+func boundClientMessage(proto, client string) string {
+	if client == transport.LocalClientName {
+		return proto + ": server:self bound but server_proxy is disabled, closing inbound conn"
+	}
+	return proto + ": bound client offline, closing inbound conn"
+}
+
 // boundClient 查找绑定的出口（远程客户端会话或服务端本机出口）；未命中时记日志并
 // 返回 nil，由调用方关闭入站连接。日志器已带 user/name 字段，这里不再重复传 user。
 func (d relayDeps) boundClient(log *logging.Scoped, proto, client, target string) transport.Exit {
 	exit, ok := d.exits.Resolve(client)
 	if !ok {
-		log.Warn(proto+": bound client offline, closing inbound conn",
-			"client", client, "target", target)
+		log.Warn(boundClientMessage(proto, client), "client", client, "target", target)
 		return nil
 	}
 	return exit
