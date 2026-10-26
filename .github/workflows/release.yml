@@ -11,8 +11,9 @@ on:
         description: "包名里的版本号（如 v0.0.1）；留空则取 internal/cli/version.go 的常量"
         required: false
 
+# 默认只读：跑 npm ci 的 job 不该拿到能改写仓库的 token，写权限只给 release job。
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -26,13 +27,13 @@ jobs:
   check:
     name: 校验版本号
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.rel.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      # 版本号只有 version.go 常量一个来源，tag 只决定包名与 Release 名。
-      # 两者漂移时二进制里是旧版本、包名是新版本，用户会拿到自相矛盾的产物。
-      - name: tag 与 version.go 常量一致
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: 读取 version.go 常量
+        id: const
         run: |
           set -euo pipefail
           CONST=$(sed -nE 's/^const version = "([^"]+)".*/\1/p' internal/cli/version.go)
@@ -40,12 +41,36 @@ jobs:
             echo "::error::internal/cli/version.go 里没找到 const version = \"...\""
             exit 1
           fi
-          TAG="${GITHUB_REF_NAME}"
+          echo "value=$CONST" >> "$GITHUB_OUTPUT"
+
+      # 版本号只有 version.go 常量一个来源，tag 只决定包名与 Release 名。
+      # 两者漂移时二进制里是旧版本、包名是新版本，用户会拿到自相矛盾的产物。
+      - name: tag 与常量一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CONST: ${{ steps.const.outputs.value }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
           if [ "$CONST" != "$TAG" ] && [ "v$CONST" != "$TAG" ]; then
             echo "::error::tag $TAG 与 version.go 的 $CONST 不一致：先改常量再打 tag"
             exit 1
           fi
           echo "版本一致：$TAG"
+
+      # 包名统一带 v 前缀：手动触发留空时原本会产出 vnray_0.0.1_*，
+      # 与 tag 触发的 vnray_v0.0.1_* 不一致，靠人工分辨很容易拿错包。
+      - name: 确定发布版本号
+        id: rel
+        env:
+          CONST: ${{ steps.const.outputs.value }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          V="${INPUT_TAG:-$CONST}"
+          V="v${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "发布版本：$V"
 
   web:
     name: 构建管理台前端
@@ -109,31 +134,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 确定版本号
-        id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            V="${{ inputs.tag }}"
-            if [ -z "$V" ]; then
-              V=$(sed -nE 's/^const version = "([^"]+)".*/\1/p' internal/cli/version.go)
-            fi
-            echo "value=${V:-dev}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
+      # 版本号与 GOARM 都经 env 传入，不把 ${{ }} 拼进 shell，空值也不会留下坏语法。
       - name: 编译并打包
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          VERSION: ${{ steps.ver.outputs.value }}
+          GOARM: ${{ matrix.goarm }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
-          if [ -n "${{ matrix.goarm }}" ]; then export GOARM="${{ matrix.goarm }}"; fi
 
           SUFFIX=""
           if [ "$GOOS" = "windows" ]; then SUFFIX=".exe"; fi
-          VERSION="${VERSION:-dev}"
 
           # -trimpath 去掉本机路径，-s -w 去符号表。
           # 版本号是 internal/cli/version.go 里的常量，发布前手改，构建不注入。
@@ -145,7 +157,9 @@ jobs:
           mkdir -p "$STAGE" dist
           mv "vnserver${SUFFIX}" "vnclient${SUFFIX}" "$STAGE/"
           cp -r configs "$STAGE/"
-          cp README.md README.zh-CN.md "$STAGE/"
+
+          # 仓库已把 zh-CN 并回 README.md、英文版改名 README.en.md，写死文件名会再漏一次。
+          cp README*.md "$STAGE/"
 
           if [ "$GOOS" = "windows" ]; then
             (cd stage && zip -qr "../dist/${NAME}.zip" "$NAME")
@@ -165,6 +179,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
