@@ -30,11 +30,15 @@ type apiPortMapDTO struct {
 	LimitDownKB   int64  `json:"limit_down_kb"`
 	TLSEnabled    bool   `json:"tls_enabled"`
 	TLSConfigured bool   `json:"tls_configured"`
-	Enabled       bool   `json:"enabled"`
-	Remark        string `json:"remark"`
-	Listening     bool   `json:"listening"`
-	ClientOnline  bool   `json:"client_online"`
-	UpdatedAt     string `json:"updated_at"`
+	// 证书与私钥随列表整体下发，编辑弹窗靠它回显原文；密钥不脱敏，
+	// 明文口令级别的接口（apiKeys）也是同一取舍。
+	CertPEM      string `json:"cert_pem"`
+	KeyPEM       string `json:"key_pem"`
+	Enabled      bool   `json:"enabled"`
+	Remark       string `json:"remark"`
+	Listening    bool   `json:"listening"`
+	ClientOnline bool   `json:"client_online"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 // apiPortMaps 返回映射规则（带运行状态）、可绑定客户端与对外主机提示。
@@ -76,6 +80,8 @@ func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 			LimitDownKB:   m.Config.DownLimit / 1024,
 			TLSEnabled:    m.Config.CertPEM != "" || m.Config.KeyPEM != "",
 			TLSConfigured: m.Config.CertPEM != "" && m.Config.KeyPEM != "",
+			CertPEM:       m.Config.CertPEM,
+			KeyPEM:        m.Config.KeyPEM,
 			Enabled:       m.Enabled,
 			Remark:        m.Remark,
 			Listening:     listening[m.ID],

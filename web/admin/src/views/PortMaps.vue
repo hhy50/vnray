@@ -69,8 +69,8 @@ function openEdit(m: PortMap) {
   form.limit_up_kb = m.limit_up_kb
   form.limit_down_kb = m.limit_down_kb
   form.tls_enabled = m.tls_enabled
-  form.cert_pem = ''
-  form.key_pem = ''
+  form.cert_pem = m.cert_pem ?? ''
+  form.key_pem = m.key_pem ?? ''
   advancedOpen.value = m.tls_enabled ? ['advanced'] : []
   form.remark = m.remark
   form.enabled = m.enabled
@@ -277,7 +277,6 @@ onMounted(load)
             </el-form-item>
             <el-form-item label="私钥（PEM 格式）">
               <el-input v-model="form.key_pem" type="textarea" :rows="5" class="mono" placeholder="-----BEGIN PRIVATE KEY-----" />
-              <div class="field-hint">编辑已有映射时不回显私钥；留空表示沿用当前私钥。</div>
             </el-form-item>
           </template>
         </el-collapse-item>

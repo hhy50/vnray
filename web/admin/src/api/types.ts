@@ -124,6 +124,9 @@ export interface PortMap {
   limit_down_kb: number
   tls_enabled: boolean
   tls_configured: boolean
+  // 仅用于编辑弹窗回显，保存时原样回传；清空两项表示沿用原配置。
+  cert_pem: string
+  key_pem: string
   enabled: boolean
   remark: string
   listening: boolean

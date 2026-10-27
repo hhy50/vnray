@@ -4,12 +4,15 @@ package admin
 // 自有中间件判定，接口只做取数与序列化。
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/hhy50/vnray/internal/store"
 )
 
 func TestAPISession(t *testing.T) {
@@ -126,6 +129,54 @@ func TestSPAHandler(t *testing.T) {
 				t.Fatalf("%s cache-control = %q", tt.path, rec.Header().Get("Cache-Control"))
 			}
 		})
+	}
+}
+
+// TestPortMapsEchoTLSMaterial 断言列表连同证书与私钥原文一起下发，编辑弹窗才能回显。
+func TestPortMapsEchoTLSMaterial(t *testing.T) {
+	s := newTestAdminService(t)
+	h := s.wrapOps(s.buildOpsMux())
+
+	const certPEM = "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
+	const keyPEM = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+	err := s.opts.Store.SetPortMapping(context.Background(), store.PortMapping{
+		Client:     "ns:grp:cli",
+		RemotePort: 8443,
+		LocalHost:  "127.0.0.1",
+		LocalPort:  443,
+		Config:     store.PortConfig{CertPEM: certPEM, KeyPEM: keyPEM},
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("seed port mapping: %v", err)
+	}
+
+	rec := doRequest(t, h, s.auth, http.MethodGet, "/admin/ops/api/portmaps")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("portmaps = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Data struct {
+			Rows []struct {
+				TLSEnabled    bool   `json:"tls_enabled"`
+				TLSConfigured bool   `json:"tls_configured"`
+				CertPEM       string `json:"cert_pem"`
+				KeyPEM        string `json:"key_pem"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode portmaps: %v", err)
+	}
+	if len(got.Data.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got.Data.Rows))
+	}
+	row := got.Data.Rows[0]
+	if !row.TLSEnabled || !row.TLSConfigured {
+		t.Fatalf("tls flags = %v/%v, want both true", row.TLSEnabled, row.TLSConfigured)
+	}
+	if row.CertPEM != certPEM || row.KeyPEM != keyPEM {
+		t.Fatalf("echoed material = %q / %q", row.CertPEM, row.KeyPEM)
 	}
 }
 
