@@ -232,11 +232,6 @@ function timeDetail(c: Client): string {
         </template>
       </el-table-column>
     </el-table>
-
-    <p class="page-hint">
-      在线行来自当前会话，每 5 秒刷新（标签页不可见时暂停）；离线行是注册过但此刻没接进来的客户端。
-      「本机」指服务端自身的出口，常驻可用、不是会话。
-    </p>
   </el-card>
 
   <ClientConfigDialog v-model="configOpen" :name="configName" @saved="load(true)" />

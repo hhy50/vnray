@@ -5,7 +5,14 @@ package portmap_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -140,8 +147,20 @@ func TestPortMapEndToEnd(t *testing.T) {
 
 	roundTrip(t, "127.0.0.1", remotePort, "hello-portmap")
 
-	// 改限速 → Sync 热更新注册表速率（在途桶原地变速，监听器不重建）。
+	// 启用 TLS 后，服务端应先解密，再沿用同一条端口映射隧道转发明文。
 	saved, ok, err := st.GetPortMapping(ctx, 1)
+	if err != nil || !ok {
+		t.Fatalf("get mapping for TLS: ok=%v err=%v", ok, err)
+	}
+	saved.Config.CertPEM, saved.Config.KeyPEM = testCertificate(t)
+	if err := st.SetPortMapping(ctx, saved); err != nil {
+		t.Fatalf("enable TLS mapping: %v", err)
+	}
+	pm.Sync(ctx)
+	tlsRoundTrip(t, remotePort, "hello-tls-portmap")
+
+	// 改限速 → Sync 热更新注册表速率（在途桶原地变速，监听器不重建）。
+	saved, ok, err = st.GetPortMapping(ctx, 1)
 	if err != nil || !ok {
 		t.Fatalf("get mapping: ok=%v err=%v", ok, err)
 	}
@@ -192,5 +211,44 @@ func roundTrip(t *testing.T, host string, port int, payload string) {
 	}
 	if string(buf) != payload {
 		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
+}
+
+func testCertificate(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "localhost"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), DNSNames: []string{"localhost"}, KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create test certificate: %v", err)
+	}
+	cert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	private := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return string(cert), string(private)
+}
+
+func tlsRoundTrip(t *testing.T, port int, payload string) {
+	t.Helper()
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp",
+		net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("dial TLS mapped port: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(conn, payload); err != nil {
+		t.Fatalf("write TLS payload: %v", err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read TLS echo: %v", err)
+	}
+	if string(buf) != payload {
+		t.Fatalf("TLS echo mismatch: got %q, want %q", buf, payload)
 	}
 }

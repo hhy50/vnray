@@ -134,6 +134,9 @@ export const api = {
       local_port: number
       limit_up_kb: number
       limit_down_kb: number
+      tls_enabled: boolean
+      cert_pem: string
+      key_pem: string
       remark: string
       enabled: boolean
     },

@@ -94,7 +94,6 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>共 {{ keys.length }} 条密钥</strong>
-        <span class="faint">配置后以本页为准，即时生效</span>
         <div class="spacer" />
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openAdd">添加密钥</el-button>

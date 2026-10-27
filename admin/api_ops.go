@@ -5,6 +5,7 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,18 +21,20 @@ import (
 // --- 端口映射 ---
 
 type apiPortMapDTO struct {
-	ID           uint64 `json:"id"`
-	Client       string `json:"client"`
-	RemotePort   int    `json:"remote_port"`
-	LocalHost    string `json:"local_host"`
-	LocalPort    int    `json:"local_port"`
-	LimitUpKB    int64  `json:"limit_up_kb"`
-	LimitDownKB  int64  `json:"limit_down_kb"`
-	Enabled      bool   `json:"enabled"`
-	Remark       string `json:"remark"`
-	Listening    bool   `json:"listening"`
-	ClientOnline bool   `json:"client_online"`
-	UpdatedAt    string `json:"updated_at"`
+	ID            uint64 `json:"id"`
+	Client        string `json:"client"`
+	RemotePort    int    `json:"remote_port"`
+	LocalHost     string `json:"local_host"`
+	LocalPort     int    `json:"local_port"`
+	LimitUpKB     int64  `json:"limit_up_kb"`
+	LimitDownKB   int64  `json:"limit_down_kb"`
+	TLSEnabled    bool   `json:"tls_enabled"`
+	TLSConfigured bool   `json:"tls_configured"`
+	Enabled       bool   `json:"enabled"`
+	Remark        string `json:"remark"`
+	Listening     bool   `json:"listening"`
+	ClientOnline  bool   `json:"client_online"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // apiPortMaps 返回映射规则（带运行状态）、可绑定客户端与对外主机提示。
@@ -64,18 +67,20 @@ func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 	items := make([]apiPortMapDTO, 0, len(rows))
 	for _, m := range rows {
 		items = append(items, apiPortMapDTO{
-			ID:           m.ID,
-			Client:       m.Client,
-			RemotePort:   m.RemotePort,
-			LocalHost:    m.LocalHost,
-			LocalPort:    m.LocalPort,
-			LimitUpKB:    m.Config.UpLimit / 1024,
-			LimitDownKB:  m.Config.DownLimit / 1024,
-			Enabled:      m.Enabled,
-			Remark:       m.Remark,
-			Listening:    listening[m.ID],
-			ClientOnline: online[m.Client],
-			UpdatedAt:    m.UpdatedAt.Format("2006-01-02 15:04:05"),
+			ID:            m.ID,
+			Client:        m.Client,
+			RemotePort:    m.RemotePort,
+			LocalHost:     m.LocalHost,
+			LocalPort:     m.LocalPort,
+			LimitUpKB:     m.Config.UpLimit / 1024,
+			LimitDownKB:   m.Config.DownLimit / 1024,
+			TLSEnabled:    m.Config.CertPEM != "" || m.Config.KeyPEM != "",
+			TLSConfigured: m.Config.CertPEM != "" && m.Config.KeyPEM != "",
+			Enabled:       m.Enabled,
+			Remark:        m.Remark,
+			Listening:     listening[m.ID],
+			ClientOnline:  online[m.Client],
+			UpdatedAt:     m.UpdatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
 	out["rows"] = items
@@ -89,6 +94,9 @@ type apiPortMapIn struct {
 	LocalPort  int    `json:"local_port"`
 	UpKB       int64  `json:"limit_up_kb"`
 	DownKB     int64  `json:"limit_down_kb"`
+	TLSEnabled *bool  `json:"tls_enabled"`
+	CertPEM    string `json:"cert_pem"`
+	KeyPEM     string `json:"key_pem"`
 	Remark     string `json:"remark"`
 	Enabled    bool   `json:"enabled"`
 }
@@ -107,6 +115,8 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	in.Client = strings.TrimSpace(in.Client)
 	in.LocalHost = strings.TrimSpace(in.LocalHost)
 	in.Remark = strings.TrimSpace(in.Remark)
+	in.CertPEM = strings.TrimSpace(in.CertPEM)
+	in.KeyPEM = strings.TrimSpace(in.KeyPEM)
 	if in.Client == "" || in.LocalHost == "" {
 		apiFail(w, http.StatusBadRequest, "客户端与本地主机都必须填写")
 		return
@@ -119,13 +129,34 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 		apiFail(w, http.StatusBadRequest, "限速必须是非负整数")
 		return
 	}
+	var previous store.PortMapping
+	if id != 0 && in.TLSEnabled != nil && *in.TLSEnabled && in.CertPEM == "" && in.KeyPEM == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+		previous, _, _ = s.opts.Store.GetPortMapping(ctx, id)
+		cancel()
+		in.CertPEM = previous.Config.CertPEM
+		in.KeyPEM = previous.Config.KeyPEM
+	}
+	if in.TLSEnabled != nil && *in.TLSEnabled {
+		if in.CertPEM == "" || in.KeyPEM == "" {
+			apiFail(w, http.StatusBadRequest, "启用 HTTPS 时必须同时填写证书和私钥")
+			return
+		}
+		if _, err := tls.X509KeyPair([]byte(in.CertPEM), []byte(in.KeyPEM)); err != nil {
+			apiFail(w, http.StatusBadRequest, "证书或私钥无效: "+err.Error())
+			return
+		}
+	} else if in.CertPEM != "" || in.KeyPEM != "" {
+		apiFail(w, http.StatusBadRequest, "证书和私钥必须同时填写")
+		return
+	}
 	m := store.PortMapping{
 		ID:         id,
 		Client:     in.Client,
 		RemotePort: in.RemotePort,
 		LocalHost:  in.LocalHost,
 		LocalPort:  in.LocalPort,
-		Config:     store.PortConfig{UpLimit: in.UpKB * 1024, DownLimit: in.DownKB * 1024},
+		Config:     store.PortConfig{UpLimit: in.UpKB * 1024, DownLimit: in.DownKB * 1024, CertPEM: in.CertPEM, KeyPEM: in.KeyPEM},
 		Enabled:    in.Enabled,
 		Remark:     in.Remark,
 	}

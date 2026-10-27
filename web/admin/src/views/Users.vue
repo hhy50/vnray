@@ -198,7 +198,6 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>共 {{ users.length }} 个用户</strong>
-        <span class="faint">同一 user_key 可在不同协议下各有一条</span>
         <div class="spacer" />
         <el-input
           v-model="q"
@@ -315,11 +314,6 @@ onMounted(load)
         </template>
       </el-table-column>
     </el-table>
-
-    <p class="page-hint">
-      限速按用户计，同一用户的多条隧道共享配额；绑定、限速、日志级别都写穿到持久存储。
-      限速与停用即时生效，改绑和日志级别下次连接生效。
-    </p>
   </el-card>
 
   <el-dialog v-model="showAdd" title="添加用户" width="min(600px, 94vw)" :close-on-click-modal="false">

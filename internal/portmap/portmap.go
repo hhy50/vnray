@@ -2,6 +2,7 @@ package portmap
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -100,11 +101,11 @@ func (m *Manager) Sync(ctx context.Context) {
 			m.stopEntry(id, e)
 			continue
 		}
-		delete(desired, id)
 		if !sameMapping(want, e.cfg) {
 			m.stopEntry(id, e)
 			continue
 		}
+		delete(desired, id)
 		// 数据面没变、只改了限速：原地重推速率，不重建监听器（在途连接不断）。
 		if m.limits != nil && (want.Config.UpLimit != e.cfg.Config.UpLimit ||
 			want.Config.DownLimit != e.cfg.Config.DownLimit) {
@@ -122,7 +123,8 @@ func (m *Manager) Sync(ctx context.Context) {
 // sameMapping 比较两条映射的数据面配置；ID 与审计字段不参与。
 func sameMapping(a, b store.PortMapping) bool {
 	return a.Client == b.Client && a.RemotePort == b.RemotePort &&
-		a.LocalHost == b.LocalHost && a.LocalPort == b.LocalPort
+		a.LocalHost == b.LocalHost && a.LocalPort == b.LocalPort &&
+		a.Config.CertPEM == b.Config.CertPEM && a.Config.KeyPEM == b.Config.KeyPEM
 }
 
 // startEntry 启动一条映射的监听器；端口被占（数据面/插件/其他映射）只记错误，
@@ -140,6 +142,16 @@ func (m *Manager) startEntry(id uint64, cfg store.PortMapping) {
 		logging.Error("portmap: listen failed", "id", id, "port", cfg.RemotePort,
 			"client", cfg.Client, "err", err)
 		return
+	}
+	if cfg.Config.CertPEM != "" || cfg.Config.KeyPEM != "" {
+		cert, err := tls.X509KeyPair([]byte(cfg.Config.CertPEM), []byte(cfg.Config.KeyPEM))
+		if err != nil {
+			_ = ln.Close()
+			logging.Error("portmap: load TLS certificate failed", "id", id, "port", cfg.RemotePort,
+				"client", cfg.Client, "err", err)
+			return
+		}
+		ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	}
 	if m.limits != nil {
 		m.limits.Apply(Identity(id), cfg.Config.UpLimit, cfg.Config.DownLimit)

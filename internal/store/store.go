@@ -237,8 +237,10 @@ type ClientTraffic struct {
 // PortConfig 是端口映射记录 Config 列的 JSON 结构；限速键与 UserConfig 一致，
 // 便于运维按同一套口径理解与脚本读写。
 type PortConfig struct {
-	UpLimit   int64 `json:"up_limit,omitempty"`
-	DownLimit int64 `json:"down_limit,omitempty"`
+	UpLimit   int64  `json:"up_limit,omitempty"`
+	DownLimit int64  `json:"down_limit,omitempty"`
+	CertPEM   string `json:"cert_pem,omitempty"`
+	KeyPEM    string `json:"key_pem,omitempty"`
 }
 
 // ParsePortConfig 解析端口映射配置 JSON；空串或非法 JSON 返回零值（视为不限速）。
@@ -255,7 +257,7 @@ func ParsePortConfig(raw string) PortConfig {
 
 // Encode 序列化端口映射配置；全零返回空串，避免库里堆积空对象。
 func (c PortConfig) Encode() string {
-	if c.UpLimit == 0 && c.DownLimit == 0 {
+	if c.UpLimit == 0 && c.DownLimit == 0 && c.CertPEM == "" && c.KeyPEM == "" {
 		return ""
 	}
 	b, err := json.Marshal(c)
@@ -317,6 +319,9 @@ func validatePortMapping(m PortMapping) error {
 	}
 	if m.Config.UpLimit < 0 || m.Config.DownLimit < 0 {
 		return fmt.Errorf("store: port mapping limits must be non-negative")
+	}
+	if (m.Config.CertPEM == "") != (m.Config.KeyPEM == "") {
+		return fmt.Errorf("store: port mapping TLS certificate and key must be provided together")
 	}
 	return nil
 }

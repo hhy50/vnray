@@ -6,7 +6,6 @@ import { api, ApiError } from '../api/client'
 import type { Plugin } from '../api/types'
 
 const plugins = ref<Plugin[]>([])
-const serverPort = ref(0)
 const loadError = ref('')
 const loading = ref(false)
 
@@ -21,7 +20,6 @@ async function load() {
   try {
     const data = await api.plugins()
     plugins.value = data.plugins
-    serverPort.value = data.server_port
     loadError.value = ''
   } catch (err) {
     loadError.value = err instanceof ApiError ? err.message : '加载失败'
@@ -101,7 +99,6 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>入站插件</strong>
-        <span class="faint">启停与参数写穿到持久存储</span>
         <div class="spacer" />
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </div>
@@ -173,11 +170,6 @@ onMounted(load)
         </template>
       </el-table-column>
     </el-table>
-
-    <p class="page-hint">
-      入站插件在本机开监听端口，把进来的流量按路由规则送进转发链路。
-      端口默认取服务端监听端口 + 1（当前 {{ serverPort || '未知' }}），需避开数据面与端口映射占用的端口。
-    </p>
   </el-card>
 
   <el-dialog

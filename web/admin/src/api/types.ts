@@ -122,6 +122,8 @@ export interface PortMap {
   local_port: number
   limit_up_kb: number
   limit_down_kb: number
+  tls_enabled: boolean
+  tls_configured: boolean
   enabled: boolean
   remark: string
   listening: boolean

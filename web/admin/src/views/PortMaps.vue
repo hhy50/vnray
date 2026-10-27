@@ -8,13 +8,13 @@ import { rate, shortName } from '../lib/format'
 
 const rows = ref<PortMap[]>([])
 const clients = ref<{ name: string; label: string }[]>([])
-const publicHost = ref('')
 const loadError = ref('')
 const loading = ref(false)
 
 const editing = ref<number | undefined>(undefined)
 const showForm = ref(false)
 const saving = ref(false)
+const advancedOpen = ref<string[]>([])
 const form = reactive({
   client: '',
   remote_port: 0,
@@ -22,6 +22,9 @@ const form = reactive({
   local_port: 0,
   limit_up_kb: 0,
   limit_down_kb: 0,
+  tls_enabled: false,
+  cert_pem: '',
+  key_pem: '',
   remark: '',
   enabled: true,
 })
@@ -32,7 +35,6 @@ async function load() {
     const data = await api.portmaps()
     rows.value = data.rows
     clients.value = data.clients
-    publicHost.value = data.public_host
     loadError.value = ''
   } catch (err) {
     loadError.value = err instanceof ApiError ? err.message : '加载失败'
@@ -49,6 +51,10 @@ function openCreate() {
   form.local_port = 0
   form.limit_up_kb = 0
   form.limit_down_kb = 0
+  form.tls_enabled = false
+  form.cert_pem = ''
+  form.key_pem = ''
+  advancedOpen.value = []
   form.remark = ''
   form.enabled = true
   showForm.value = true
@@ -62,6 +68,10 @@ function openEdit(m: PortMap) {
   form.local_port = m.local_port
   form.limit_up_kb = m.limit_up_kb
   form.limit_down_kb = m.limit_down_kb
+  form.tls_enabled = m.tls_enabled
+  form.cert_pem = ''
+  form.key_pem = ''
+  advancedOpen.value = m.tls_enabled ? ['advanced'] : []
   form.remark = m.remark
   form.enabled = m.enabled
   showForm.value = true
@@ -75,6 +85,15 @@ async function save() {
   if (!form.remote_port || !form.local_port) {
     ElMessage.warning('远程端口与本地端口都必须大于 0')
     return
+  }
+  if (form.tls_enabled && (!editing.value || form.cert_pem || form.key_pem) && (!form.cert_pem || !form.key_pem)) {
+    ElMessage.warning(editing.value ? '更换 HTTPS 配置时请同时填写证书和私钥' : '请输入证书和私钥')
+    advancedOpen.value = ['advanced']
+    return
+  }
+  if (!form.tls_enabled) {
+    form.cert_pem = ''
+    form.key_pem = ''
   }
   saving.value = true
   try {
@@ -125,7 +144,6 @@ onMounted(load)
     <template #header>
       <div class="toolbar">
         <strong>共 {{ rows.length }} 条映射</strong>
-        <span v-if="publicHost" class="faint">对外地址 {{ publicHost }}:远程端口</span>
         <div class="spacer" />
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加映射</el-button>
@@ -193,11 +211,6 @@ onMounted(load)
         </template>
       </el-table-column>
     </el-table>
-
-    <p class="page-hint">
-      链路：外部访问 {{ publicHost || '服务器地址' }}:远程端口 → 服务端 → 该客户端隧道 → 客户端本地拨号。
-      规则持久化在数据库，保存 / 启停 / 删除即时生效；改限速不中断在途连接。客户端离线时监听仍在，新连接会被拒绝。
-    </p>
   </el-card>
 
   <el-dialog
@@ -246,9 +259,29 @@ onMounted(load)
       <el-form-item label="备注">
         <el-input v-model="form.remark" placeholder="例如：办公室 NAS" />
       </el-form-item>
-      <el-form-item label="启用">
-        <el-switch v-model="form.enabled" />
-      </el-form-item>
+      <el-collapse v-model="advancedOpen" class="advanced-options">
+        <el-collapse-item name="advanced">
+          <template #title>
+            <span>高级参数</span>
+            <el-tag v-if="form.tls_enabled" size="small" type="success" effect="plain" class="advanced-status">HTTPS 已启用</el-tag>
+          </template>
+          <el-form-item>
+            <div class="tls-row">
+              <span class="tls-label">HTTPS / TLS</span>
+              <el-switch v-model="form.tls_enabled" />
+            </div>
+          </el-form-item>
+          <template v-if="form.tls_enabled">
+            <el-form-item label="证书（PEM 格式）">
+              <el-input v-model="form.cert_pem" type="textarea" :rows="5" class="mono" placeholder="-----BEGIN CERTIFICATE-----" />
+            </el-form-item>
+            <el-form-item label="私钥（PEM 格式）">
+              <el-input v-model="form.key_pem" type="textarea" :rows="5" class="mono" placeholder="-----BEGIN PRIVATE KEY-----" />
+              <div class="field-hint">编辑已有映射时不回显私钥；留空表示沿用当前私钥。</div>
+            </el-form-item>
+          </template>
+        </el-collapse-item>
+      </el-collapse>
     </el-form>
     <template #footer>
       <el-button @click="showForm = false">取消</el-button>
@@ -296,5 +329,32 @@ onMounted(load)
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.advanced-options {
+  margin-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  border-bottom: 0;
+}
+
+.advanced-status {
+  margin-left: 8px;
+}
+
+.tls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tls-label {
+  color: var(--el-text-color-regular);
+}
+
+.field-hint {
+  margin-top: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>
