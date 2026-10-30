@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import type { Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Fold,
@@ -22,24 +23,28 @@ import {
 import { useAppStore } from '../stores/app'
 import { useUserStore } from '../stores/user'
 import { api } from '../api/client'
+import { useI18n } from '../i18n'
+import type { LocaleCode, MessageKey } from '../i18n'
+import { uptime } from '../lib/format'
 
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
 const userStore = useUserStore()
+const { t, locale, setLocale, availableLocales } = useI18n()
 
 const status = ref({ version: '', uptime: 0, clients: 0 })
 
 // 菜单与 router.ts 一一对应；图标用组件引用，避免运行时按字符串解析。
-const menuItems = [
-  { label: '客户端', icon: Monitor, path: '/clients' },
-  { label: '客户端配置', icon: SetUp, path: '/client-config' },
-  { label: '用户', icon: User, path: '/users' },
-  { label: '端口映射', icon: Connection, path: '/portmaps' },
-  { label: '插件', icon: Grid, path: '/plugins' },
-  { label: '认证密钥', icon: Key, path: '/keys' },
-  { label: '服务配置', icon: Setting, path: '/service-config' },
-  { label: '日志', icon: Document, path: '/logs' },
+const menuItems: { titleKey: MessageKey; icon: Component; path: string }[] = [
+  { titleKey: 'nav.clients', icon: Monitor, path: '/clients' },
+  { titleKey: 'nav.users', icon: User, path: '/users' },
+  { titleKey: 'nav.portmaps', icon: Connection, path: '/portmaps' },
+  { titleKey: 'nav.plugins', icon: Grid, path: '/plugins' },
+  { titleKey: 'nav.keys', icon: Key, path: '/keys' },
+  { titleKey: 'nav.serviceConfig', icon: Setting, path: '/service-config' },
+  { titleKey: 'nav.clientConfig', icon: SetUp, path: '/client-config' },
+  { titleKey: 'nav.logs', icon: Document, path: '/logs' },
 ]
 
 const activePath = computed(() => {
@@ -47,28 +52,26 @@ const activePath = computed(() => {
   return hit?.path ?? route.path
 })
 
-const pageTitle = computed(() => (route.meta.title as string | undefined) ?? '')
+const currentTitleKey = computed(() => route.meta.titleKey)
 
 const breadcrumbs = computed(() => {
-  const crumbs: { title: string; path?: string }[] = [{ title: '首页', path: '/clients' }]
+  const crumbs: { title: string; path?: string }[] = [{ title: t('nav.home'), path: '/clients' }]
   const hit = menuItems.find((item) => route.path === item.path || route.path.startsWith(item.path + '/'))
   if (hit) {
-    crumbs.push({ title: hit.label, path: hit.path })
-  } else if (pageTitle.value) {
-    crumbs.push({ title: pageTitle.value })
+    crumbs.push({ title: t(hit.titleKey), path: hit.path })
+  } else if (currentTitleKey.value) {
+    crumbs.push({ title: t(currentTitleKey.value) })
   }
   return crumbs
 })
 
-function formatUptime(sec: number): string {
-  if (!sec) return '刚刚'
-  if (sec < 60) return '刚刚'
-  const d = Math.floor(sec / 86400)
-  const h = Math.floor((sec % 86400) / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  if (d) return `${d}天${h}小时`
-  if (h) return `${h}小时${m}分`
-  return `${m}分`
+// 语言切换器上显示当前语言的自称，切换后不必回查列表。
+const localeLabel = computed(
+  () => availableLocales.find((item) => item.code === locale.value)?.label ?? locale.value,
+)
+
+function onLocaleCommand(code: LocaleCode) {
+  if (code !== locale.value) setLocale(code)
 }
 
 async function refreshStatus() {
@@ -118,8 +121,8 @@ watch(
   () => route.path,
   () => {
     if (route.name === 'login') return
-    const title = (route.meta.title as string) || route.path
-    appStore.addTab({ path: route.path, title, closable: route.path !== '/clients' })
+    const titleKey = currentTitleKey.value ?? 'nav.clients'
+    appStore.addTab({ path: route.path, titleKey, closable: route.path !== '/clients' })
   },
   { immediate: true },
 )
@@ -150,7 +153,7 @@ onUnmounted(() => {
         <div class="logo-icon">V</div>
         <div v-if="!appStore.sidebarCollapsed" class="logo-text">
           <strong>vnray</strong>
-          <span>流量调度管理台</span>
+          <span>{{ t('app.subtitle') }}</span>
         </div>
       </div>
 
@@ -163,13 +166,13 @@ onUnmounted(() => {
       >
         <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
           <el-icon><component :is="item.icon" /></el-icon>
-          <template #title>{{ item.label }}</template>
+          <template #title>{{ t(item.titleKey) }}</template>
         </el-menu-item>
       </el-menu>
 
       <div v-if="!appStore.sidebarCollapsed" class="sidebar-footer">
         <span class="dot" :class="{ 'is-on': status.clients > 0 }" />
-        <span>{{ status.clients }} 个客户端在线</span>
+        <span>{{ t('app.clientsOnline', { n: status.clients }) }}</span>
         <span v-if="status.version" class="ver">{{ status.version }}</span>
       </div>
     </el-aside>
@@ -194,20 +197,38 @@ onUnmounted(() => {
         </div>
 
         <div class="header-right">
-          <span class="runtime" title="服务已运行时间">已运行 {{ formatUptime(status.uptime) }}</span>
+          <span class="runtime" :title="t('app.uptimeTip')">
+            {{ t('app.uptime', { value: uptime(status.uptime) }) }}
+          </span>
 
-          <el-tooltip content="刷新页面" placement="bottom">
+          <el-tooltip :content="t('app.reloadPage')" placement="bottom">
             <el-icon class="header-icon" @click="refreshPage"><Refresh /></el-icon>
           </el-tooltip>
-          <el-tooltip content="全屏" placement="bottom">
+          <el-tooltip :content="t('app.fullscreen')" placement="bottom">
             <el-icon class="header-icon" @click="toggleFullscreen"><FullScreen /></el-icon>
           </el-tooltip>
-          <el-tooltip :content="appStore.darkMode ? '浅色模式' : '深色模式'" placement="bottom">
+          <el-tooltip :content="appStore.darkMode ? t('app.lightMode') : t('app.darkMode')" placement="bottom">
             <el-icon class="header-icon" @click="appStore.toggleDark()">
               <Sunny v-if="appStore.darkMode" />
               <Moon v-else />
             </el-icon>
           </el-tooltip>
+
+          <el-dropdown trigger="click" @command="onLocaleCommand">
+            <span class="lang-switch" :title="t('app.language')">{{ localeLabel }}</span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="item in availableLocales"
+                  :key="item.code"
+                  :command="item.code"
+                  :disabled="item.code === locale"
+                >
+                  {{ item.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
 
           <el-dropdown trigger="click">
             <span class="user-info">
@@ -216,7 +237,7 @@ onUnmounted(() => {
             </span>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item :icon="SwitchButton" @click="doLogout">退出登录</el-dropdown-item>
+                <el-dropdown-item :icon="SwitchButton" @click="doLogout">{{ t('app.logout') }}</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -234,7 +255,7 @@ onUnmounted(() => {
           <el-tab-pane
             v-for="tab in appStore.tabs"
             :key="tab.path"
-            :label="tab.title"
+            :label="t(tab.titleKey)"
             :name="tab.path"
             :closable="tab.closable"
           />
@@ -413,6 +434,7 @@ onUnmounted(() => {
   padding: 3px 10px;
   border-radius: 999px;
   background: var(--el-fill-color-light);
+  white-space: nowrap;
 }
 
 .header-icon {
@@ -424,6 +446,23 @@ onUnmounted(() => {
 
 .header-icon:hover {
   color: var(--el-color-primary);
+}
+
+.lang-switch {
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--el-border-color-lighter);
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  outline: none;
+  white-space: nowrap;
+}
+
+.lang-switch:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-7);
 }
 
 .user-info {

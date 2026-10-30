@@ -5,10 +5,12 @@ import { useRouter, useRoute } from 'vue-router'
 import { User, Lock, View, Hide } from '@element-plus/icons-vue'
 import { useUserStore } from '../stores/user'
 import { ElMessage } from 'element-plus'
+import { useI18n } from '../i18n'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
+const { t, locale, toggleLocale } = useI18n()
 
 const form = reactive({ username: '', password: '' })
 const loading = ref(false)
@@ -16,11 +18,11 @@ const showPassword = ref(false)
 
 async function onSubmit() {
   if (!form.username.trim()) {
-    ElMessage.warning('请输入用户名')
+    ElMessage.warning(t('login.needUsername'))
     return
   }
   if (!form.password.trim()) {
-    ElMessage.warning('请输入密码')
+    ElMessage.warning(t('login.needPassword'))
     return
   }
   loading.value = true
@@ -29,7 +31,7 @@ async function onSubmit() {
     const redirect = route.query.redirect as string | undefined
     router.replace(redirect || '/clients')
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : '登录失败')
+    ElMessage.error(e instanceof Error ? e.message : t('login.failed'))
   } finally {
     loading.value = false
   }
@@ -42,11 +44,11 @@ async function onSubmit() {
       <div class="brand-inner">
         <div class="brand-logo">V</div>
         <h1>vnray</h1>
-        <p class="brand-sub">流量调度管理台</p>
+        <p class="brand-sub">{{ t('login.brandSub') }}</p>
         <ul class="brand-points">
-          <li>客户端接入与会话状态</li>
-          <li>用户、限速与端口映射</li>
-          <li>入站插件与服务配置</li>
+          <li>{{ t('login.pointClients') }}</li>
+          <li>{{ t('login.pointUsers') }}</li>
+          <li>{{ t('login.pointPlugins') }}</li>
         </ul>
       </div>
       <div class="brand-glow" />
@@ -57,8 +59,8 @@ async function onSubmit() {
         <header class="card-head">
           <div class="logo-mark">V</div>
           <div>
-            <h2>登录管理台</h2>
-            <p>使用管理员账号继续</p>
+            <h2>{{ t('login.title') }}</h2>
+            <p>{{ t('login.subtitle') }}</p>
           </div>
         </header>
 
@@ -66,7 +68,7 @@ async function onSubmit() {
           <el-form-item>
             <el-input
               v-model="form.username"
-              placeholder="用户名"
+              :placeholder="t('login.username')"
               size="large"
               :prefix-icon="User"
               autocomplete="username"
@@ -77,7 +79,7 @@ async function onSubmit() {
             <el-input
               v-model="form.password"
               :type="showPassword ? 'text' : 'password'"
-              placeholder="密码"
+              :placeholder="t('login.password')"
               size="large"
               :prefix-icon="Lock"
               autocomplete="current-password"
@@ -92,14 +94,18 @@ async function onSubmit() {
           </el-form-item>
 
           <el-button type="primary" size="large" class="login-btn" :loading="loading" @click="onSubmit">
-            登 录
+            {{ t('login.submit') }}
           </el-button>
         </el-form>
 
         <footer class="card-foot">
           <span>© {{ new Date().getFullYear() }} vnray</span>
           <span class="dot" />
-          <span>流量调度系统</span>
+          <span>{{ t('login.footer') }}</span>
+          <span class="spacer" />
+          <el-button link size="small" @click="toggleLocale()">
+            {{ locale === 'zh-CN' ? 'English' : '中文' }}
+          </el-button>
         </footer>
       </div>
     </section>

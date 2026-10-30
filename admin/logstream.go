@@ -141,7 +141,7 @@ func (s *AdminService) apiLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor, err := parseLogCursor(rawCursor)
 	if err != nil {
-		apiFail(w, http.StatusBadRequest, "日志游标无效")
+		apiFailKey(w, r, http.StatusBadRequest, msgBadLogCursor)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")

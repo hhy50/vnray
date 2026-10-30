@@ -72,6 +72,10 @@ func newClientApp(cfg config.Client) (*clientApp, error) {
 	dispatcher := newRoutingDispatcher(cfg.Routing)
 	dispatcher.SetHosts(hosts)
 	dispatcher.SetIPMaps(ipMaps)
+	// 直连分发器与服务端出站规则的 direct 名单配套：只跳过路由规则，ACL 仍然生效。
+	direct := newDirectDispatcher()
+	direct.SetHosts(hosts)
+	direct.SetIPMaps(ipMaps)
 	return &clientApp{
 		serverAddr: cfg.Server.Addr,
 		dialOpts: client.DialOptions{
@@ -84,6 +88,7 @@ func newClientApp(cfg config.Client) (*clientApp, error) {
 					"client_hosts", len(cfg.ClientConfig.CustomHosts), "global_hosts", len(cfg.GlobalConfig.CustomHosts),
 					"client_ip_maps", len(cfg.ClientConfig.IPMaps), "global_ip_maps", len(cfg.GlobalConfig.IPMaps))
 			},
+			Direct: guard.Wrap(direct),
 		},
 		dispatcher: guard.Wrap(dispatcher),
 		reconnect:  reconnect,

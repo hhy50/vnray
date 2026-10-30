@@ -139,10 +139,12 @@ func (s *ConnectorService) handshakeUser(session tcp.Session, stream tcp.Stream,
 	protocol.WriteReply(stream, protocol.AuthResult, s.userAuthReply(access.Client))
 	// 会话日志器取该用户配置的级别；Meta 带上 UserMeta：转发桥按 user_key 从限速
 	// 注册表取桶，用户上报的自信息随会话保留（客户端会话的 Meta 是 *transport.Session）。
-	var level string
+	// 出站规则名也在这里定下：规则内容随时可改，但一个会话只认一个规则名。
+	var level, userRule string
 	if s.sessionCfg != nil {
 		if cfg, ok := s.sessionCfg.UserConfig(store.ProtocolVNV1, req.Key); ok {
 			level = cfg.LogLevel
+			userRule = cfg.Rule
 		}
 	}
 	return tcp.SessionInfo{
@@ -151,7 +153,7 @@ func (s *ConnectorService) handshakeUser(session tcp.Session, stream tcp.Stream,
 		Kind:    tcp.KindUser,
 		Name:    access.Client,
 		Log:     logging.NewScoped(level, "user", req.Key),
-		Meta:    transport.UserMeta{Key: req.Key, Name: access.Name, Info: req.Info},
+		Meta:    transport.UserMeta{Key: req.Key, Name: access.Name, Rule: userRule, Info: req.Info},
 	}, nil
 }
 

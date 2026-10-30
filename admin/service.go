@@ -53,6 +53,8 @@ type AdminOptions struct {
 	LogPath string
 	// Settings 是运行时服务配置的读写口。
 	Settings ServiceSettings
+	// Rules 是用户出站规则的读写口；nil 表示规则接口不可用。
+	Rules RuleSettings
 }
 
 // AdminService 是 Web 管理面服务：会话认证 + Vue SPA + 业务 API。
@@ -180,6 +182,10 @@ func (s *AdminService) opsRoutes() []opsRoute {
 		{"PUT", "api/service-config", s.apiServiceConfigSave},
 		{"GET", "api/client-config", s.apiGlobalClientConfig},
 		{"PUT", "api/client-config", s.apiGlobalClientConfigSave},
+
+		{"GET", "api/rules", s.apiRules},
+		{"PUT", "api/rules/{name}", s.apiRuleSave},
+		{"DELETE", "api/rules/{name}", s.apiRuleDelete},
 	}
 }
 
@@ -259,11 +265,11 @@ func (s *AdminService) handleLoginSubmit(w http.ResponseWriter, r *http.Request)
 	// 按 IP+用户名 限速：窗口内连续失败达到阈值后锁定一段时间
 	key := limiterKey(r, in.Username)
 	if ok, wait := s.auth.LoginAllowed(key); !ok {
-		msg := fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", int(wait.Minutes())+1)
+		text := msg(r, msgTooManyAttempts, int(wait.Minutes())+1)
 		if wantsJSON(r) {
-			apiFail(w, http.StatusTooManyRequests, msg)
+			apiFail(w, http.StatusTooManyRequests, text)
 		} else {
-			http.Error(w, msg, http.StatusTooManyRequests)
+			http.Error(w, text, http.StatusTooManyRequests)
 		}
 		return
 	}
@@ -271,10 +277,11 @@ func (s *AdminService) handleLoginSubmit(w http.ResponseWriter, r *http.Request)
 	sessionToken, csrfToken, err := s.auth.Login(in.Username, in.Password)
 	if err != nil {
 		s.auth.LoginFailed(key)
+		reason := loginErrKey(err)
 		if wantsJSON(r) {
-			apiFail(w, http.StatusUnauthorized, err.Error())
+			apiFailKey(w, r, http.StatusUnauthorized, reason)
 		} else {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			http.Error(w, msg(r, reason), http.StatusUnauthorized)
 		}
 		return
 	}

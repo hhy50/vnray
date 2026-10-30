@@ -47,10 +47,20 @@ type ConnectorService struct {
 	// sessionCfg 与 traffic 由装配层注入；为 nil 时用默认日志级别、不落库流量。
 	sessionCfg SessionConfig
 	traffic    *traffic.Meter
+	// rules 是用户出站规则表；nil 时不做规则判定。
+	rules *ruleSet
 }
 
 // SetSessionConfig 注入用户/客户端的运维配置来源（日志级别）。
 func (s *ConnectorService) SetSessionConfig(src SessionConfig) { s.sessionCfg = src }
+
+// SetRules 注入用户出站规则表；须在 Start 前调用，nil 表示不做规则判定。
+func (s *ConnectorService) SetRules(rules *ruleSet) {
+	s.rules = rules
+	if s.hub != nil {
+		s.hub.rules = rules
+	}
+}
 
 // ApplyHeartbeat 热更新心跳策略；interval 或 timeout 非正数表示关闭心跳。
 func (s *ConnectorService) ApplyHeartbeat(interval, timeout time.Duration) {
@@ -152,8 +162,9 @@ func (s *ConnectorService) onStreamOpen(info *tcp.SessionInfo, stream tcp.Stream
 		logging.Warnf("user stream without forward hub, remote=%s", stream.RemoteAddr().String())
 		return nil
 	}
-	// 用户会话的 Meta 是握手时记下的 UserMeta：限速与审计按 user_key 标识用户。
+	// 用户会话的 Meta 是握手时记下的 UserMeta：限速与审计按 user_key 标识用户，
+	// 出站规则按其中记下的规则名判定。
 	meta, _ := info.Meta.(transport.UserMeta)
-	s.hub.handleUserStream(info.Log, meta.Key, info.Name, stream, info.Session.CloseChan())
+	s.hub.handleUserStream(info.Log, meta.Key, meta.Rule, info.Name, stream, info.Session.CloseChan())
 	return nil
 }

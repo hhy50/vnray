@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vnray · sqlite-web</title>
+<style>
+  :root { --bg:#141721; --panel:#1c2030; --border:#2a3046; --text:#dfe3ee; --muted:#8a91a8; --accent:#4f8cff; --danger:#ff5d5d; --ok:#42c98d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); display:flex; height:100vh; }
+  aside { width:240px; flex-shrink:0; border-right:1px solid var(--border); background:var(--panel); overflow:auto; }
+  aside h1 { font-size:14px; margin:0; padding:14px 16px; border-bottom:1px solid var(--border); }
+  .tbl { display:flex; justify-content:space-between; gap:8px; padding:7px 16px; cursor:pointer; color:var(--muted); }
+  .tbl:hover, .tbl.active { color:var(--text); background:var(--bg); }
+  .tbl .cnt { font-size:12px; opacity:.7; }
+  .side-label { padding:10px 16px 4px; font-size:11px; color:var(--muted); opacity:.7; letter-spacing:.08em; }
+  main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .topbar { display:flex; align-items:center; gap:16px; padding:10px 18px; border-bottom:1px solid var(--border); background:var(--panel); }
+  .topbar .spacer { flex:1; }
+  .view { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .view[hidden] { display:none; }
+  .sub { display:flex; align-items:center; gap:10px; padding:12px 18px 0; flex-wrap:wrap; }
+  .sub .spacer { flex:1; }
+  button { background:var(--accent); border:0; color:#fff; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--muted); }
+  button.tint { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+  button.tint:hover { background:rgba(79,140,255,.12); color:var(--text); }
+  textarea { width:100%; height:110px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:10px; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; resize:vertical; }
+  .console-box { padding:14px 18px; border-bottom:1px solid var(--border); }
+  .console-box .row { display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  .grid { flex:1; overflow:auto; padding:12px 18px 18px; }
+  table.data { border-collapse:collapse; width:100%; font-size:13px; }
+  .data th, .data td { border:1px solid var(--border); padding:5px 9px; text-align:left; white-space:nowrap; max-width:340px; overflow:hidden; text-overflow:ellipsis; }
+  .data th { background:var(--panel); position:sticky; top:0; color:var(--muted); font-weight:500; }
+  .data td { position:relative; padding-right:24px; }
+  .data .exp { position:absolute; right:3px; top:50%; transform:translateY(-50%); color:var(--muted); cursor:pointer; opacity:0; padding:0 3px; user-select:none; }
+  .data tr:hover .exp { opacity:1; }
+  .data .exp:hover { color:var(--text); }
+  .data tr:hover td { background:#20263a; }
+  #dlg-back { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:100; }
+  #dlg-back[hidden] { display:none; }
+  #dlg { background:var(--panel); border:1px solid var(--border); border-radius:8px; width:min(640px,92vw); max-height:80vh; display:flex; flex-direction:column; }
+  .dlg-head { display:flex; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .dlg-head .spacer { flex:1; }
+  #dlg-close { background:transparent; border:0; color:var(--muted); font-size:14px; cursor:pointer; padding:2px 6px; }
+  #dlg-close:hover { color:var(--text); }
+  #dlg-body { margin:0; padding:14px 16px; overflow:auto; white-space:pre-wrap; word-break:break-all; font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace; color:var(--text); flex:1; }
+  .dlg-foot { padding:10px 16px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px; }
+  #toast { position:fixed; top:18px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:6px; font-size:12px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:99; }
+  #toast.show { opacity:1; }
+  .muted { color:var(--muted); font-size:12px; }
+  .err { color:var(--danger); white-space:pre-wrap; }
+  .ok { color:var(--ok); }
+  .hint { color:var(--muted); font-size:13px; padding:14px 0; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>sqlite-web</h1>
+  <div class="tbl" id="nav-console"><span>SQL 控制台</span></div>
+  <div class="side-label">表</div>
+  <div id="tables"><div class="tbl">加载中…</div></div>
+</aside>
+<main>
+  <header class="topbar">
+    <span class="spacer"></span>
+    <span class="muted" id="meta"></span>
+  </header>
+
+  <div class="view" id="view-data">
+    <div class="sub">
+      <strong id="cur">选择左侧的表</strong>
+      <span class="spacer"></span>
+      <button class="tint" id="reload">刷新</button>
+    </div>
+    <div class="grid" id="grid-data">
+      <p class="hint">点击左侧任意表浏览数据；悬停单元格看全文，点右侧 ⤢ 展开完整内容。</p>
+    </div>
+  </div>
+
+  <div class="view" id="view-console" hidden>
+    <div class="console-box">
+      <textarea id="sql" placeholder="SELECT * FROM vn_user_bindings LIMIT 10"></textarea>
+      <div class="row">
+        <button id="run">执行（Ctrl+Enter）</button>
+        <span id="msg" class="muted"></span>
+      </div>
+    </div>
+    <div class="grid" id="grid-console">
+      <p class="hint">在上方输入 SQL 并执行，结果显示在这里；点单元格右侧 ⤢ 展开完整内容。</p>
+    </div>
+  </div>
+</main>
+
+<div id="dlg-back" hidden>
+  <div id="dlg">
+    <div class="dlg-head">
+      <strong>字段内容</strong>
+      <span class="spacer"></span>
+      <button id="dlg-close">✕</button>
+    </div>
+    <pre id="dlg-body"></pre>
+    <div class="dlg-foot">
+      <button class="ghost" id="dlg-copy">复制</button>
+    </div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = v => v == null ? 'NULL' : String(v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let curTable = null;
+const LIMIT = 50;
+
+function switchView(name) {
+  $('#view-data').hidden = name !== 'data';
+  $('#view-console').hidden = name !== 'console';
+  $('#nav-console').classList.toggle('active', name === 'console');
+}
+
+async function api(url, opts) {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+function renderGrid(el, cols, rows) {
+  cols = cols || [];
+  rows = rows || [];
+  if (!cols.length) { el.innerHTML = '<p class="hint">语句已执行，没有返回数据。</p>'; return; }
+  const head = '<tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + '</tr>';
+  // 单元格尾部带展开图标（NULL 没有，不渲染）；title 保留悬停看全文。
+  const cell = v => v == null
+    ? '<td data-nil="1" title="NULL"><span class="v">NULL</span></td>'
+    : '<td title="' + esc(v) + '"><span class="v">' + esc(v) + '</span><span class="exp" title="展开">⤢</span></td>';
+  const body = rows.map(r => '<tr>' + r.map(cell).join('') + '</tr>').join('');
+  el.innerHTML = '<table class="data"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+
+// copyText 优先用 Clipboard API（仅安全上下文可用）；经 http://LAN-IP 访问时退回 execCommand。
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } finally { ta.remove(); }
+  return Promise.resolve();
+}
+
+let toastTimer = 0;
+function showToast(text) {
+  let el = $('#toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1200);
+}
+
+let dlgValue = '';
+function openDialog(value) {
+  dlgValue = value;
+  $('#dlg-body').textContent = value;
+  $('#dlg-back').hidden = false;
+}
+function closeDialog() { $('#dlg-back').hidden = true; }
+
+// bindExpand 让网格里单元格尾部的 ⤢ 弹出内容 dialog；网格 innerHTML 会被整体替换，
+// 事件必须挂在容器上。
+function bindExpand(el) {
+  el.addEventListener('click', e => {
+    const exp = e.target.closest('.exp');
+    if (!exp) return;
+    openDialog(exp.closest('td').querySelector('.v').textContent);
+  });
+}
+
+function renderMsg(text, cls) { $('#msg').innerHTML = '<span class="' + cls + '">' + esc(text) + '</span>'; }
+
+async function loadTables() {
+  try {
+    const data = await api('/api/tables');
+    $('#tables').innerHTML = data.tables.map(t =>
+      '<div class="tbl' + (t.name === curTable ? ' active' : '') + '" data-name="' + esc(t.name) + '">'
+      + '<span>' + esc(t.name) + '</span><span class="cnt">' + t.rows + '</span></div>').join('')
+      || '<div class="tbl">（无表）</div>';
+    for (const el of document.querySelectorAll('.tbl[data-name]'))
+      el.onclick = () => loadTable(el.dataset.name, 0);
+  } catch (e) {
+    $('#tables').innerHTML = '<div class="tbl err">' + esc(e.message) + '</div>';
+  }
+}
+
+async function loadTable(name, offset) {
+  curTable = name;
+  switchView('data');
+  $('#cur').textContent = name;
+  try {
+    const data = await api('/api/table?name=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + LIMIT);
+    renderGrid($('#grid-data'), data.columns, data.rows);
+    const from = data.total === 0 ? 0 : offset + 1, to = offset + data.rows.length;
+    let nav = '';
+    if (offset > 0) nav += '<button class="ghost" id="prev">上一页</button> ';
+    if (to < data.total) nav += '<button class="ghost" id="next">下一页</button>';
+    $('#meta').innerHTML = '共 ' + data.total + ' 行，显示 ' + from + '-' + to + ' ' + nav;
+    const prev = $('#prev'), next = $('#next');
+    if (prev) prev.onclick = () => loadTable(name, Math.max(0, offset - LIMIT));
+    if (next) next.onclick = () => loadTable(name, offset + LIMIT);
+  } catch (e) {
+    $('#meta').textContent = '';
+    $('#grid-data').innerHTML = '<p class="err" style="padding:14px 0">' + esc(e.message) + '</p>';
+  }
+}
+
+async function runSQL() {
+  const text = $('#sql').value.trim();
+  if (!text) return;
+  renderMsg('执行中…', 'muted');
+  try {
+    const data = await api('/api/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql: text }),
+    });
+    if (data.columns) {
+      renderGrid($('#grid-console'), data.columns, data.rows);
+      $('#meta').textContent = data.truncated ? '结果超过 ' + data.rows.length + ' 行已截断' : data.rows.length + ' 行';
+      renderMsg('OK', 'ok');
+    } else {
+      $('#grid-console').innerHTML = '<p class="hint">语句已执行。</p>';
+      $('#meta').textContent = '';
+      renderMsg('影响 ' + (data.rows_affected ?? 0) + ' 行', 'ok');
+    }
+    loadTables();
+  } catch (e) { renderMsg(e.message, 'err'); }
+}
+
+$('#nav-console').onclick = () => switchView('console');
+$('#run').onclick = runSQL;
+$('#reload').onclick = loadTables;
+$('#sql').addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runSQL(); });
+$('#dlg-close').onclick = closeDialog;
+$('#dlg-copy').onclick = () => copyText(dlgValue).then(() => showToast('已复制到剪贴板'));
+$('#dlg-back').addEventListener('click', e => { if (e.target === $('#dlg-back')) closeDialog(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#dlg-back').hidden) closeDialog(); });
+bindExpand($('#grid-data'));
+bindExpand($('#grid-console'));
+loadTables();
+</script>
+</body>
+</html>

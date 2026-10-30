@@ -107,6 +107,8 @@ type TunnelRequest struct {
 	// Network 是隧道的数据类型，取值 "tcp"（默认）或 "udp"。udp 隧道载荷是一串
 	// [2B len][datagram]* 封帧，客户端据此用 UDP 出口出站。
 	Network string `json:"network,omitempty"`
+	// Direct 为 true 时出口跳过自己的路由规则直接拨号（服务端出站规则的 direct 名单命中）。
+	Direct bool `json:"direct,omitempty"`
 }
 
 // Reply 是各类结果帧（AuthResult / ForwardResult / TunnelResult）的载荷。

@@ -1,4 +1,5 @@
 // 展示层的小工具：接口只给原始数值，格式化都在前端做。
+import { getLocale, t } from '../i18n'
 
 export function bytes(n: number): string {
   if (!n) return '0 B'
@@ -13,14 +14,14 @@ export function bytes(n: number): string {
 }
 
 export function rate(kb: number): string {
-  return kb > 0 ? `${kb} KB/s` : '不限'
+  return kb > 0 ? `${kb} KB/s` : t('common.unlimited')
 }
 
 export function clock(raw: string | null | undefined): string {
   if (!raw) return '—'
   const d = new Date(raw)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleTimeString('zh-CN', { hour12: false })
+  return d.toLocaleTimeString(getLocale(), { hour12: false })
 }
 
 // 客户端名是 namespace:group:name，列表里只显示末段，完整值挂在 title 上。
@@ -30,14 +31,15 @@ export function shortName(name: string | null | undefined): string {
   return idx >= 0 ? name.slice(idx + 1) : name
 }
 
+// uptime 按语言给粒度：中文用「天/小时/分」，英文用 d/h/m。
 export function uptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
+  if (!seconds || seconds < 60) return t('common.justNow')
   const d = Math.floor(seconds / 86400)
   const h = Math.floor((seconds % 86400) / 3600)
   const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
+  if (d) return t('app.uptimeDays', { d, h })
+  if (h) return t('app.uptimeHours', { h, m })
+  return t('app.uptimeMinutes', { m })
 }
 
 export async function copyText(text: string): Promise<boolean> {

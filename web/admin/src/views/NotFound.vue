@@ -3,9 +3,11 @@
 import { useRouter, useRoute } from 'vue-router'
 import { computed } from 'vue'
 import { HomeFilled, ArrowLeft, Search } from '@element-plus/icons-vue'
+import { useI18n } from '../i18n'
 
 const router = useRouter()
 const route = useRoute()
+const { t } = useI18n()
 
 const currentPath = computed(() => route.fullPath)
 
@@ -25,17 +27,17 @@ function goHome() {
         <el-icon :size="80" color="#909399"><Search /></el-icon>
       </div>
       <h1 class="title">404</h1>
-      <h2 class="subtitle">页面不存在</h2>
+      <h2 class="subtitle">{{ t('notFound.subtitle') }}</h2>
       <p class="desc">
-        地址可能拼错了，或者这个页面还没迁到新界面。
+        {{ t('notFound.desc') }}
       </p>
       <div class="path-display">
-        <span class="path-label">当前路径：</span>
+        <span class="path-label">{{ t('notFound.currentPath') }}</span>
         <span class="path-value mono">{{ currentPath }}</span>
       </div>
       <div class="actions">
-        <el-button :icon="ArrowLeft" @click="goBack">返回上一页</el-button>
-        <el-button type="primary" :icon="HomeFilled" @click="goHome">回到首页</el-button>
+        <el-button :icon="ArrowLeft" @click="goBack">{{ t('notFound.back') }}</el-button>
+        <el-button type="primary" :icon="HomeFilled" @click="goHome">{{ t('notFound.home') }}</el-button>
       </div>
     </div>
   </div>

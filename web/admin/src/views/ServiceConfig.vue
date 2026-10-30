@@ -1,9 +1,12 @@
 <script setup lang="ts">
-// 服务配置：只收运行期可热生效的参数，保存即落库；需要重启的项留在配置文件里。
+// 服务端配置：只收运行期可热生效的参数，保存即落库；需要重启的项留在配置文件里。
 import { computed, onMounted, ref } from 'vue'
 import { RefreshLeft } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { ServiceConfig } from '../api/types'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const form = ref<ServiceConfig | null>(null)
 const loadError = ref('')
@@ -23,7 +26,7 @@ async function load() {
     snapshot.value = JSON.stringify(data)
     loadError.value = ''
   } catch (err) {
-    loadError.value = err instanceof ApiError ? err.message : '加载失败'
+    loadError.value = err instanceof ApiError ? err.message : t('common.loadFailed')
   } finally {
     loading.value = false
   }
@@ -35,10 +38,10 @@ async function save() {
   try {
     await api.serviceConfigSave(form.value)
     snapshot.value = JSON.stringify(form.value)
-    ElMessage.success('已保存并热生效')
+    ElMessage.success(t('serviceConfig.saved'))
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -58,134 +61,137 @@ onMounted(load)
 
     <el-form v-else-if="form" v-loading="loading" class="config-form" label-position="top" @submit.prevent="save">
       <p class="page-hint intro">
-        这里只放可以在线修改并即时生效的参数，改动落库、重启后依然生效。
-        监听地址、管理端口、存储等需要重启的配置请编辑配置文件。
-        下发给客户端的全局 Host 与 IP 段规则在「客户端配置」页维护。
+        {{ t('serviceConfig.intro') }}
       </p>
 
-      <el-card shadow="never" class="config-card">
-        <template #header>
-          <div class="card-title">对外分享主机</div>
-        </template>
-        <el-form-item label="public_host（vmess / vless 分享链接对外暴露的主机）" class="w-md">
-          <el-input v-model="form.public_host" placeholder="vpn.example.com" />
-        </el-form-item>
-        <p class="field-tip">
-          留空时退回管理台请求的 Host。管理台只监听回环地址时，生成的链接仅本机可用。
-        </p>
-      </el-card>
+      <div class="config-layout">
+        <div class="config-column config-column--main">
+          <el-card shadow="never" class="config-card">
+            <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardServerProxy') }}</div>
+            </template>
+            <el-form-item :label="t('serviceConfig.enableServerProxy')">
+              <el-switch v-model="form.server_proxy_enabled" />
+            </el-form-item>
+            <p class="field-tip">
+              {{ t('serviceConfig.proxyTipBefore') }}<span class="mono">server:self</span>{{ t('serviceConfig.proxyTipAfter') }}
+            </p>
+            <div class="form-row">
+              <el-form-item :label="t('serviceConfig.publicLabel')">
+                <el-input v-model="form.server_proxy_public" placeholder="192.168.31.*, fd00::/64" class="mono" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.privateLabel')">
+                <el-input v-model="form.server_proxy_private" class="mono" />
+              </el-form-item>
+            </div>
+            <el-form-item :label="t('serviceConfig.routingLabel')">
+              <el-input v-model="form.server_proxy_routing" type="textarea" :rows="9" class="code-area" spellcheck="false" />
+            </el-form-item>
+          </el-card>
 
-      <el-card shadow="never" class="config-card">
-        <template #header>
-          <div class="card-title">本机出口（server_proxy）</div>
-        </template>
-        <el-form-item label="启用本机出口（保留名 server:self）">
-          <el-switch v-model="form.server_proxy_enabled" />
-        </el-form-item>
-        <p class="field-tip">
-          启用后服务端自身成为可绑定的出口：把用户绑定到 <span class="mono">server:self</span> 即由本机直连出站。
-          启用时客户端页会登记一行「本机」，停用时移除。
-        </p>
-        <div class="form-row">
-          <el-form-item label="public（允许出站网段白名单，空 = 不限制）">
-            <el-input v-model="form.server_proxy_public" placeholder="192.168.31.*, fd00::/64" class="mono" />
-          </el-form-item>
-          <el-form-item label="private（禁止出站网段黑名单，优先级更高）">
-            <el-input v-model="form.server_proxy_private" class="mono" />
-          </el-form-item>
+          <el-card shadow="never" class="config-card">
+            <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardMultiplex') }}</div>
+            </template>
+            <el-alert
+              type="warning"
+              :closable="false"
+              show-icon
+              class="mp-alert"
+              :title="t('serviceConfig.mpAlertTitle')"
+              :description="t('serviceConfig.mpAlertDesc')"
+            />
+            <div class="form-row">
+              <el-form-item :label="t('serviceConfig.keepaliveInterval')">
+                <el-input v-model="form.keepalive_interval" placeholder="10s" class="mono" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.keepaliveTimeout')">
+                <el-input v-model="form.keepalive_timeout" placeholder="30s" class="mono" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.streamWindow')">
+                <el-input-number v-model="form.max_stream_window_kb" :min="0" controls-position="right" style="width: 100%" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.acceptBacklog')">
+                <el-input-number v-model="form.accept_backlog" :min="0" controls-position="right" style="width: 100%" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.streamOpenTimeout')">
+                <el-input v-model="form.stream_open_timeout" placeholder="75s" class="mono" />
+              </el-form-item>
+            </div>
+          </el-card>
         </div>
-        <el-form-item label="routing（出站与规则，YAML；留空用内置默认）">
-          <el-input v-model="form.server_proxy_routing" type="textarea" :rows="9" class="code-area" spellcheck="false" />
-        </el-form-item>
-      </el-card>
 
-      <el-card shadow="never" class="config-card">
-        <template #header>
-          <div class="card-title">心跳</div>
-        </template>
-        <div class="form-row">
-          <el-form-item label="启用心跳探测（影响客户端的「延迟」列）" class="switch-item">
-            <el-switch v-model="form.heartbeat_enabled" />
-          </el-form-item>
-          <el-form-item label="探测间隔">
-            <el-input v-model="form.heartbeat_interval" placeholder="5s" class="mono" />
-          </el-form-item>
-          <el-form-item label="单次等待上限">
-            <el-input v-model="form.heartbeat_timeout" placeholder="3s" class="mono" />
-          </el-form-item>
-        </div>
-        <p class="field-tip">心跳只用于测往返时延；断连判定由多路复用 keepalive 负责。改动即时作用于在线会话。</p>
-      </el-card>
+        <div class="config-column config-column--side">
+          <el-card shadow="never" class="config-card">
+            <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardPublicHost') }}</div>
+            </template>
+            <el-form-item :label="t('serviceConfig.publicHostLabel')" class="w-md">
+              <el-input v-model="form.public_host" placeholder="vpn.example.com" />
+            </el-form-item>
+            <p class="field-tip">
+              {{ t('serviceConfig.publicHostTip') }}
+            </p>
+          </el-card>
 
-      <el-card shadow="never" class="config-card">
-        <template #header>
-          <div class="card-title">日志</div>
-        </template>
-        <div class="form-row">
-          <el-form-item label="全局日志级别">
-            <el-select v-model="form.log_level">
-              <el-option label="debug" value="debug" />
-              <el-option label="info" value="info" />
-              <el-option label="warn" value="warn" />
-              <el-option label="error" value="error" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="落库周期 / 流量记账">
-            <el-input v-model="form.traffic_flush_interval" placeholder="10s" class="mono" />
-          </el-form-item>
-        </div>
-        <div class="form-row">
-          <el-form-item label="轮转单文件上限（MB）">
-            <el-input-number v-model="form.log_rotate_max_size_mb" :min="1" controls-position="right" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="保留份数">
-            <el-input-number v-model="form.log_rotate_max_backups" :min="0" controls-position="right" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="保留天数">
-            <el-input-number v-model="form.log_rotate_max_age_days" :min="0" controls-position="right" style="width: 100%" />
-          </el-form-item>
-        </div>
-        <p v-if="!form.log_to_file" class="field-tip">
-          当前日志未写入文件（输出到终端），轮转参数不生效；把配置文件的 log.output 指向文件后才会用到。
-        </p>
-      </el-card>
+          <el-card shadow="never" class="config-card">
+            <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardHeartbeat') }}</div>
+            </template>
+            <div class="form-row">
+              <el-form-item :label="t('serviceConfig.heartbeatEnabled')" class="switch-item">
+                <el-switch v-model="form.heartbeat_enabled" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.heartbeatInterval')">
+                <el-input v-model="form.heartbeat_interval" placeholder="5s" class="mono" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.heartbeatTimeout')">
+                <el-input v-model="form.heartbeat_timeout" placeholder="3s" class="mono" />
+              </el-form-item>
+            </div>
+            <p class="field-tip">{{ t('serviceConfig.heartbeatTip') }}</p>
+          </el-card>
 
-      <el-card shadow="never" class="config-card">
-        <template #header>
-          <div class="card-title">多路复用</div>
-        </template>
-        <el-alert
-          type="warning"
-          :closable="false"
-          show-icon
-          class="mp-alert"
-          title="一条链路的两端必须一致"
-          description="客户端侧目前固定使用内置默认值，只改服务端会与客户端不对称，可能影响存活检测。改动只对之后建立的连接生效，不确定时保持默认。"
-        />
-        <div class="form-row">
-          <el-form-item label="keepalive 探测间隔（0 = 默认）">
-            <el-input v-model="form.keepalive_interval" placeholder="10s" class="mono" />
-          </el-form-item>
-          <el-form-item label="keepalive 等待上限（0 = 默认）">
-            <el-input v-model="form.keepalive_timeout" placeholder="30s" class="mono" />
-          </el-form-item>
-          <el-form-item label="单流窗口 KiB（0 = 默认）">
-            <el-input-number v-model="form.max_stream_window_kb" :min="0" controls-position="right" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="入站流积压上限（0 = 默认）">
-            <el-input-number v-model="form.accept_backlog" :min="0" controls-position="right" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="开流确认上限（0 = 不限）">
-            <el-input v-model="form.stream_open_timeout" placeholder="75s" class="mono" />
-          </el-form-item>
+          <el-card shadow="never" class="config-card">
+            <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardLog') }}</div>
+            </template>
+            <div class="form-row">
+              <el-form-item :label="t('serviceConfig.logLevel')">
+                <el-select v-model="form.log_level">
+                  <el-option label="debug" value="debug" />
+                  <el-option label="info" value="info" />
+                  <el-option label="warn" value="warn" />
+                  <el-option label="error" value="error" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.flushInterval')">
+                <el-input v-model="form.traffic_flush_interval" placeholder="10s" class="mono" />
+              </el-form-item>
+            </div>
+            <div class="form-row">
+              <el-form-item :label="t('serviceConfig.rotateSize')">
+                <el-input-number v-model="form.log_rotate_max_size_mb" :min="1" controls-position="right" style="width: 100%" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.rotateBackups')">
+                <el-input-number v-model="form.log_rotate_max_backups" :min="0" controls-position="right" style="width: 100%" />
+              </el-form-item>
+              <el-form-item :label="t('serviceConfig.rotateAge')">
+                <el-input-number v-model="form.log_rotate_max_age_days" :min="0" controls-position="right" style="width: 100%" />
+              </el-form-item>
+            </div>
+            <p v-if="!form.log_to_file" class="field-tip">
+              {{ t('serviceConfig.logFileTip') }}
+            </p>
+          </el-card>
         </div>
-      </el-card>
+      </div>
 
       <div class="save-bar">
-        <span class="faint">{{ dirty ? '有未保存的改动' : '已与数据库一致' }}</span>
+        <span class="faint">{{ dirty ? t('serviceConfig.dirty') : t('serviceConfig.clean') }}</span>
         <div class="spacer" />
-        <el-button :icon="RefreshLeft" :disabled="!dirty" @click="reset">撤销</el-button>
-        <el-button type="primary" :loading="saving" :disabled="!dirty" @click="save">保存并生效</el-button>
+        <el-button :icon="RefreshLeft" :disabled="!dirty" @click="reset">{{ t('common.undo') }}</el-button>
+        <el-button type="primary" :loading="saving" :disabled="!dirty" @click="save">{{ t('serviceConfig.saveApply') }}</el-button>
       </div>
     </el-form>
   </div>
@@ -193,7 +199,8 @@ onMounted(load)
 
 <style scoped>
 .config-page {
-  max-width: 1080px;
+  width: 100%;
+  max-width: 1600px;
 }
 
 .config-form {
@@ -201,6 +208,26 @@ onMounted(load)
   flex-direction: column;
   gap: 16px;
   padding-bottom: 8px;
+}
+
+.config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.95fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.config-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 1199px) {
+  .config-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .intro {

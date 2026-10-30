@@ -32,6 +32,9 @@ type DialOptions struct {
 	// OnConfig 在收到服务端下发的全量配置快照时被调用（认证应答或下发帧）；
 	// nil 表示客户端不维护服务端下发的配置。实现方负责并发安全。
 	OnConfig func(cfg protocol.PushConfig)
+	// Direct 是"直连"分发器：隧道帧带 Direct 标志时用它出站，跳过本客户端的路由
+	// 规则（服务端出站规则 direct 名单命中）。nil 表示不支持直连，仍走 dispatcher。
+	Direct dispatch.Dispatcher
 }
 
 // DialTimeout 是建立 TCP 连接的等待上限。
@@ -46,6 +49,7 @@ const maxFramePayload = 32 * 1024
 type Client struct {
 	session          tcp.Session
 	dispatcher       dispatch.Dispatcher
+	direct           dispatch.Dispatcher
 	onConfig         func(protocol.PushConfig)
 	configMu         sync.Mutex
 	lastConfigStream uint32
@@ -73,6 +77,7 @@ func Dial(addr string, dispatcher dispatch.Dispatcher, opts DialOptions) (*Clien
 	return &Client{
 		session:    session,
 		dispatcher: dispatcher,
+		direct:     opts.Direct,
 		onConfig:   opts.OnConfig,
 	}, nil
 }
@@ -184,12 +189,13 @@ func (c *Client) handleStream(stream tcp.Stream) {
 }
 
 // handleTunnel 处理一条隧道流：首帧带目标地址，之后该流承载裸字节。出口侧复用
-// dispatcher 分发目标，因此 ACL 与路由规则照常生效；随后把两侧字节双向对接。
+// dispatcher 分发目标，因此 ACL 与路由规则照常生效；帧上带 Direct 标志时改用直连
+// 分发器，跳过本客户端的路由规则（服务端出站规则的 direct 名单）。随后把两侧字节双向对接。
 func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 	remote := stream.RemoteAddr().String()
 	sid := stream.ID()
 	// 目标在载荷开头的地址块里，其后是 JSON 请求体。
-	addr, _, err := protocol.ReadTunnelRequest(first.Body)
+	addr, req, err := protocol.ReadTunnelRequest(first.Body)
 	if err != nil {
 		logging.Warn("client: bad tunnel frame", "remote", remote, "stream_id", sid, "err", err)
 		protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: false, Reason: "bad tunnel frame"})
@@ -211,7 +217,11 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	link, err := c.dispatcher.Dispatch(ctx, dest)
+	dispatcher := c.dispatcher
+	if req.Direct && c.direct != nil {
+		dispatcher = c.direct
+	}
+	link, err := dispatcher.Dispatch(ctx, dest)
 	if err != nil {
 		logging.Warn("client: tunnel dispatch failed",
 			"remote", remote, "stream_id", sid, "destination", dest.String(), "err", err)

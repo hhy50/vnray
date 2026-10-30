@@ -45,7 +45,7 @@ type apiPortMapDTO struct {
 func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"rows":        []apiPortMapDTO{},
-		"clients":     s.clientOptionsForPortMap(),
+		"clients":     s.clientOptionsForPortMap(r),
 		"public_host": s.shareHost(r),
 	}
 	if s.opts.Store == nil {
@@ -110,7 +110,7 @@ type apiPortMapIn struct {
 // apiPortMapSave 新增（POST /portmaps）或更新（PUT /portmaps/{id}）一条映射。
 func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store == nil {
-		apiFail(w, http.StatusNotFound, "端口映射未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
 	var in apiPortMapIn
@@ -124,15 +124,15 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	in.CertPEM = strings.TrimSpace(in.CertPEM)
 	in.KeyPEM = strings.TrimSpace(in.KeyPEM)
 	if in.Client == "" || in.LocalHost == "" {
-		apiFail(w, http.StatusBadRequest, "客户端与本地主机都必须填写")
+		apiFailKey(w, r, http.StatusBadRequest, msgPortMapNeedClient)
 		return
 	}
 	if in.RemotePort < 1 || in.RemotePort > 65535 || in.LocalPort < 1 || in.LocalPort > 65535 {
-		apiFail(w, http.StatusBadRequest, "端口必须在 1-65535 之间")
+		apiFailKey(w, r, http.StatusBadRequest, msgPortOutOfRange)
 		return
 	}
 	if in.UpKB < 0 || in.DownKB < 0 {
-		apiFail(w, http.StatusBadRequest, "限速必须是非负整数")
+		apiFailKey(w, r, http.StatusBadRequest, msgLimitNegative)
 		return
 	}
 	var previous store.PortMapping
@@ -145,15 +145,15 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.TLSEnabled != nil && *in.TLSEnabled {
 		if in.CertPEM == "" || in.KeyPEM == "" {
-			apiFail(w, http.StatusBadRequest, "启用 HTTPS 时必须同时填写证书和私钥")
+			apiFailKey(w, r, http.StatusBadRequest, msgTLSNeedCertKey)
 			return
 		}
 		if _, err := tls.X509KeyPair([]byte(in.CertPEM), []byte(in.KeyPEM)); err != nil {
-			apiFail(w, http.StatusBadRequest, "证书或私钥无效: "+err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgTLSCertInvalid, err)
 			return
 		}
 	} else if in.CertPEM != "" || in.KeyPEM != "" {
-		apiFail(w, http.StatusBadRequest, "证书和私钥必须同时填写")
+		apiFailKey(w, r, http.StatusBadRequest, msgCertKeyTogether)
 		return
 	}
 	m := store.PortMapping{
@@ -169,7 +169,7 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
 	defer cancel()
 	if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	logging.Info("admin: port mapping saved", "id", id, "client", m.Client,
@@ -182,12 +182,12 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 // apiPortMapDelete 删除一条映射。
 func (s *AdminService) apiPortMapDelete(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store == nil {
-		apiFail(w, http.StatusNotFound, "端口映射未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
 	id, err := strconv.ParseUint(strings.TrimSpace(r.PathValue("id")), 10, 64)
 	if err != nil || id == 0 {
-		apiFail(w, http.StatusBadRequest, "映射编号不合法")
+		apiFailKey(w, r, http.StatusBadRequest, msgPortMapBadID)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
@@ -195,7 +195,7 @@ func (s *AdminService) apiPortMapDelete(w http.ResponseWriter, r *http.Request) 
 	deleted, err := s.opts.Store.DeletePortMapping(ctx, id)
 	if err != nil {
 		logging.Error("admin: port mapping delete failed", "id", id, "err", err)
-		apiFail(w, http.StatusInternalServerError, "删除失败：存储错误")
+		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
 		return
 	}
 	logging.Info("admin: port mapping deleted", "id", id, "existed", deleted, "actor", actorOf(r))
@@ -206,12 +206,12 @@ func (s *AdminService) apiPortMapDelete(w http.ResponseWriter, r *http.Request) 
 // apiPortMapToggle 翻转启用状态。
 func (s *AdminService) apiPortMapToggle(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store == nil {
-		apiFail(w, http.StatusNotFound, "端口映射未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
 	id, err := strconv.ParseUint(strings.TrimSpace(r.PathValue("id")), 10, 64)
 	if err != nil || id == 0 {
-		apiFail(w, http.StatusBadRequest, "映射编号不合法")
+		apiFailKey(w, r, http.StatusBadRequest, msgPortMapBadID)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
@@ -219,15 +219,15 @@ func (s *AdminService) apiPortMapToggle(w http.ResponseWriter, r *http.Request) 
 	m, ok, err := s.opts.Store.GetPortMapping(ctx, id)
 	switch {
 	case err != nil:
-		apiFail(w, http.StatusInternalServerError, "读取失败：存储错误")
+		apiFailKey(w, r, http.StatusInternalServerError, msgReadStoreFailed)
 		return
 	case !ok:
-		apiFail(w, http.StatusNotFound, "没有这条映射")
+		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotFound)
 		return
 	}
 	m.Enabled = !m.Enabled
 	if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	logging.Info("admin: port mapping toggled", "id", id, "enabled", m.Enabled, "actor", actorOf(r))
@@ -251,6 +251,7 @@ type apiPluginDTO struct {
 	Params       map[string]string `json:"params"`
 	Slots        []apiPortSlot     `json:"slots"`
 	AcceptsUsers bool              `json:"accepts_users"`
+	BasicAuth    bool              `json:"basic_auth"`
 	TLS          *plugin.TLSInfo   `json:"tls,omitempty"`
 }
 
@@ -277,6 +278,9 @@ func (s *AdminService) apiPlugins(w http.ResponseWriter, r *http.Request) {
 			if p, err := s.opts.Plugins.Get(st.Name); err == nil {
 				if _, ok := p.(plugin.UserSyncer); ok {
 					dto.AcceptsUsers = true
+				}
+				if _, ok := p.(plugin.BasicAuthProvider); ok {
+					dto.BasicAuth = true
 				}
 			}
 		}
@@ -311,17 +315,17 @@ func (s *AdminService) apiPluginTLS(w http.ResponseWriter, r *http.Request) {
 
 func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, action string) {
 	if s.opts.Plugins == nil {
-		apiFail(w, http.StatusNotFound, "插件管理器未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgPluginsNotConfigured)
 		return
 	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
-		apiFail(w, http.StatusBadRequest, "插件名不能为空")
+		apiFailKey(w, r, http.StatusBadRequest, msgPluginNameEmpty)
 		return
 	}
 	p, err := s.opts.Plugins.Get(name)
 	if err != nil {
-		apiFail(w, http.StatusNotFound, err.Error())
+		apiFailKey(w, r, http.StatusNotFound, msgOpFailedDetail, err)
 		return
 	}
 	var in apiPluginIn
@@ -335,27 +339,27 @@ func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, a
 	case "start":
 		if err := p.Enable(ctx, in.Params); err != nil {
 			logging.Error("admin: plugin enable failed", "plugin", name, "params", in.Params, "err", err)
-			apiFail(w, http.StatusBadRequest, "启用失败: "+err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginEnableFailed, err)
 			return
 		}
 		logging.Info("admin: plugin enabled", "plugin", name, "params", in.Params, "actor", actorOf(r))
 	case "stop":
 		if err := p.Disable(ctx); err != nil {
 			logging.Error("admin: plugin disable failed", "plugin", name, "err", err)
-			apiFail(w, http.StatusInternalServerError, "停用失败：存储错误")
+			apiFailKey(w, r, http.StatusInternalServerError, msgPluginDisableFailed)
 			return
 		}
 		logging.Info("admin: plugin disabled", "plugin", name, "actor", actorOf(r))
 	case "port":
 		ports, err := portsFromParams(in.Params)
 		if err != nil {
-			apiFail(w, http.StatusBadRequest, err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 			return
 		}
 		if ms, ok := p.(plugin.MultiPortSetter); ok {
 			if err := ms.SetPorts(ctx, ports); err != nil {
 				logging.Error("admin: plugin set ports failed", "plugin", name, "ports", ports, "err", err)
-				apiFail(w, http.StatusBadRequest, "改端口失败: "+err.Error())
+				apiFailKey(w, r, http.StatusBadRequest, msgPluginPortFailed, err)
 				return
 			}
 			logging.Info("admin: plugin ports updated", "plugin", name, "ports", ports, "actor", actorOf(r))
@@ -363,7 +367,7 @@ func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, a
 		}
 		setter, ok := p.(plugin.PortSetter)
 		if !ok {
-			apiFail(w, http.StatusBadRequest, "该插件不支持运行中改端口")
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginPortUnsupport)
 			return
 		}
 		port := 0
@@ -375,35 +379,35 @@ func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, a
 			port = raw
 		}
 		if port <= 0 || port >= 65536 {
-			apiFail(w, http.StatusBadRequest, "端口必须是 1..65535 的整数")
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginPortInvalid)
 			return
 		}
 		if err := setter.SetPort(ctx, port); err != nil {
 			logging.Error("admin: plugin set port failed", "plugin", name, "port", port, "err", err)
-			apiFail(w, http.StatusBadRequest, "改端口失败: "+err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginPortFailed, err)
 			return
 		}
 		logging.Info("admin: plugin port updated", "plugin", name, "port", port, "actor", actorOf(r))
 	case "tls":
 		setter, ok := p.(plugin.TLSSetter)
 		if !ok {
-			apiFail(w, http.StatusBadRequest, "该插件不支持 TLS")
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginTLSUnsupported)
 			return
 		}
 		enabled, err := parseOnOff(in.Params["enabled"])
 		if err != nil {
-			apiFail(w, http.StatusBadRequest, err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 			return
 		}
 		sni := strings.TrimSpace(in.Params["sni"])
 		if err := setter.SetTLS(ctx, enabled, sni); err != nil {
 			logging.Error("admin: plugin set tls failed", "plugin", name, "enabled", enabled, "sni", sni, "err", err)
-			apiFail(w, http.StatusBadRequest, "配置 TLS 失败: "+err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgPluginTLSFailed, err)
 			return
 		}
 		logging.Info("admin: plugin tls updated", "plugin", name, "enabled", enabled, "sni", sni, "actor", actorOf(r))
 	default:
-		apiFail(w, http.StatusBadRequest, "不支持的动作")
+		apiFailKey(w, r, http.StatusBadRequest, msgUnsupportedAction)
 		return
 	}
 	apiOK(w, map[string]any{"plugin": name, "action": action})
@@ -475,7 +479,7 @@ type apiKeyIn struct {
 // apiKeySave 按密钥 upsert。
 func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Bindings == nil {
-		apiFail(w, http.StatusNotFound, "认证密钥未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgKeysNotConfigured)
 		return
 	}
 	var in apiKeyIn
@@ -485,7 +489,7 @@ func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(in.Key)
 	scope := strings.TrimSpace(in.Scope)
 	if err := s.opts.Bindings.SetAuthKey(key, scope); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	logging.Info("admin: auth key saved", "scope", scope, "actor", actorOf(r))
@@ -495,18 +499,18 @@ func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 // apiKeyDelete 按密钥删除。
 func (s *AdminService) apiKeyDelete(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Bindings == nil {
-		apiFail(w, http.StatusNotFound, "认证密钥未配置")
+		apiFailKey(w, r, http.StatusNotFound, msgKeysNotConfigured)
 		return
 	}
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	if key == "" {
-		apiFail(w, http.StatusBadRequest, "key 不能为空")
+		apiFailKey(w, r, http.StatusBadRequest, msgKeyEmpty)
 		return
 	}
 	deleted, err := s.opts.Bindings.DeleteAuthKey(key)
 	if err != nil {
 		logging.Error("admin: auth key delete failed", "err", err)
-		apiFail(w, http.StatusInternalServerError, "删除失败：存储错误")
+		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
 		return
 	}
 	logging.Info("admin: auth key deleted", "existed", deleted, "actor", actorOf(r))
@@ -524,7 +528,7 @@ func (s *AdminService) apiLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"path": s.opts.LogPath, "query": query, "lines": []string{}, "truncated": false}
 	if s.opts.LogPath == "" {
-		out["lines"] = []string{"日志输出到 stderr，未写文件；在配置 log.output 设置文件路径后可在此查看。"}
+		out["lines"] = []string{msg(r, msgNoLogFile)}
 		apiOK(w, out)
 		return
 	}
@@ -603,7 +607,7 @@ func (s *AdminService) apiServiceConfig(w http.ResponseWriter, r *http.Request) 
 // apiServiceConfigSave 校验并落库，成功后热分发到运行态。
 func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Settings == nil {
-		apiFail(w, http.StatusServiceUnavailable, "运行时配置未接入")
+		apiFailKey(w, r, http.StatusServiceUnavailable, msgRuntimeMissing)
 		return
 	}
 	var in apiDurationFields
@@ -620,7 +624,7 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 	if strings.TrimSpace(in.ServerProxyRouting) != "" {
 		rc, err := config.DecodeRoutingText(in.ServerProxyRouting)
 		if err != nil {
-			apiFail(w, http.StatusBadRequest, err.Error())
+			apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 			return
 		}
 		next.ServerProxy.Routing = rc
@@ -631,27 +635,27 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 
 	var err error
 	if next.Heartbeat.Interval, err = parseFormDuration("heartbeat_interval", in.HeartbeatInterval, cur.Heartbeat.Interval); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if next.Heartbeat.Timeout, err = parseFormDuration("heartbeat_timeout", in.HeartbeatTimeout, cur.Heartbeat.Timeout); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if next.TrafficFlushInterval, err = parseFormDuration("traffic_flush_interval", in.TrafficFlushInterval, cur.TrafficFlushInterval); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if next.Session.KeepAliveInterval, err = parseFormDuration("keepalive_interval", in.KeepAliveInterval, cur.Session.KeepAliveInterval); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if next.Session.KeepAliveTimeout, err = parseFormDuration("keepalive_timeout", in.KeepAliveTimeout, cur.Session.KeepAliveTimeout); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if next.Session.StreamOpenTimeout, err = parseFormDuration("stream_open_timeout", in.StreamOpenTimeout, cur.Session.StreamOpenTimeout); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if in.MaxStreamWindowKB != nil {
@@ -675,12 +679,12 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := next.Validate(); err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	if err := s.opts.Settings.Apply(next); err != nil {
 		logging.Error("admin: service config apply failed", "err", err)
-		apiFail(w, http.StatusBadRequest, "保存失败: "+err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgSaveFailedDetail, err)
 		return
 	}
 	logging.Info("admin: service config saved", "actor", actorOf(r))

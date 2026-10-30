@@ -98,6 +98,8 @@ export interface User {
   limit_down_kb: number
   concurrency: number
   log_level: string
+  // 该用户使用的出站规则名；空表示按内置 default。
+  rule: string
   up_bytes: number
   down_bytes: number
   created_at: string
@@ -113,6 +115,21 @@ export interface UserList {
   total: number
   clients: ClientOption[]
   protocols: string[]
+  // 规则名清单：用户配置里的规则下拉用它。
+  rules: string[]
+}
+
+// OutboundRule 是用户出站规则：命中 reject 的目标被拒绝，命中 direct 的目标
+// 由绑定客户端跳过自己的路由规则直接拨号。所有规则都可编辑、可删除。
+export interface OutboundRule {
+  name: string
+  reject: string[]
+  direct: string[]
+}
+
+export interface RuleList {
+  rules: OutboundRule[]
+  total: number
 }
 
 export interface PortMap {
@@ -169,6 +186,7 @@ export interface Plugin {
   params: Record<string, string>
   slots: PortSlot[]
   accepts_users: boolean
+  basic_auth: boolean
   tls?: PluginTLS
 }
 

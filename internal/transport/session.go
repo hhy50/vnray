@@ -27,6 +27,8 @@ type UserMeta struct {
 	Key string
 	// Name 是用户的管理台显示名（非空），会话建立日志里带上它便于对认人。
 	Name string
+	// Rule 是该用户使用的出站规则名（空按服务端内置 default 处理）。
+	Rule string
 	Info protocol.UserInfo
 }
 

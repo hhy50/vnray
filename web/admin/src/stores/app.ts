@@ -1,9 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
+import type { MessageKey } from '../i18n'
 
 export interface TabItem {
   path: string
-  title: string
+  // 存词条键而不是译文：切换语言时标签页标题才能跟着变。
+  titleKey: MessageKey
   closable: boolean
 }
 
@@ -14,7 +16,7 @@ const storedDark = typeof localStorage !== 'undefined' && localStorage.getItem(T
 
 export const useAppStore = defineStore('app', () => {
   const sidebarCollapsed = ref(false)
-  const tabs = ref<TabItem[]>([{ path: '/clients', title: '客户端', closable: false }])
+  const tabs = ref<TabItem[]>([{ path: '/clients', titleKey: 'nav.clients', closable: false }])
   const activeTab = ref('/clients')
   const darkMode = ref(storedDark)
 

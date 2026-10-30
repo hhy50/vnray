@@ -49,7 +49,7 @@ func newBindings(st store.Store) *admin.Bindings {
 
 // newAdminService 管理面服务；admin.enabled 为 false 时返回 nil（newInstance 跳过）。
 // 管理库打不开视为装配失败：管理台是运维入口，带病启动不如显式报错。
-func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *admin.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings) (*admin.AdminService, error) {
+func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *admin.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings, rules admin.RuleSettings) (*admin.AdminService, error) {
 	if !cfg.Admin.Enabled {
 		return nil, nil
 	}
@@ -65,6 +65,7 @@ func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bin
 		Store:    st,
 		LogPath:  logFilePath(cfg),
 		Settings: settings,
+		Rules:    rules,
 	})
 }
 
@@ -113,6 +114,8 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	}
 	// 运行时服务配置（管理台可在线改）先于组件构造解析：会话参数与心跳在此定基线。
 	settings := loadServiceSettings(appctx, st, cfg)
+	// 用户出站规则同样先解析：数据面按规则名判定，管理台经同一实例读写。
+	rules := loadRuleSet(appctx, st)
 	bindings := newBindings(st)
 	limits := ratelimit.NewRegistry()
 	meter := traffic.NewMeter(limits)
@@ -141,6 +144,7 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	svc.SetSessionConfig(bindings)
 	svc.SetExitResolver(exits)
 	svc.SetTraffic(meter)
+	svc.SetRules(rules)
 	// 端口映射：规则读自 port_mappings 表，管理台改表后热更新监听与限速。
 	portmaps := portmap.NewManager(sessions, st, meter, limits)
 	meter.SetFlushInterval(settings.TrafficFlushInterval.Std())
@@ -148,7 +152,7 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	runtimeCfg := newServiceConfig(st, svc, meter, exits, bindings, settings)
 	// vless 的 TLS 参数存在服务端配置表里，插件经这一个写口读写。
 	plugins.SetVLESSTLS(runtimeCfg)
-	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg)
+	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg, rules)
 	if err != nil {
 		return nil, err
 	}

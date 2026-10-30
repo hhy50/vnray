@@ -4,6 +4,9 @@ import { onMounted, reactive, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { Plugin } from '../api/types'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const plugins = ref<Plugin[]>([])
 const loadError = ref('')
@@ -11,6 +14,7 @@ const loading = ref(false)
 
 const dialog = ref<{ plugin: Plugin; mode: 'start' | 'port' | 'tls' } | null>(null)
 const params = reactive<Record<string, string>>({})
+const password = ref('')
 const tlsEnabled = ref(false)
 const tlsSNI = ref('')
 const saving = ref(false)
@@ -22,7 +26,7 @@ async function load() {
     plugins.value = data.plugins
     loadError.value = ''
   } catch (err) {
-    loadError.value = err instanceof ApiError ? err.message : '加载失败'
+    loadError.value = err instanceof ApiError ? err.message : t('common.loadFailed')
   } finally {
     loading.value = false
   }
@@ -33,6 +37,7 @@ function openDialog(plugin: Plugin, mode: 'start' | 'port' | 'tls') {
   dialog.value = { plugin, mode }
   for (const k of Object.keys(params)) delete params[k]
   for (const slot of plugin.slots) params[slot.field] = String(slot.value)
+  password.value = ''
   tlsEnabled.value = plugin.tls?.enabled ?? false
   tlsSNI.value = plugin.tls?.server_name ?? ''
 }
@@ -49,6 +54,9 @@ async function submit() {
       })
     } else {
       const body: Record<string, string> = { ...params }
+      if (current.plugin.basic_auth && password.value.trim()) {
+        body.password = password.value
+      }
       if (current.plugin.tls) {
         body.vless_tls = tlsEnabled.value ? 'on' : 'off'
         body.vless_tls_sni = tlsSNI.value.trim()
@@ -57,11 +65,15 @@ async function submit() {
     }
     dialog.value = null
     ElMessage.success(
-      current.mode === 'start' ? '已启用' : current.mode === 'tls' ? 'TLS 已更新' : '端口已更新',
+      current.mode === 'start'
+        ? t('plugins.enabledMsg')
+        : current.mode === 'tls'
+          ? t('plugins.tlsUpdated')
+          : t('plugins.portUpdated'),
     )
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '操作失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.opFailed'))
   } finally {
     saving.value = false
   }
@@ -74,20 +86,24 @@ function activePorts(plugin: Plugin) {
 
 async function stop(plugin: Plugin) {
   try {
-    await ElMessageBox.confirm(`停用插件 ${plugin.name}？已接入的会话不受影响。`, '停用插件', {
-      type: 'warning',
-      confirmButtonText: '停用',
-      cancelButtonText: '取消',
-    })
+    await ElMessageBox.confirm(
+      t('plugins.stopConfirm', { name: plugin.name }),
+      t('plugins.stopTitle'),
+      {
+        type: 'warning',
+        confirmButtonText: t('plugins.stop'),
+        cancelButtonText: t('common.cancel'),
+      },
+    )
   } catch {
     return
   }
   try {
     await api.pluginAction(plugin.name, 'stop')
-    ElMessage.success('已停用')
+    ElMessage.success(t('plugins.stoppedMsg'))
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '停用失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('plugins.stopFailed'))
   }
 }
 
@@ -98,9 +114,9 @@ onMounted(load)
   <el-card shadow="never" class="stack">
     <template #header>
       <div class="toolbar">
-        <strong>入站插件</strong>
+        <strong>{{ t('plugins.title') }}</strong>
         <div class="spacer" />
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('common.refresh') }}</el-button>
       </div>
     </template>
 
@@ -112,24 +128,24 @@ onMounted(load)
       :data="plugins"
       size="small"
       row-key="name"
-      empty-text="未配置插件管理器。"
+      :empty-text="t('plugins.empty')"
     >
-      <el-table-column label="插件" min-width="200">
+      <el-table-column :label="t('plugins.colPlugin')" min-width="200">
         <template #default="{ row }">
           <div class="plugin-name">{{ row.name }}</div>
-          <div v-if="row.accepts_users" class="faint">托管账号，在「用户」页维护</div>
+          <div v-if="row.accepts_users" class="faint">{{ t('plugins.managed') }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="104">
+      <el-table-column :label="t('plugins.colStatus')" width="104">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small" :effect="row.enabled ? 'light' : 'plain'">
-            {{ row.enabled ? '运行中' : '已停止' }}
+            {{ row.enabled ? t('plugins.running') : t('plugins.stopped') }}
           </el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column label="监听端口" min-width="230">
+      <el-table-column :label="t('plugins.colPorts')" min-width="230">
         <template #default="{ row }">
           <div class="port-cell">
             <template v-if="activePorts(row).length">
@@ -143,29 +159,29 @@ onMounted(load)
                 {{ kv.protocol }} :{{ kv.port }}
               </el-tag>
             </template>
-            <span v-else class="faint">未设置端口</span>
-            <el-tag v-if="!row.enabled" size="small" type="warning" effect="plain">待启用</el-tag>
+            <span v-else class="faint">{{ t('plugins.noPort') }}</span>
+            <el-tag v-if="!row.enabled" size="small" type="warning" effect="plain">{{ t('plugins.pending') }}</el-tag>
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="传输加密" width="110">
+      <el-table-column :label="t('plugins.colTLS')" width="110">
         <template #default="{ row }">
           <template v-if="row.tls">
-            <el-tag v-if="row.tls.enabled" size="small" type="success" effect="light">TLS 自签</el-tag>
-            <span v-else class="faint">明文</span>
+            <el-tag v-if="row.tls.enabled" size="small" type="success" effect="light">{{ t('plugins.tlsSelfSigned') }}</el-tag>
+            <span v-else class="faint">{{ t('plugins.plaintext') }}</span>
           </template>
           <span v-else class="faint">—</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="220" align="right" fixed="right">
+      <el-table-column :label="t('plugins.colActions')" width="220" align="right" fixed="right">
         <template #default="{ row }">
           <template v-if="row.enabled">
-            <el-button link type="danger" @click="stop(row)">停用</el-button>
-            <el-button link type="primary" @click="openDialog(row, 'port')">修改端口</el-button>
+            <el-button link type="danger" @click="stop(row)">{{ t('plugins.stop') }}</el-button>
+            <el-button link type="primary" @click="openDialog(row, 'port')">{{ t('plugins.changePort') }}</el-button>
           </template>
-          <el-button v-else link type="primary" @click="openDialog(row, 'start')">启用</el-button>
+          <el-button v-else link type="primary" @click="openDialog(row, 'start')">{{ t('plugins.enable') }}</el-button>
           <el-button v-if="row.tls" link type="primary" @click="openDialog(row, 'tls')">TLS</el-button>
         </template>
       </el-table-column>
@@ -174,48 +190,51 @@ onMounted(load)
 
   <el-dialog
     :model-value="!!dialog"
-    :title="dialog ? `${dialog.plugin.name} · ${dialog.mode === 'start' ? '启用' : dialog.mode === 'port' ? '监听端口' : 'TLS'}` : ''"
+    :title="dialog ? `${dialog.plugin.name} · ${dialog.mode === 'start' ? t('plugins.enable') : dialog.mode === 'port' ? t('plugins.dialogPort') : 'TLS'}` : ''"
     width="min(480px, 94vw)"
     :close-on-click-modal="false"
     @update:model-value="dialog = null"
   >
     <template v-if="dialog">
       <p class="hint-block">
-        {{ dialog.plugin.enabled ? '当前运行中，保存后热切换；旧连接不受影响。' : '当前已停止，保存后立即按该端口启用。' }}
+        {{ dialog.plugin.enabled ? t('plugins.hintRunning') : t('plugins.hintStopped') }}
       </p>
       <el-form label-position="top">
         <template v-if="dialog.mode !== 'tls'">
-          <el-form-item v-for="slot in dialog.plugin.slots" :key="slot.field" :label="`${slot.label} 端口`">
+          <el-form-item v-for="slot in dialog.plugin.slots" :key="slot.field" :label="t('plugins.slotPort', { label: slot.label })">
             <el-input v-model="params[slot.field]" type="number" min="1" max="65535" />
+          </el-form-item>
+          <el-form-item v-if="dialog.plugin.basic_auth" :label="t('plugins.basicAuth')">
+            <el-input v-model="password" type="password" show-password autocomplete="new-password" :placeholder="t('plugins.basicAuthPlaceholder')" />
           </el-form-item>
         </template>
 
         <template v-if="dialog.plugin.tls && dialog.mode !== 'port'">
-          <el-divider content-position="left">VLESS TLS（自签证书）</el-divider>
-          <el-form-item label="启用 TLS">
+          <el-divider content-position="left">{{ t('plugins.tlsSection') }}</el-divider>
+          <el-form-item :label="t('plugins.enableTls')">
             <el-switch v-model="tlsEnabled" />
           </el-form-item>
-          <el-form-item v-if="tlsEnabled" label="证书域名（客户端 SNI）">
-            <el-input v-model="tlsSNI" placeholder="留空则用 vnray.local" />
+          <el-form-item v-if="tlsEnabled" :label="t('plugins.sni')">
+            <el-input v-model="tlsSNI" :placeholder="t('plugins.sniPlaceholder')" />
           </el-form-item>
           <el-alert
             v-if="tlsEnabled"
             type="warning"
             :closable="false"
             show-icon
-            title="自签证书用证书固定校验：分享链接会自动带证书指纹（pcs）。新版 Xray 已移除 allowInsecure，旧链接需重新导入。"
+            :title="t('plugins.tlsWarn')"
           />
           <p v-if="tlsEnabled && dialog.plugin.tls.fingerprint" class="hint-block" style="margin-top: 12px">
-            证书存于服务端配置（vn_service_settings），到期 {{ dialog.plugin.tls.not_after }}<br />
-            指纹 SHA-256：{{ dialog.plugin.tls.fingerprint }}
+            {{ t('plugins.certInfo', { date: dialog.plugin.tls.not_after }) }}<br />
+            {{ t('plugins.fingerprint', { value: dialog.plugin.tls.fingerprint }) }}
           </p>
         </template>
       </el-form>
     </template>
     <template #footer>
-      <el-button @click="dialog = null">取消</el-button>
+      <el-button @click="dialog = null">{{ t('common.cancel') }}</el-button>
       <el-button type="primary" :loading="saving" @click="submit">
-        {{ dialog?.mode === 'start' ? '启用' : '保存' }}
+        {{ dialog?.mode === 'start' ? t('plugins.enable') : t('common.save') }}
       </el-button>
     </template>
   </el-dialog>
