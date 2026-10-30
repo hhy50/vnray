@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 
 	"github.com/hhy50/vnray/admin"
@@ -111,6 +112,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get plugin: %v", err)
 	}
+	defer ss.Stop()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("probe port: %v", err)
@@ -144,6 +146,39 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "hello-from-origin") {
 		t.Fatalf("response = %q, want origin payload", string(got))
+	}
+	for _, method := range []string{"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"} {
+		if err := bindings.PutUser(store.UserBinding{
+			Key: method + "-password", Protocol: store.ProtocolSS, Name: method,
+			Status: store.UserEnabled, Client: "test-edge", Config: store.UserConfig{SSMethod: method},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, phase := range []string{"live", "restored"} {
+		if phase == "restored" {
+			ss.Stop()
+			ss.Restore(context.Background())
+		}
+		for _, method := range []string{"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"} {
+			t.Run(phase+"/"+method, func(t *testing.T) {
+				conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(freePort), time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				sc, err := dialSSClientMethod(conn, method+"-password", host, originPort,
+					fmt.Appendf(nil, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host), method)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := sc.readAll(5 * time.Second)
+				if err != nil || !strings.Contains(string(got), "hello-from-origin") {
+					t.Fatalf("response = %q, err = %v", got, err)
+				}
+			})
+		}
 	}
 }
 
@@ -216,7 +251,25 @@ func fullCounter() [12]byte {
 
 // dialSSClient 完成 SS 握手：盐 + 首块（SOCKS5 地址段 + 应用首数据），读响应盐。
 func dialSSClient(conn net.Conn, password, host string, port int, first []byte) (*ssClient, error) {
-	const keyLen, saltLen = 32, 32 // aes-256-gcm
+	return dialSSClientMethod(conn, password, host, port, first, "aes-256-gcm")
+}
+
+func dialSSClientMethod(conn net.Conn, password, host string, port int, first []byte, method string) (*ssClient, error) {
+	keyLen := 32
+	if method == "aes-128-gcm" {
+		keyLen = 16
+	}
+	saltLen := keyLen
+	newCipher := func(key []byte) (cipher.AEAD, error) {
+		if method == "chacha20-ietf-poly1305" {
+			return chacha20poly1305.New(key)
+		}
+		a, err := aes.NewCipher(key)
+		if err != nil {
+			return nil, err
+		}
+		return cipher.NewGCM(a)
+	}
 	master := ssKey([]byte(password), keyLen)
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -225,11 +278,7 @@ func dialSSClient(conn net.Conn, password, host string, port int, first []byte) 
 	if _, err := conn.Write(salt); err != nil {
 		return nil, err
 	}
-	a, err := aes.NewCipher(ssSubkey(master, salt, keyLen))
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(a)
+	aead, err := newCipher(ssSubkey(master, salt, keyLen))
 	if err != nil {
 		return nil, err
 	}
@@ -247,11 +296,7 @@ func dialSSClient(conn net.Conn, password, host string, port int, first []byte) 
 	if _, err := io.ReadFull(conn, respSalt); err != nil {
 		return nil, fmt.Errorf("read response salt: %w", err)
 	}
-	ra, err := aes.NewCipher(ssSubkey(master, respSalt, keyLen))
-	if err != nil {
-		return nil, err
-	}
-	respAEAD, err := cipher.NewGCM(ra)
+	respAEAD, err := newCipher(ssSubkey(master, respSalt, keyLen))
 	if err != nil {
 		return nil, err
 	}

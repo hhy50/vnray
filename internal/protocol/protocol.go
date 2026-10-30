@@ -46,8 +46,7 @@ const (
 	// 承载裸字节。数据面与 Tunnel 完全同构，仅拨号语义不同（见 ADR 0030）。
 	PortMap Type = 13
 	// ConfigPush 是 server→client 的全量配置下发：载荷为 PushConfig JSON 快照，
-	// 客户端收到后整体应用。当前只有自定义 host，后续新增配置项直接在该快照里扩展
-	// 字段（见 ADR 0033）。管理台配置后经此推送，客户端重连时也随 AuthResult 一并带过。
+	// 客户端分别替换独立与全局规则（见 ADR 0042），重连时也随 AuthResult 携带。
 	ConfigPush Type = 14
 )
 

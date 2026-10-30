@@ -60,6 +60,7 @@ onMounted(load)
       <p class="page-hint intro">
         这里只放可以在线修改并即时生效的参数，改动落库、重启后依然生效。
         监听地址、管理端口、存储等需要重启的配置请编辑配置文件。
+        下发给客户端的全局 Host 与 IP 段规则在「客户端配置」页维护。
       </p>
 
       <el-card shadow="never" class="config-card">

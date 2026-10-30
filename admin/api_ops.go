@@ -547,6 +547,7 @@ func queryInt(raw url.Values, key string, def int) int {
 
 // --- 运行期服务配置 ---
 
+// apiDurationFields 不包含 global_client：那一段由 clientconfig.go 独占读写。
 type apiDurationFields struct {
 	HeartbeatInterval    string `json:"heartbeat_interval"`
 	HeartbeatTimeout     string `json:"heartbeat_timeout"`

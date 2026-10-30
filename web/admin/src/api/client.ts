@@ -1,4 +1,5 @@
 import type {
+  ClientConfig,
   ClientDetail,
   ClientList,
   Envelope,
@@ -109,6 +110,7 @@ export const api = {
   users: (params: { q?: string; protocol?: string } = {}) =>
     request<UserList>(`/api/users${query(params)}`),
   userSave: (body: {
+    ss_method?: string
     protocol: string
     user_key: string
     name: string
@@ -162,4 +164,8 @@ export const api = {
   serviceConfig: () => request<ServiceConfig>('/api/service-config'),
   serviceConfigSave: (body: ServiceConfig) =>
     request('/api/service-config', json('PUT', body)),
+
+  clientConfig: () => request<ClientConfig>('/api/client-config'),
+  clientConfigSave: (body: ClientConfig) =>
+    request('/api/client-config', json('PUT', body)),
 }

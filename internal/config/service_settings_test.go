@@ -10,6 +10,10 @@ import (
 func TestServiceSettingsRoundTrip(t *testing.T) {
 	in := DefaultServiceSettings()
 	in.PublicHost = "vpn.example.com"
+	in.GlobalClient = GlobalClientSettings{
+		CustomHosts: []CustomHost{{Domain: "youyuevpn4.route", IP: "192.168.60.1"}},
+		IPMaps:      []IPMap{{From: "186.12.12.*", To: "192.168.60.*"}},
+	}
 	in.Heartbeat = Heartbeat{Enabled: false, Interval: Duration(9 * time.Second), Timeout: Duration(2 * time.Second)}
 	in.LogLevel = "debug"
 	in.TrafficFlushInterval = Duration(3 * time.Second)
@@ -25,8 +29,8 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if len(kv) != 8 {
-		t.Fatalf("kv has %d sections, want 8: %v", len(kv), kv)
+	if len(kv) != 9 {
+		t.Fatalf("kv has %d sections, want 9: %v", len(kv), kv)
 	}
 	if kv[SettingPublicHost] != "vpn.example.com" || kv[SettingTrafficFlush] != "3s" {
 		t.Fatalf("scalar sections should be stored as plain text: %v", kv)

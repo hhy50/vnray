@@ -156,5 +156,5 @@ func wantsJSON(r *http.Request) bool {
 	if accept == "" {
 		return strings.Contains(r.URL.Path, "/api/")
 	}
-	return strings.Contains(accept, "application/json")
+	return strings.Contains(accept, "application/json") || strings.Contains(accept, "text/event-stream")
 }

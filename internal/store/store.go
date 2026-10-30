@@ -65,6 +65,8 @@ const ClientTypeLocal ClientType = "local"
 // UserConfig 是用户记录 Config 列的 JSON 结构：上下行限速（字节/秒，0 = 不限）、
 // 该用户会话的日志级别（空视为 info）与最大并发隧道数（0 = 不限）。
 type UserConfig struct {
+	// SSMethod 为空时沿用 SS 插件的默认加密方法。
+	SSMethod  string `json:"ss_method,omitempty"`
 	UpLimit   int64  `json:"up_limit,omitempty"`
 	DownLimit int64  `json:"down_limit,omitempty"`
 	LogLevel  string `json:"log_level,omitempty"`
@@ -86,7 +88,7 @@ func ParseUserConfig(raw string) UserConfig {
 
 // Encode 序列化用户配置；全零返回空串，避免库里堆积空对象。
 func (c UserConfig) Encode() string {
-	if c.UpLimit == 0 && c.DownLimit == 0 && c.LogLevel == "" && c.Concurrency == 0 {
+	if c.UpLimit == 0 && c.DownLimit == 0 && c.LogLevel == "" && c.Concurrency == 0 && c.SSMethod == "" {
 		return ""
 	}
 	b, err := json.Marshal(c)

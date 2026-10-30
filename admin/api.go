@@ -16,6 +16,7 @@ import (
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
+	"github.com/hhy50/vnray/shadowsocks"
 )
 
 // protocolNames 是管理台下拉用的协议清单。
@@ -242,7 +243,7 @@ func (s *AdminService) apiClientDetail(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		push := s.opts.Bindings.PushConfig(name)
+		push := s.opts.Bindings.ClientPushConfig(name)
 		if push.CustomHosts != nil {
 			out.Hosts = push.CustomHosts
 		}
@@ -415,7 +416,7 @@ func (s *AdminService) apiClientHostsSave(w http.ResponseWriter, r *http.Request
 	}
 	logging.Info("admin: client custom config saved", "client", name,
 		"custom_hosts", len(hosts), "ip_maps", len(ipMaps), "concurrency", in.Concurrency, "actor", actorOf(r))
-	pushed := s.pushConfig(name, protocol.PushConfig{CustomHosts: hosts, IPMaps: ipMaps})
+	pushed := s.pushConfig(name)
 	if pushed {
 		s.applyClientConcurrency(name, in.Concurrency)
 	}
@@ -457,6 +458,7 @@ type apiClientOption struct {
 }
 
 type apiUserDTO struct {
+	SSMethod    string `json:"ss_method,omitempty"`
 	Protocol    string `json:"protocol"`
 	UserKey     string `json:"user_key"`
 	Name        string `json:"name"`
@@ -497,6 +499,7 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 	shareHost := s.shareHost(r)
 	vmessPort, vlessPort := s.v2rayPorts()
 	vlessTLS := s.vlessShareTLS()
+	ssPort, ssDefaultMethod := s.ssShareSettings()
 
 	rows := make([]apiUserDTO, 0, len(bindings))
 	for _, b := range bindings {
@@ -521,11 +524,20 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 			LogLevel:    b.Config.LogLevel,
 			CreatedAt:   b.CreatedAt.Format("2006-01-02 15:04:05"),
 			UpdatedAt:   b.UpdatedAt.Format("2006-01-02 15:04:05"),
-			Shareable:   b.Protocol.UsesUUID(),
+			Shareable:   b.Protocol.UsesUUID() || b.Protocol == store.ProtocolSS,
+		}
+		if b.Protocol == store.ProtocolSS {
+			row.SSMethod = b.Config.SSMethod
+			if row.SSMethod == "" {
+				row.SSMethod = ssDefaultMethod
+			}
 		}
 		if row.Shareable && shareHost != "" {
 			target := shareTarget{Host: shareHost, Port: vmessPort}
-			if b.Protocol == store.ProtocolVMess {
+			if b.Protocol == store.ProtocolSS {
+				target.Port = ssPort
+				row.ShareLink = ssLink(target, row.SSMethod, b.UserKey, b.Name)
+			} else if b.Protocol == store.ProtocolVMess {
 				row.ShareLink = linkForPort(target, b.UserKey, true)
 			} else {
 				target.Port, target.TLS = vlessPort, vlessTLS
@@ -551,11 +563,12 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiUserSaveIn struct {
-	Protocol string `json:"protocol"`
-	UserKey  string `json:"user_key"`
-	Name     string `json:"name"`
-	Client   string `json:"client"`
-	Enabled  *bool  `json:"enabled"`
+	SSMethod *string `json:"ss_method"`
+	Protocol string  `json:"protocol"`
+	UserKey  string  `json:"user_key"`
+	Name     string  `json:"name"`
+	Client   string  `json:"client"`
+	Enabled  *bool   `json:"enabled"`
 }
 
 // apiUserSave 登记或覆盖一条用户绑定。
@@ -590,6 +603,18 @@ func (s *AdminService) apiUserSave(w http.ResponseWriter, r *http.Request) {
 	cur, ok := s.opts.Bindings.Lookup(p, key)
 	if !ok {
 		cur = Binding{UserKey: key, Protocol: p}
+	}
+	if in.SSMethod != nil {
+		if p != store.ProtocolSS {
+			apiFail(w, http.StatusBadRequest, "只有 SS 用户可以指定加密类型")
+			return
+		}
+		method, err := shadowsocks.ParseMethod(strings.TrimSpace(*in.SSMethod))
+		if err != nil {
+			apiFail(w, http.StatusBadRequest, "不支持的 SS 加密类型")
+			return
+		}
+		cur.Config.SSMethod = method.Name
 	}
 	cur.Name = name
 	cur.Client = client
@@ -689,6 +714,7 @@ func (s *AdminService) apiUserLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur.Config = store.UserConfig{
+		SSMethod:    cur.Config.SSMethod,
 		UpLimit:     in.UpKB * 1024,
 		DownLimit:   in.DownKB * 1024,
 		LogLevel:    level,

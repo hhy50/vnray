@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"time"
 
@@ -99,6 +100,7 @@ func sessionConfigFromSettings(s config.SessionSettings) *tcp.SessionConfig {
 // serviceConfig 是运行时服务配置的持有者与分发中心，实现 admin.ServiceSettings。
 // 它是管理台与运行时组件之间的唯一写口：管理台提交 → 校验 → 落库 → 热分发。
 type serviceConfig struct {
+	applyMu  sync.Mutex
 	mu       sync.RWMutex
 	cur      config.ServiceSettings
 	settings store.Store
@@ -111,6 +113,11 @@ type serviceConfig struct {
 
 // newServiceConfig 构造分发中心；initial 是启动解析出的生效值。
 func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Meter, resolver *exitResolver, bindings *admin.Bindings, initial config.ServiceSettings) *serviceConfig {
+	initial.GlobalClient = initial.GlobalClient.Clone()
+	if bindings != nil {
+		bindings.SetGlobalClientConfig(initial.GlobalClient)
+		svc.sessions.ClientReady = bindings.PushClientConfig
+	}
 	return &serviceConfig{cur: initial, settings: st, svc: svc, meter: meter, resolver: resolver, bindings: bindings}
 }
 
@@ -118,7 +125,9 @@ func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Mete
 func (c *serviceConfig) Current() config.ServiceSettings {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.cur
+	current := c.cur
+	current.GlobalClient = current.GlobalClient.Clone()
+	return current
 }
 
 // VLESSTLS 返回 vless 的 TLS 参数（副本）；从未配置过时返回 nil。
@@ -153,6 +162,9 @@ func (c *serviceConfig) SetVLESSTLS(t config.VLESSTLS) error {
 
 // Apply 校验并落库新的运行时配置；落库失败不改运行态，成功后热分发到各组件。
 func (c *serviceConfig) Apply(next config.ServiceSettings) error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	next.GlobalClient = next.GlobalClient.Clone()
 	if err := next.Validate(); err != nil {
 		return err
 	}
@@ -184,6 +196,7 @@ func (c *serviceConfig) Apply(next config.ServiceSettings) error {
 
 // dispatch 把生效值推给各运行时组件并更新本地快照。日志级别非法不可能发生（已被校验）。
 func (c *serviceConfig) dispatch(next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
+	globalChanged := !reflect.DeepEqual(c.Current().GlobalClient, next.GlobalClient)
 	c.svc.ApplyHeartbeat(heartbeatIntervalOf(next.Heartbeat), next.Heartbeat.Timeout.Std())
 	c.svc.ApplySessionConfig(sess)
 	c.meter.SetFlushInterval(next.TrafficFlushInterval.Std())
@@ -198,6 +211,14 @@ func (c *serviceConfig) dispatch(next config.ServiceSettings, sess *tcp.SessionC
 	c.mu.Lock()
 	c.cur = next
 	c.mu.Unlock()
+	if c.bindings != nil && globalChanged {
+		c.bindings.SetGlobalClientConfig(next.GlobalClient)
+		for _, client := range c.svc.sessions.ClientSessions() {
+			if err := c.bindings.PushClientConfig(client); err != nil {
+				logging.Warn("service settings: push client config failed", "client", client.Info().Name, "err", err)
+			}
+		}
+	}
 }
 
 // applyServerProxy 热改本机出口：替换 resolver 的本机出口，并让 client_bindings 的

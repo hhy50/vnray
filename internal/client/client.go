@@ -44,9 +44,11 @@ const maxFramePayload = 32 * 1024
 
 // Client 主动连接服务端，接收服务端发起的流并在本地代理分发。
 type Client struct {
-	session    tcp.Session
-	dispatcher dispatch.Dispatcher
-	onConfig   func(protocol.PushConfig)
+	session          tcp.Session
+	dispatcher       dispatch.Dispatcher
+	onConfig         func(protocol.PushConfig)
+	configMu         sync.Mutex
+	lastConfigStream uint32
 }
 
 // Dial 连接服务端、建立多路复用会话并完成认证握手；之后用 Serve 接收服务端发起的请求流。
@@ -174,7 +176,7 @@ func (c *Client) handleStream(stream tcp.Stream) {
 		return
 	}
 	if first.Type == protocol.ConfigPush {
-		c.handleConfigPush(first)
+		c.handleConfigPush(sid, first)
 		return
 	}
 	logging.Warn("client: unexpected frame type on client link",
@@ -270,7 +272,7 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 }
 
 // handleConfigPush 处理一条全量配置下发流：载荷为 PushConfig 快照，整体应用。
-func (c *Client) handleConfigPush(first *protocol.Frame) {
+func (c *Client) handleConfigPush(streamID uint32, first *protocol.Frame) {
 	if c.onConfig == nil {
 		return
 	}
@@ -283,7 +285,14 @@ func (c *Client) handleConfigPush(first *protocol.Frame) {
 		logging.Warn("client: bad push config frame", "err", err)
 		return
 	}
+	// 流按编号递增开启，但处理协程可能乱序；旧快照不得覆盖新快照。
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	if streamID <= c.lastConfigStream {
+		return
+	}
 	c.onConfig(cfg)
+	c.lastConfigStream = streamID
 }
 
 // handleHeartbeat 应答服务端的心跳探测：回一个 Pong，原样回显 Ping 载荷里的毫秒时间戳，

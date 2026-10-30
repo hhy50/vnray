@@ -88,6 +88,7 @@ export interface ClientOption {
 }
 
 export interface User {
+  ss_method?: string
   protocol: string
   user_key: string
   name: string
@@ -188,6 +189,16 @@ export interface Logs {
   query: string
   lines: string[]
   truncated: boolean
+}
+
+// GlobalClientConfig 是下发给所有远程客户端的全局继承规则，独立页「客户端配置」维护。
+export interface GlobalClientConfig {
+  custom_hosts: HostRow[]
+  ip_maps: IPMapRow[]
+}
+
+export interface ClientConfig {
+  global_client: GlobalClientConfig
 }
 
 export interface ServiceConfig {

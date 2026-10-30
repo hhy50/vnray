@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
@@ -71,7 +72,9 @@ type userCacheEntry struct {
 // 同步通知观察者；仅凭据点查（LookupUser）走短 TTL 缓存。它实现
 // transport.UserRegistry 与 core.SessionConfig。
 type Bindings struct {
-	store store.Store
+	globalClient atomic.Pointer[protocol.ClientConfig]
+	pushMu       sync.Mutex
+	store        store.Store
 
 	// 观察者表只在装配期写入、此后只读，无需加锁。
 	observers []UserObserver
@@ -317,15 +320,14 @@ func (b *Bindings) ClientConcurrency(clientKey string) int {
 	return store.ParseClientConfig(c.ServerConfig).Concurrency
 }
 
-// PushConfig 返回服务端下发给该客户端的全量配置快照；未注册、没配或读库失败时为空。
-// 只暴露客户端需要消费的字段（自定义 host 表与 IP 段映射），后续配置项在这里追加。
-func (b *Bindings) PushConfig(clientKey string) protocol.PushConfig {
+// ClientPushConfig 返回该客户端单独保存的配置，不包含全局继承值。
+func (b *Bindings) ClientPushConfig(clientKey string) protocol.ClientConfig {
 	c, ok := b.LookupClient(clientKey)
 	if !ok {
-		return protocol.PushConfig{}
+		return protocol.ClientConfig{}
 	}
 	cc := store.ParseClientConfig(c.ServerConfig)
-	return protocol.PushConfig{CustomHosts: cc.CustomHosts, IPMaps: cc.IPMaps}
+	return protocol.ClientConfig{CustomHosts: cc.CustomHosts, IPMaps: cc.IPMaps}
 }
 
 // SaveClientReportedConfig 把客户端上报的配置快照写进 config 列：记录不存在时按

@@ -190,12 +190,18 @@ func TestHeartbeatPayload(t *testing.T) {
 // TestPushConfigRoundTrip 断言 ConfigPush 帧载荷（PushConfig JSON）能完整往返。
 func TestPushConfigRoundTrip(t *testing.T) {
 	cfg := PushConfig{
-		CustomHosts: []CustomHost{
-			{Domain: "mirror.local", IP: "10.0.0.8"},
-			{Domain: "api.internal", IP: "192.168.1.2"},
+		ClientConfig: ClientConfig{
+			CustomHosts: []CustomHost{
+				{Domain: "mirror.local", IP: "10.0.0.8"},
+				{Domain: "api.internal", IP: "192.168.1.2"},
+			},
+			IPMaps: []IPMap{
+				{From: "123.123.*.*", To: "192.168.*.*"},
+			},
 		},
-		IPMaps: []IPMap{
-			{From: "123.123.*.*", To: "192.168.*.*"},
+		GlobalConfig: ClientConfig{
+			CustomHosts: []CustomHost{{Domain: "mirror.local", IP: "10.0.0.9"}},
+			IPMaps:      []IPMap{{From: "123.*.*.*", To: "10.*.*.*"}},
 		},
 	}
 	buf := &bytes.Buffer{}
@@ -222,11 +228,21 @@ func TestPushConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if len(parsed.CustomHosts) != 2 || parsed.CustomHosts[0] != cfg.CustomHosts[0] {
+	if len(parsed.ClientConfig.CustomHosts) != 2 || parsed.ClientConfig.CustomHosts[0] != cfg.ClientConfig.CustomHosts[0] {
 		t.Fatalf("parsed = %+v, want %+v", parsed, cfg)
 	}
-	if len(parsed.IPMaps) != 1 || parsed.IPMaps[0] != cfg.IPMaps[0] {
-		t.Fatalf("parsed ip_maps = %+v, want %+v", parsed.IPMaps, cfg.IPMaps)
+	if len(parsed.ClientConfig.IPMaps) != 1 || parsed.ClientConfig.IPMaps[0] != cfg.ClientConfig.IPMaps[0] {
+		t.Fatalf("parsed ip_maps = %+v, want %+v", parsed.ClientConfig.IPMaps, cfg.ClientConfig.IPMaps)
+	}
+	if len(parsed.GlobalConfig.CustomHosts) != 1 || parsed.GlobalConfig.CustomHosts[0] != cfg.GlobalConfig.CustomHosts[0] || len(parsed.GlobalConfig.IPMaps) != 1 || parsed.GlobalConfig.IPMaps[0] != cfg.GlobalConfig.IPMaps[0] {
+		t.Fatalf("global config lost: %+v", parsed.GlobalConfig)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || keys["client_config"] == nil || keys["global_config"] == nil {
+		t.Fatalf("expected exactly two independent keys: %s", payload)
 	}
 
 	// 认证应答携带同一快照：Reply 的 config 字段 JSON 往返一致。
@@ -238,8 +254,42 @@ func TestPushConfigRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &res); err != nil {
 		t.Fatal(err)
 	}
-	if res.Config == nil || len(res.Config.CustomHosts) != 2 || len(res.Config.IPMaps) != 1 {
+	if res.Config == nil || len(res.Config.ClientConfig.CustomHosts) != 2 || len(res.Config.ClientConfig.IPMaps) != 1 || len(res.Config.GlobalConfig.CustomHosts) != 1 || len(res.Config.GlobalConfig.IPMaps) != 1 {
 		t.Fatalf("reply config = %+v", res.Config)
+	}
+}
+
+// TestPushConfigEmptyLayers 断言空层序列化成 {} 而不是被省略：客户端按"整层替换"
+// 应用快照，缺 key 会被误读成"保持上次规则"，只有显式空对象才能表达"清空该层"。
+func TestPushConfigEmptyLayers(t *testing.T) {
+	payload, err := json.Marshal(PushConfig{GlobalConfig: ClientConfig{
+		CustomHosts: []CustomHost{{Domain: "vpn.route", IP: "10.0.0.1"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("expected exactly two keys: %s", payload)
+	}
+	if string(keys["client_config"]) != "{}" {
+		t.Fatalf("empty layer = %s, want {}", keys["client_config"])
+	}
+	if !bytes.Contains(keys["global_config"], []byte("vpn.route")) {
+		t.Fatalf("global layer lost: %s", payload)
+	}
+
+	// 反向：显式空层解出来是零值，客户端据此清空两层。
+	parsed, err := ParsePushConfig([]byte(`{"client_config":{},"global_config":{}}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(parsed.ClientConfig.CustomHosts) != 0 || len(parsed.ClientConfig.IPMaps) != 0 ||
+		len(parsed.GlobalConfig.CustomHosts) != 0 || len(parsed.GlobalConfig.IPMaps) != 0 {
+		t.Fatalf("empty layers parsed into %+v", parsed)
 	}
 }
 

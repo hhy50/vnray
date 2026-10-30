@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hhy50/vnray/internal/dispatch"
@@ -56,11 +57,13 @@ type AdminOptions struct {
 
 // AdminService 是 Web 管理面服务：会话认证 + Vue SPA + 业务 API。
 type AdminService struct {
-	clients *transport.SessionManager
-	opts    AdminOptions
-	started time.Time
-	srv     *http.Server
-	auth    *AuthService
+	streamStop chan struct{}
+	stopOnce   sync.Once
+	clients    *transport.SessionManager
+	opts       AdminOptions
+	started    time.Time
+	srv        *http.Server
+	auth       *AuthService
 	// addr 为实际监听地址，Start 之后可用。
 	addr string
 }
@@ -79,9 +82,10 @@ func NewAdminService(addr string, clients *transport.SessionManager, opts AdminO
 		return nil, fmt.Errorf("admin: requires gorm db")
 	}
 	s := &AdminService{
-		clients: clients,
-		opts:    opts,
-		started: time.Now(),
+		streamStop: make(chan struct{}),
+		clients:    clients,
+		opts:       opts,
+		started:    time.Now(),
 	}
 
 	auth, err := newAuthService(opts)
@@ -171,8 +175,11 @@ func (s *AdminService) opsRoutes() []opsRoute {
 		{"DELETE", "api/keys", s.apiKeyDelete},
 
 		{"GET", "api/logs", s.apiLogs},
+		{"GET", "api/logs/stream", s.apiLogStream},
 		{"GET", "api/service-config", s.apiServiceConfig},
 		{"PUT", "api/service-config", s.apiServiceConfigSave},
+		{"GET", "api/client-config", s.apiGlobalClientConfig},
+		{"PUT", "api/client-config", s.apiGlobalClientConfigSave},
 	}
 }
 
@@ -199,6 +206,7 @@ func (s *AdminService) Start(ctx context.Context) error {
 
 // Drain 实现 extension.Drainer：优雅关闭管理端。
 func (s *AdminService) Drain(ctx context.Context) error {
+	s.stopOnce.Do(func() { close(s.streamStop) })
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, shutdownTimeout)
@@ -445,12 +453,12 @@ func parseLogLevel(raw string) (string, error) {
 }
 
 // pushConfig 把服务端下发的全量配置推送给在线客户端。
-func (s *AdminService) pushConfig(name string, cfg protocol.PushConfig) bool {
+func (s *AdminService) pushConfig(name string) bool {
 	for _, e := range s.clients.ClientSessions() {
 		if e.Info().Name != name {
 			continue
 		}
-		if err := e.SendPushConfig(cfg); err != nil {
+		if err := s.opts.Bindings.PushClientConfig(e); err != nil {
 			logging.Warn("admin: push config failed", "client", name, "err", err)
 			return false
 		}

@@ -16,6 +16,7 @@ import {
   Grid,
   Key,
   Setting,
+  SetUp,
   Document,
 } from '@element-plus/icons-vue'
 import { useAppStore } from '../stores/app'
@@ -32,6 +33,7 @@ const status = ref({ version: '', uptime: 0, clients: 0 })
 // 菜单与 router.ts 一一对应；图标用组件引用，避免运行时按字符串解析。
 const menuItems = [
   { label: '客户端', icon: Monitor, path: '/clients' },
+  { label: '客户端配置', icon: SetUp, path: '/client-config' },
   { label: '用户', icon: User, path: '/users' },
   { label: '端口映射', icon: Connection, path: '/portmaps' },
   { label: '插件', icon: Grid, path: '/plugins' },

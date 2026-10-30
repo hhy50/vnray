@@ -24,8 +24,9 @@ type ipMapRule struct {
 
 // IPMaps 是 IPv4 段映射表，并发安全；nil 指针表示未启用。
 type IPMaps struct {
-	mu    sync.RWMutex
-	rules []ipMapRule
+	mu          sync.RWMutex
+	rules       []ipMapRule
+	globalRules []ipMapRule
 }
 
 // NewIPMaps 创建一张空表。
@@ -34,6 +35,18 @@ func NewIPMaps() *IPMaps { return &IPMaps{} }
 // Update 整体替换表内容；nil 等价于清空。解析失败的模式静默跳过（表可能被
 // 手工编辑过，坏规则不该拖垮拨号）。
 func (m *IPMaps) Update(entries []protocol.IPMap) {
+	m.UpdateLayers(entries, nil)
+}
+
+// UpdateLayers 同时替换两层规则；独立规则未命中才查询全局规则。
+func (m *IPMaps) UpdateLayers(local, global []protocol.IPMap) {
+	localRules, globalRules := compileIPMaps(local), compileIPMaps(global)
+	m.mu.Lock()
+	m.rules, m.globalRules = localRules, globalRules
+	m.mu.Unlock()
+}
+
+func compileIPMaps(entries []protocol.IPMap) []ipMapRule {
 	rules := make([]ipMapRule, 0, len(entries))
 	for _, e := range entries {
 		from, fromAny, ferr := parseIPMapPattern(e.From)
@@ -43,9 +56,7 @@ func (m *IPMaps) Update(entries []protocol.IPMap) {
 		}
 		rules = append(rules, ipMapRule{from: from, fromAny: fromAny, to: to, toAny: toAny})
 	}
-	m.mu.Lock()
-	m.rules = rules
-	m.mu.Unlock()
+	return rules
 }
 
 // Rewrite 把 IPv4 目标重写成映射后的地址；未命中或目标不是 IPv4 时返回 false。
@@ -59,7 +70,14 @@ func (m *IPMaps) Rewrite(ip string) (string, bool) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, r := range m.rules {
+	if rewritten, ok := rewriteIP(m.rules, src); ok {
+		return rewritten, true
+	}
+	return rewriteIP(m.globalRules, src)
+}
+
+func rewriteIP(rules []ipMapRule, src net.IP) (string, bool) {
+	for _, r := range rules {
 		matched := true
 		for i := 0; i < 4; i++ {
 			if !r.fromAny[i] && r.from[i] != src[i] {

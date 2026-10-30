@@ -2,7 +2,7 @@ package plugin
 
 // ss 插件：Shadowsocks AEAD TCP 入站 + 密码 → 客户端 路由。
 // 密码路由与其限速配置存于 vn_user_bindings 表（protocol = ss），经注入的 UserStore 读写；
-// 插件自身的启停状态、监听端口与加密方法留在 vn_plugin 表。
+// 插件自身的启停状态、监听端口与默认加密方法留在 vn_plugin 表。
 
 import (
 	"context"
@@ -26,11 +26,12 @@ import (
 // pluginSS 是 ss 插件在 vn_plugin 表里的 name。
 const pluginSS = "ss"
 
-// DefaultSSMethod 是未显式配置时的加密方法（三种 AEAD 中安全性最好的一种）。
+// DefaultSSMethod 是未显式配置时的加密方法。
 const DefaultSSMethod = "aes-256-gcm"
 
 // SSRoute 是一条 ss 密码 → 客户端 的路由。
 type SSRoute struct {
+	Method   string `json:"method"`
 	Password string `json:"password"`
 	Client   string `json:"client"`
 }
@@ -96,7 +97,11 @@ func (p *SSPlugin) SyncUser(proto store.Protocol, key, client string, status sto
 		p.validator.Remove(key)
 		return
 	}
-	if err := p.validator.Add(key, client); err != nil {
+	method := p.method
+	if u, ok := p.users.LookupUser(proto, key); ok && u.Config.SSMethod != "" {
+		method = u.Config.SSMethod
+	}
+	if err := p.validator.AddWithMethod(key, client, method); err != nil {
 		logging.Warn("ss: sync user failed", "err", err)
 	}
 }
@@ -118,7 +123,7 @@ func (p *SSPlugin) restoreLocked(ctx context.Context) {
 		}
 	}
 	for _, r := range p.ssRoutes() {
-		if err := p.validator.Add(r.Password, r.Client); err != nil {
+		if err := p.validator.AddWithMethod(r.Password, r.Client, r.Method); err != nil {
 			logging.Warn("ss: restore user failed", "err", err)
 		}
 	}
@@ -244,14 +249,11 @@ func (p *SSPlugin) Stop() {
 	p.stopLocked()
 }
 
-// setMethodLocked 切换加密方法并重建验证器（主密钥派生随方法而变），
-// 路由从用户表重灌——它是唯一真源。调用方必须持锁。
+// setMethodLocked 更新默认方法，显式指定方法的用户保持原配置；调用方必须持锁。
 func (p *SSPlugin) setMethodLocked(method string) {
-	m, _ := shadowsocks.ParseMethod(method)
 	p.method = method
-	p.validator = shadowsocks.NewValidator(m)
 	for _, r := range p.ssRoutes() {
-		if err := p.validator.Add(r.Password, r.Client); err != nil {
+		if err := p.validator.AddWithMethod(r.Password, r.Client, r.Method); err != nil {
 			logging.Warn("ss: reload user failed", "err", err)
 		}
 	}
@@ -314,14 +316,22 @@ func (p *SSPlugin) ssRoutes() []SSRoute {
 		if u.Protocol != store.ProtocolSS || u.Status != store.UserEnabled {
 			continue
 		}
-		out = append(out, SSRoute{Password: u.Key, Client: u.Client})
+		method := u.Config.SSMethod
+		if method == "" {
+			method = p.method
+		}
+		out = append(out, SSRoute{Password: u.Key, Client: u.Client, Method: method})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Password < out[j].Password })
 	return out
 }
 
 // SSRoutes 返回按密码排序的路由列表（管理台展示用）。
-func (p *SSPlugin) SSRoutes() []SSRoute { return p.ssRoutes() }
+func (p *SSPlugin) SSRoutes() []SSRoute {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ssRoutes()
+}
 
 // AccountLimits 返回 ss 账号当前的上下行限速（字节/秒；0 = 不限速）。
 func (p *SSPlugin) AccountLimits(account string) (up, down int64) {

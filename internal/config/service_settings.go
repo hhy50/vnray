@@ -14,6 +14,7 @@ import (
 //
 // 这里只放**运行期可热改**的参数；监听地址、管理端口、存储等需重启的配置不在其中。
 type ServiceSettings struct {
+	GlobalClient GlobalClientSettings `json:"global_client"`
 	// PublicHost 同 Server.PublicHost：vmess:// 分享链接对外暴露的裸主机。
 	PublicHost string    `json:"public_host"`
 	Heartbeat  Heartbeat `json:"heartbeat"`
@@ -128,6 +129,9 @@ func DefaultServiceSettings() ServiceSettings {
 
 // Validate 校验全部运行时配置项。
 func (s ServiceSettings) Validate() error {
+	if err := s.GlobalClient.Validate(); err != nil {
+		return err
+	}
 	if err := s.Heartbeat.Validate(); err != nil {
 		return err
 	}
@@ -185,6 +189,8 @@ func (l LogRotation) Validate() error {
 
 // 运行时配置在 vn_service_settings 里的段名（setting_key）：标量段存原文，复合段存 JSON。
 const (
+	// SettingGlobalClient 保存全局客户端的 Host 与 IP 段映射。
+	SettingGlobalClient = "global_client"
 	SettingPublicHost   = "public_host"
 	SettingHeartbeat    = "heartbeat"
 	SettingLogLevel     = "log_level"
@@ -203,11 +209,12 @@ func EncodeServiceSettings(s ServiceSettings) (map[string]string, error) {
 		SettingTrafficFlush: s.TrafficFlushInterval.String(),
 	}
 	sections := map[string]any{
-		SettingHeartbeat:   s.Heartbeat,
-		SettingSession:     s.Session,
-		SettingLogRotation: s.LogRotation,
-		SettingServerProxy: s.ServerProxy,
-		SettingVLESS:       s.VLESS,
+		SettingGlobalClient: s.GlobalClient,
+		SettingHeartbeat:    s.Heartbeat,
+		SettingSession:      s.Session,
+		SettingLogRotation:  s.LogRotation,
+		SettingServerProxy:  s.ServerProxy,
+		SettingVLESS:        s.VLESS,
 	}
 	for key, section := range sections {
 		b, err := json.Marshal(section)
@@ -226,6 +233,8 @@ func DecodeServiceSettings(kv map[string]string, base ServiceSettings) (ServiceS
 	for key, raw := range kv {
 		var err error
 		switch key {
+		case SettingGlobalClient:
+			err = json.Unmarshal([]byte(raw), &out.GlobalClient)
 		case SettingPublicHost:
 			out.PublicHost = raw
 		case SettingLogLevel:

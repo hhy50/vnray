@@ -16,7 +16,8 @@ const loadError = ref('')
 
 const showAdd = ref(false)
 const saving = ref(false)
-const addForm = reactive({ name: '', protocol: 'vless', client: '', user_key: '' })
+const addForm = reactive({ name: '', protocol: 'vless', client: '', user_key: '', ss_method: 'aes-256-gcm' })
+const ssMethods = ['aes-256-gcm', 'aes-128-gcm', 'chacha20-ietf-poly1305']
 
 const limitsFor = ref<User | null>(null)
 const limitsSaving = ref(false)
@@ -63,6 +64,7 @@ function openAdd() {
   addForm.protocol = 'vless'
   addForm.client = ''
   addForm.user_key = generateKey('vless')
+  addForm.ss_method = 'aes-256-gcm'
   showAdd.value = true
 }
 
@@ -95,6 +97,7 @@ async function submitAdd() {
       name: addForm.name.trim(),
       client: addForm.client.trim(),
       enabled: true,
+      ss_method: addForm.protocol === 'ss' ? addForm.ss_method : undefined,
     })
     showAdd.value = false
     ElMessage.success('用户已添加')
@@ -226,13 +229,14 @@ onMounted(load)
       :row-key="rowKey"
       :empty-text="emptyText"
     >
-      <el-table-column label="协议" width="78">
+      <el-table-column label="协议" min-width="150">
         <template #default="{ row }">
           <el-tag size="small" type="info" effect="plain">{{ row.protocol }}</el-tag>
+          <div v-if="row.protocol === 'ss'" class="faint">{{ row.ss_method }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="user_key" min-width="230">
+      <el-table-column label="user_key" min-width="210">
         <template #default="{ row }">
           <div class="key-cell">
             <span class="mono ellipsis" :title="row.user_key">{{ row.user_key }}</span>
@@ -281,36 +285,67 @@ onMounted(load)
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="196" align="right" fixed="right">
+      <el-table-column label="操作" width="240" align="right" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openLimits(row)">配置</el-button>
-          <el-tooltip
-            :disabled="!!row.share_link"
-            :content="'该协议还没有对应的监听端口'"
-            placement="top"
-          >
-            <span>
-              <el-dropdown
-                v-if="row.shareable"
-                trigger="click"
-                :disabled="!row.share_link"
-                @command="(cmd: string) => copyLink(row, cmd === 'legacy')"
-              >
-                <el-button link type="primary" :disabled="!row.share_link">
-                  复制链接<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-                </el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="modern">新版内核：证书指纹</el-dropdown-item>
-                    <el-dropdown-item v-if="row.share_link_legacy" command="legacy" divided>
-                      旧版内核：允许不安全（Xray &lt; 26.2.6）
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </span>
-          </el-tooltip>
-          <el-button link type="danger" @click="removeUser(row)">删除</el-button>
+          <div class="row-actions">
+            <el-button link type="primary" @click="openLimits(row)">配置</el-button>
+            <el-tooltip
+              v-if="row.shareable"
+              :disabled="!!row.share_link"
+              :content="'该协议还没有对应的监听端口'"
+              placement="top"
+            >
+              <span class="share-action">
+                <el-dropdown
+                  v-if="row.share_link_legacy"
+                  trigger="click"
+                  placement="bottom-end"
+                  :disabled="!row.share_link"
+                  @command="(cmd: string) => copyLink(row, cmd === 'legacy')"
+                >
+                  <el-button
+                    class="share-button"
+                    plain
+                    size="small"
+                    type="primary"
+                    :icon="CopyDocument"
+                    :disabled="!row.share_link"
+                  >
+                    复制链接<el-icon class="share-arrow"><ArrowDown /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="modern">
+                        <div class="share-option">
+                          <span class="share-option-title">
+                            新版链接<el-tag size="small" effect="light">推荐</el-tag>
+                          </span>
+                          <span class="share-option-description">使用证书指纹校验</span>
+                        </div>
+                      </el-dropdown-item>
+                      <el-dropdown-item command="legacy" divided>
+                        <div class="share-option">
+                          <span class="share-option-title">旧版兼容链接</span>
+                          <span class="share-option-description">允许不安全 · 仅限 Xray &lt; 26.2.6</span>
+                        </div>
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button
+                  v-else
+                  class="share-button"
+                  plain
+                  size="small"
+                  type="primary"
+                  :icon="CopyDocument"
+                  :disabled="!row.share_link"
+                  @click="copyLink(row)"
+                >复制链接</el-button>
+              </span>
+            </el-tooltip>
+            <el-button link type="danger" @click="removeUser(row)">删除</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -339,6 +374,11 @@ onMounted(load)
           </el-select>
         </el-form-item>
       </div>
+      <el-form-item v-if="addForm.protocol === 'ss'" label="加密类型">
+        <el-select v-model="addForm.ss_method">
+          <el-option v-for="method in ssMethods" :key="method" :label="method" :value="method" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="user_key / uuid / 密码">
         <div class="key-row">
           <el-input v-model="addForm.user_key" class="mono" />
@@ -389,6 +429,60 @@ onMounted(load)
 </template>
 
 <style scoped>
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  white-space: nowrap;
+}
+
+.row-actions > .el-button {
+  margin-left: 0;
+}
+
+.share-action {
+  display: inline-flex;
+  align-items: center;
+}
+
+.share-button {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.share-button:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+.share-arrow {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.share-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  line-height: 1.5;
+}
+
+.share-option-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.share-option-description {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
 .form-row {
   display: flex;
   gap: 12px;

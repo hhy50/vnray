@@ -78,9 +78,11 @@ func newClientApp(cfg config.Client) (*clientApp, error) {
 			Auth: client.AuthOptions{Key: cfg.Server.AuthKey},
 			Info: newClientInfo(cfg, reconnect),
 			OnConfig: func(cfg protocol.PushConfig) {
-				hosts.Update(cfg.CustomHosts)
-				ipMaps.Update(cfg.IPMaps)
-				logging.Debug("client: push config applied", "custom_hosts", len(cfg.CustomHosts), "ip_maps", len(cfg.IPMaps))
+				hosts.UpdateLayers(cfg.ClientConfig.CustomHosts, cfg.GlobalConfig.CustomHosts)
+				ipMaps.UpdateLayers(cfg.ClientConfig.IPMaps, cfg.GlobalConfig.IPMaps)
+				logging.Debug("client: push config applied",
+					"client_hosts", len(cfg.ClientConfig.CustomHosts), "global_hosts", len(cfg.GlobalConfig.CustomHosts),
+					"client_ip_maps", len(cfg.ClientConfig.IPMaps), "global_ip_maps", len(cfg.GlobalConfig.IPMaps))
 			},
 		},
 		dispatcher: guard.Wrap(dispatcher),

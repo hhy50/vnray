@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ type Handler func(password, client string, target Target, conn *Conn)
 
 // account 是一个已注册的 Shadowsocks 账号：密码派生的主密钥与其路由出口。
 type account struct {
+	method    Method
 	password  string
 	client    string
 	masterKey []byte
@@ -114,6 +116,19 @@ func NewValidator(method Method) *Validator {
 // Add 注册一个账号；密码不得为空（Shadowsocks 无用户名，密码即身份）。
 // 同密码重复注册按覆盖处理（改路由走更新路径）。
 func (v *Validator) Add(password, client string) error {
+	return v.add(password, client, v.method)
+}
+
+// AddWithMethod 注册使用指定加密方法的账号，同密码重复注册时覆盖原配置。
+func (v *Validator) AddWithMethod(password, client, method string) error {
+	m, err := ParseMethod(method)
+	if err != nil {
+		return err
+	}
+	return v.add(password, client, m)
+}
+
+func (v *Validator) add(password, client string, method Method) error {
 	if password == "" {
 		return errors.New("shadowsocks: password must not be empty")
 	}
@@ -122,8 +137,8 @@ func (v *Validator) Add(password, client string) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	acc := &account{password: password, client: client,
-		masterKey: evpBytesToKey([]byte(password), v.method.KeyLen)}
+	acc := &account{password: password, client: client, method: method,
+		masterKey: evpBytesToKey([]byte(password), method.KeyLen)}
 	for i, u := range v.users {
 		if u.password == password {
 			v.users[i] = acc
@@ -153,7 +168,7 @@ func (v *Validator) Reset() {
 	v.users = v.users[:0]
 }
 
-// Method 返回验证器的加密方法。
+// Method 返回 Add 使用的默认加密方法。
 func (v *Validator) Method() Method { return v.method }
 
 // snapshot 返回账号切片的副本，试解循环不必持锁。
@@ -162,6 +177,8 @@ func (v *Validator) snapshot() []*account {
 	defer v.mu.RUnlock()
 	out := make([]*account, len(v.users))
 	copy(out, v.users)
+	// 先试短盐，避免等待尚未发送的长盐字节而阻塞短盐账号的握手。
+	sort.SliceStable(out, func(i, j int) bool { return out[i].method.SaltLen < out[j].method.SaltLen })
 	return out
 }
 
@@ -223,27 +240,21 @@ func (s *Server) handle(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	defer func() { _ = conn.Close() }()
 
-	method := s.validator.method
-	salt := make([]byte, method.SaltLen)
-	if _, err := io.ReadFull(conn, salt); err != nil {
-		logging.Debugf("shadowsocks: read salt failed, remote=%s", conn.RemoteAddr())
-		return
-	}
-	if !s.validator.salts.Check(salt) {
-		logging.Warnf("shadowsocks: salt replayed, remote=%s", conn.RemoteAddr())
-		return
-	}
-
-	// 逐账号试解首个长度块：shadowsocks 无用户名，认证靠 AEAD 打开成功与否。
-	block := make([]byte, 2+tagSize)
-	if _, err := io.ReadFull(conn, block); err != nil {
-		logging.Debugf("shadowsocks: read length block failed, remote=%s", conn.RemoteAddr())
-		return
-	}
+	var prefix []byte
 	var matched *account
 	var aead cipher.AEAD
 	var firstLen int
 	for _, u := range s.validator.snapshot() {
+		method := u.method
+		needed := method.SaltLen + 2 + tagSize
+		if len(prefix) < needed {
+			extra := make([]byte, needed-len(prefix))
+			if _, err := io.ReadFull(conn, extra); err != nil {
+				return
+			}
+			prefix = append(prefix, extra...)
+		}
+		salt, block := prefix[:method.SaltLen], prefix[method.SaltLen:needed]
 		a, err := method.newAEAD(subkey(u.masterKey, salt, method.KeyLen))
 		if err != nil {
 			continue
@@ -263,6 +274,11 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	if matched == nil {
 		logging.Warnf("shadowsocks: no account matched, remote=%s", conn.RemoteAddr())
+		return
+	}
+	method := matched.method
+	if !s.validator.salts.Check(prefix[:method.SaltLen]) {
+		logging.Warnf("shadowsocks: salt replayed, remote=%s", conn.RemoteAddr())
 		return
 	}
 

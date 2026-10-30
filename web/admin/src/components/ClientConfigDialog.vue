@@ -217,6 +217,10 @@ const isConfigTab = computed(() => tab.value === 'config')
       </el-tab-pane>
 
       <el-tab-pane label="Host 与映射" name="hosts">
+        <p class="page-hint">
+          此处只编辑该客户端的独立配置；「客户端配置」页里的全局规则自动继承。
+          客户端先匹配此处的 Host 与 IP 段规则，未命中才使用全局配置；命中后不再改写。
+        </p>
         <div class="section">
           <div class="section-head">
             <span class="muted">自定义 Host（域名 → 固定 IP）</span>

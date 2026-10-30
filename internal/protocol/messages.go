@@ -135,13 +135,16 @@ type IPMap struct {
 	To   string `json:"to"`
 }
 
-// PushConfig 是服务端下发给客户端的一次全量配置快照：当前有自定义 host 与 IP
-// 段映射，后续新增配置项直接在这里加字段，两端同步升级即可，不必新增消息类型。
-type PushConfig struct {
-	// CustomHosts 为 nil/空时表示不启用自定义域名表，全部走 DNS。
+// ClientConfig 是一层独立的 Host 与 IP 段映射规则。
+type ClientConfig struct {
 	CustomHosts []CustomHost `json:"custom_hosts,omitempty"`
-	// IPMaps 为 nil/空时表示不启用 IP 段映射。
-	IPMaps []IPMap `json:"ip_maps,omitempty"`
+	IPMaps      []IPMap      `json:"ip_maps,omitempty"`
+}
+
+// PushConfig 分层下发完整快照，由客户端先匹配独立配置，未命中再匹配全局配置。
+type PushConfig struct {
+	ClientConfig ClientConfig `json:"client_config"`
+	GlobalConfig ClientConfig `json:"global_config"`
 }
 
 // newJSONFrame 构造载荷为 v 的 JSON 帧。

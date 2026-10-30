@@ -45,6 +45,8 @@ type snapshot struct {
 // SessionManager 维护所有认证通过的会话登记（客户端 + 用户），并实现 tcp.EventListener：
 // Handshake 与流处理委托给注入的回调，登记/注销/索引由本管理器负责。
 type SessionManager struct {
+	// ClientReady 在会话登记后补发配置，覆盖认证应答与登记之间发生的更新。
+	ClientReady func(*Session) error
 	// Auth 与 Streams 由数据面服务在构造时注入：认证与流处理是业务决策，
 	// 登记/注销/索引才是本管理器的职责。
 	Auth    Authenticator
@@ -152,6 +154,11 @@ func (m *SessionManager) OnSessionOpen(info *tcp.SessionInfo) error {
 				"arch", meta.Info.Arch, "hostname", meta.Info.Hostname)
 		}
 		info.Log.Info("sessions: user session established", attrs...)
+	}
+	if info.Kind == tcp.KindClient && entry.client != nil && m.ClientReady != nil {
+		if err := m.ClientReady(entry.client); err != nil {
+			info.Log.Warn("sessions: push client config failed", "err", err)
+		}
 	}
 	return nil
 }

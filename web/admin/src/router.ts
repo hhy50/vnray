@@ -29,6 +29,12 @@ const routes: RouteRecordRaw[] = [
         redirect: { name: 'clients' },
       },
       {
+        path: 'client-config',
+        name: 'client-config',
+        component: () => import('./views/ClientConfig.vue'),
+        meta: { title: '客户端配置' },
+      },
+      {
         path: 'users',
         name: 'users',
         component: () => import('./views/Users.vue'),
