@@ -2,7 +2,7 @@ package plugin
 
 // sqlite-web 插件：在独立端口上提供绑定表 SQLite 库的 Web 管理页（浏览表结构、
 // 分页看数据、执行任意 SQL）。复用 store 暴露的同库连接池，不另开数据库连接；
-// 仅支持 sqlite 存储，默认只监听回环地址——页面无独立鉴权，能执行任意 SQL。
+// 仅支持 sqlite 存储，默认监听 0.0.0.0——页面可设 Basic Auth 口令，建议启用。
 
 import (
 	"context"
@@ -32,8 +32,9 @@ const pluginSQLiteWeb = "sqlite-web"
 // 对话框按 Status 里的端口回显，配置过之后这里报告的就是上次用的端口。
 const DefaultSQLiteWebPort = 9002
 
-// defaultSQLiteWebHost 是未显式配置时的监听地址：页面无鉴权，默认只放开回环。
-const defaultSQLiteWebHost = "127.0.0.1"
+// defaultSQLiteWebHost 是未显式配置时的监听地址：可设 Basic Auth，未设口令时
+// 任意来源都能执行任意 SQL。
+const defaultSQLiteWebHost = "0.0.0.0"
 
 //go:embed sqliteweb.html
 var sqliteWebHTML string
@@ -113,7 +114,7 @@ func (p *SQLiteWebPlugin) Restore(ctx context.Context) {
 }
 
 // Enable 启用插件：校验并持久化端口、监听地址与访问口令，然后立即开始服务。
-// params 里 port 必填，host 可选（缺省沿用已存值或 127.0.0.1）；password 可选——
+// params 里 port 必填，host 可选（缺省沿用已存值或 0.0.0.0）；password 可选——
 // 空串沿用已存口令，"-" 清除口令，其余值按 bcrypt 哈希后保存。
 func (p *SQLiteWebPlugin) Enable(ctx context.Context, params map[string]string) error {
 	port, err := strconv.Atoi(params["port"])
