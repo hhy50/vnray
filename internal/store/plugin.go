@@ -27,10 +27,14 @@ type PluginState struct {
 func (PluginState) TableName() string { return "vn_plugin" }
 
 // PluginConfig 是插件私有参数的 JSON 结构：Ports 按协议名索引各自的监听端口，
-// Method 是 ss 的加密方法。协议级参数（如 vless 的 TLS）不放这里，见 config.ServiceSettings。
+// Method 是 ss 的加密方法，Host 是 sqlite-web 的监听地址，Password 是 sqlite-web
+// 的 Basic Auth 口令（bcrypt 哈希，不存明文）。协议级参数（如 vless 的 TLS）不放
+// 这里，见 config.ServiceSettings。
 type PluginConfig struct {
-	Ports  map[Protocol]int `json:"ports,omitempty"`
-	Method string           `json:"method,omitempty"`
+	Ports    map[Protocol]int `json:"ports,omitempty"`
+	Method   string           `json:"method,omitempty"`
+	Host     string           `json:"host,omitempty"`
+	Password string           `json:"password,omitempty"`
 }
 
 // ParsePluginConfig 解析插件配置 JSON；空串或非法 JSON 一律返回零值。
@@ -47,7 +51,7 @@ func ParsePluginConfig(raw string) PluginConfig {
 
 // Encode 序列化插件配置；全空返回空串，避免库里堆积空对象。
 func (c PluginConfig) Encode() string {
-	if len(c.Ports) == 0 && c.Method == "" {
+	if len(c.Ports) == 0 && c.Method == "" && c.Host == "" && c.Password == "" {
 		return ""
 	}
 	b, err := json.Marshal(c)

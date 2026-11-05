@@ -9,12 +9,14 @@ import type {
   Logs,
   PortMapList,
   PluginList,
+  RuleList,
   ServiceConfig,
   Session,
   Status,
   UserList,
 } from './types'
 import { useUserStore } from '../stores/user'
+import { getLocale, t } from '../i18n'
 
 // ApiError 携带 HTTP 状态码，调用方据此区分"未登录"与"操作失败"。
 export class ApiError extends Error {
@@ -31,7 +33,11 @@ export class ApiError extends Error {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase()
   const url = path.startsWith('/admin/') ? path : '/admin/ops' + path
-  const headers: Record<string, string> = { Accept: 'application/json' }
+  // Accept-Language 让服务端按当前界面语言返回错误文案。
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Accept-Language': getLocale(),
+  }
   if (init.body) headers['Content-Type'] = 'application/json'
   // 动态获取 store，避免模块初始化时 pinia 未就绪
   try {
@@ -52,7 +58,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (res.status === 401) {
     // 401 时只抛错，由上层（路由守卫 / store）决定跳转方式，
     // 避免整页刷新导致的循环跳转。
-    throw new ApiError('未登录', 401)
+    throw new ApiError(t('common.unauthenticated'), 401)
   }
 
   const body = (await res.json().catch(() => null)) as
@@ -116,6 +122,8 @@ export const api = {
     name: string
     client: string
     enabled?: boolean
+    // 出站规则名；空串（或不传）表示内置 default。
+    rule?: string
   }) => request(`/api/users`, json('POST', body)),
   userDelete: (protocol: string, key: string) =>
     request(`/api/users${query({ protocol, key })}`, json('DELETE')),
@@ -124,8 +132,20 @@ export const api = {
   userLimits: (
     protocol: string,
     key: string,
-    body: { up_kbps: number; down_kbps: number; concurrency: number; log_level: string },
+    body: {
+      up_kbps: number
+      down_kbps: number
+      concurrency: number
+      log_level: string
+      rule: string
+    },
   ) => request(`/api/users/limits${query({ protocol, key })}`, json('PUT', body)),
+
+  rules: () => request<RuleList>('/api/rules'),
+  ruleSave: (name: string, body: { reject: string[]; direct: string[] }) =>
+    request<{ name: string }>(`/api/rules/${encodeURIComponent(name)}`, json('PUT', body)),
+  ruleDelete: (name: string) =>
+    request<{ name: string }>(`/api/rules/${encodeURIComponent(name)}`, json('DELETE')),
 
   portmaps: () => request<PortMapList>('/api/portmaps'),
   portMapSave: (

@@ -10,6 +10,7 @@ import (
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/ratelimit"
+	"github.com/hhy50/vnray/internal/rule"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
@@ -25,14 +26,16 @@ type forwardHub struct {
 	limits *ratelimit.Registry
 	// traffic 是流量记账器；nil 时只统计到限速注册表的内存计数里。
 	traffic *traffic.Meter
+	// rules 是用户出站规则表；nil 时不做规则判定。
+	rules *ruleSet
 }
 
 // handleUserStream 处理一条用户流：按帧类型分发——Ping 回 Pong 并续期等待上限后
 // 继续读，Forward 校验目标、经绑定客户端开隧道并双向搬运，其余类型拒绝并结束流。
 // 它在 OnStreamOpen 事件里被调用，阻塞该流的整个生命周期。
 // log 是该会话的日志器（级别取自用户配置）；userKey 是握手时出示的用户密钥：
-// 限速与统计都按它取桶（同一用户的所有隧道共享配额）。
-func (h *forwardHub) handleUserStream(log *logging.Scoped, userKey, clientName string, stream tcp.Stream, stop <-chan struct{}) {
+// 限速与统计都按它取桶（同一用户的所有隧道共享配额）；userRule 是该用户的出站规则名。
+func (h *forwardHub) handleUserStream(log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, stop <-chan struct{}) {
 	remote := stream.RemoteAddr().String()
 
 	dec := protocol.NewDecoder(stream)
@@ -51,7 +54,7 @@ func (h *forwardHub) handleUserStream(log *logging.Scoped, userKey, clientName s
 	case protocol.Ping:
 		replyHeartbeat(log, remote, enc, frame)
 	case protocol.Forward:
-		h.handleForward(log, userKey, clientName, stream, frame, stop)
+		h.handleForward(log, userKey, userRule, clientName, stream, frame, stop)
 		return
 	default:
 		_ = frame.CloseBody()
@@ -74,9 +77,9 @@ func replyHeartbeat(log *logging.Scoped, remote string, enc *protocol.Encoder, p
 	log.Debug("forward: user heartbeat replied", "remote", remote, "timestamp_ms", sent)
 }
 
-// handleForward 处理 Forward 帧：目标在载荷开头的地址块里，校验后经绑定客户端
-// 开隧道，随后该流承载裸字节直至任一侧关闭。
-func (h *forwardHub) handleForward(log *logging.Scoped, userKey, clientName string, stream tcp.Stream, frame *protocol.Frame, stop <-chan struct{}) {
+// handleForward 处理 Forward 帧：目标在载荷开头的地址块里，先按用户出站规则判定，
+// 再经绑定客户端开隧道，随后该流承载裸字节直至任一侧关闭。
+func (h *forwardHub) handleForward(log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, frame *protocol.Frame, stop <-chan struct{}) {
 	remote := stream.RemoteAddr().String()
 	// 用户级并发：占一个并发位再建隧道，超限排队；会话关闭即中断等待。
 	if h.limits != nil && userKey != "" {
@@ -107,6 +110,27 @@ func (h *forwardHub) handleForward(log *logging.Scoped, userKey, clientName stri
 	}
 	_ = frame.CloseBody()
 
+	// 出站规则在服务端判定：命中 reject 直接拒绝，命中 direct 仍走绑定客户端但让它
+	// 跳过自己的路由规则，其余按默认路径转发。
+	var direct bool
+	if h.rules != nil {
+		verdict, ruleName := h.rules.Verdict(userRule, dest.Host)
+		switch verdict {
+		case rule.Reject:
+			protocol.WriteReply(stream, protocol.ForwardResult,
+				protocol.Reply{OK: false, Reason: fmt.Sprintf("destination %s rejected by rule %s", dest, ruleName)})
+			log.Info("forward: destination rejected by rule",
+				"remote", remote, "client", clientName, "user_key", userKey,
+				"destination", dest.String(), "rule", ruleName)
+			return
+		case rule.Direct:
+			direct = true
+			log.Debug("forward: destination matches direct list",
+				"remote", remote, "client", clientName, "user_key", userKey,
+				"destination", dest.String(), "rule", ruleName)
+		}
+	}
+
 	exit, ok := h.exits.Resolve(clientName)
 	if !ok {
 		reason := fmt.Sprintf("client %q is offline", clientName)
@@ -121,7 +145,7 @@ func (h *forwardHub) handleForward(log *logging.Scoped, userKey, clientName stri
 		return
 	}
 
-	tunnel, err := exit.OpenTunnel(dest, protocol.TunnelRequest{Origin: remote})
+	tunnel, err := exit.OpenTunnel(dest, protocol.TunnelRequest{Origin: remote, Direct: direct})
 	if err != nil {
 		protocol.WriteReply(stream, protocol.ForwardResult, protocol.Reply{OK: false, Reason: err.Error()})
 		log.Warn("forward: open tunnel failed",

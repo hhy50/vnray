@@ -5,12 +5,19 @@ package admin
 // 下拉里也就选不到——这是「出口选择本机」最容易让人困惑的地方，先固定住现状。
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
 )
+
+// zhRequest 是不带 Accept-Language 的请求：文案按默认语言（中文）输出。
+func zhRequest() *http.Request {
+	return httptest.NewRequest(http.MethodGet, "/admin/ops/api/users", nil)
+}
 
 // localOptionLabel 取出下拉里本机出口那一项；不存在时 ok 为 false。
 func localOptionLabel(opts []apiClientOption) (string, bool) {
@@ -28,7 +35,7 @@ func TestClientOptionsLocalExit(t *testing.T) {
 	s := newTestAdminService(t)
 	s.opts.Bindings = NewBindings(s.opts.Store)
 
-	if _, ok := localOptionLabel(s.clientOptions()); ok {
+	if _, ok := localOptionLabel(s.clientOptions(zhRequest())); ok {
 		t.Fatal("未登记 server:self 时不该出现本机出口选项")
 	}
 
@@ -38,7 +45,7 @@ func TestClientOptionsLocalExit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register local exit: %v", err)
 	}
-	label, ok := localOptionLabel(s.clientOptions())
+	label, ok := localOptionLabel(s.clientOptions(zhRequest()))
 	if !ok {
 		t.Fatal("登记后应出现本机出口选项")
 	}
@@ -58,7 +65,7 @@ func TestPortMapExcludesLocalExit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register local exit: %v", err)
 	}
-	if _, ok := localOptionLabel(s.clientOptionsForPortMap()); ok {
+	if _, ok := localOptionLabel(s.clientOptionsForPortMap(zhRequest())); ok {
 		t.Fatal("端口映射的候选不该包含本机出口")
 	}
 }

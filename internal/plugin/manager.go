@@ -123,6 +123,12 @@ type TLSSetter interface {
 	SetTLS(ctx context.Context, enabled bool, serverName string) error
 }
 
+// BasicAuthProvider 是带 Basic Auth 访问口令的插件能力（sqlite-web 实现它）：
+// 管理台据此在启用对话框里渲染口令输入框。
+type BasicAuthProvider interface {
+	SupportsBasicAuth() bool
+}
+
 // VLESSTLSStore 是 vless TLS 参数的唯一读写口（装配层注入 serviceConfig）：参数存在
 // 服务端配置表里，插件表只留端口。Get 返回 nil 表示从未配置过。
 type VLESSTLSStore interface {
@@ -169,6 +175,7 @@ func NewManager(st store.Store, users UserStore, exits transport.ExitResolver, l
 	}
 	m.register(newV2RayPlugin(st, users, exits, limits))
 	m.register(newSSPlugin(st, users, exits, limits))
+	m.register(newSQLiteWebPlugin(st))
 	return m
 }
 
@@ -222,14 +229,20 @@ func (m *Manager) seed(ctx context.Context) error {
 }
 
 // defaultEnableParams 取插件的内置默认启用参数（仅监听端口）：某槽位没有默认端口时
-// 返回 nil（如 ss 无内置默认端口，需在管理台配置端口后再启用）。
+// 返回 nil（如 ss 无内置默认端口，需在管理台配置端口后再启用）。字段名与管理台对话框
+// 一致：单端口用 port，多端口用 <协议>_port。
 func defaultEnableParams(p Plugin) map[string]string {
+	ports := p.Status().Ports
 	params := make(map[string]string)
-	for _, port := range p.Status().Ports {
+	for _, port := range ports {
 		if port.Port <= 0 {
 			return nil
 		}
-		params[string(port.Protocol)+"_port"] = strconv.Itoa(port.Port)
+		key := string(port.Protocol) + "_port"
+		if len(ports) == 1 {
+			key = "port"
+		}
+		params[key] = strconv.Itoa(port.Port)
 	}
 	if len(params) == 0 {
 		return nil

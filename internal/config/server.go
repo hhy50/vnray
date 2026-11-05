@@ -72,7 +72,7 @@ func (d Diagnostics) Validate() error {
 	return nil
 }
 
-// Heartbeat 是服务端对每条客户端会话的心跳策略。它由运行时服务配置（管理台「服务配置」
+// Heartbeat 是服务端对每条客户端会话的心跳策略。它由运行时服务配置（管理台「服务端配置」
 // 页）管理，不在配置文件里。
 //
 // 心跳由**服务端主动发起**：Ping 带上本端毫秒时间戳，客户端原样回显 Pong，
@@ -174,7 +174,7 @@ func (p PluginConfig) Validate() error {
 }
 
 // Server 是服务端配置。心跳与分享主机等运行期可热改的项不在其中，它们由管理台
-// 「服务配置」页管理（见 ServiceSettings）。
+// 「服务端配置」页管理（见 ServiceSettings）。
 type Server struct {
 	Server      ServerOptions `yaml:"server"`
 	Plugin      PluginConfig  `yaml:"plugin"`

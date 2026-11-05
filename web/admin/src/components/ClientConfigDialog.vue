@@ -5,6 +5,9 @@ import { Delete, Plus, MagicStick, CopyDocument } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { ClientDetail, HostRow, IPMapRow } from '../api/types'
 import { copyText, shortName } from '../lib/format'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const props = defineProps<{ modelValue: boolean; name: string }>()
 const emit = defineEmits<{
@@ -30,7 +33,7 @@ const concurrency = ref(0)
 const saving = ref('')
 
 const logLevels = [
-  { value: 'info', label: 'info（默认）' },
+  { value: 'info', label: 'info' },
   { value: 'debug', label: 'debug' },
   { value: 'warn', label: 'warn' },
   { value: 'error', label: 'error' },
@@ -58,7 +61,7 @@ async function load() {
     concurrency.value = data.concurrency
     loadError.value = ''
   } catch (err) {
-    loadError.value = err instanceof ApiError ? err.message : '加载失败'
+    loadError.value = err instanceof ApiError ? err.message : t('common.loadFailed')
   } finally {
     loading.value = false
   }
@@ -80,9 +83,9 @@ watch(
 function formatJson() {
   try {
     serverConfig.value = JSON.stringify(JSON.parse(serverConfig.value), null, 2)
-    ElMessage.success('已格式化')
+    ElMessage.success(t('clientDialog.formatted'))
   } catch {
-    ElMessage.error('当前内容不是合法 JSON')
+    ElMessage.error(t('clientDialog.invalidJson'))
   }
 }
 
@@ -101,13 +104,13 @@ async function saveConfig() {
       ip_maps: ipMaps.value.filter((m) => m.from || m.to),
       concurrency: concurrency.value,
     })
-    if (res.pushed) ElMessage.success('已保存，在线客户端立即生效')
-    else ElMessage.warning('已保存；客户端离线，下次认证时生效')
+    if (res.pushed) ElMessage.success(t('clientDialog.pushed'))
+    else ElMessage.warning(t('clientDialog.offlineWarn'))
     // 保存成功即收起弹窗，列表由父组件刷新，避免停在弹窗上看旧值。
     visible.value = false
     emit('saved')
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.saveFailed'))
   } finally {
     saving.value = ''
   }
@@ -122,14 +125,14 @@ async function saveHosts() {
       concurrency: concurrency.value,
     })
     if (res.pushed) {
-      ElMessage.success('已保存，在线客户端立即生效')
+      ElMessage.success(t('clientDialog.pushed'))
     } else {
-      ElMessage.warning('已保存；客户端离线，下次认证时生效')
+      ElMessage.warning(t('clientDialog.offlineWarn'))
     }
     visible.value = false
     emit('saved')
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.saveFailed'))
   } finally {
     saving.value = ''
   }
@@ -137,8 +140,8 @@ async function saveHosts() {
 
 async function copyReported() {
   if (!detail.value?.reported_json) return
-  if (await copyText(detail.value.reported_json)) ElMessage.success('已复制')
-  else ElMessage.error('复制失败')
+  if (await copyText(detail.value.reported_json)) ElMessage.success(t('common.copied'))
+  else ElMessage.error(t('common.copyFailed'))
 }
 
 const isConfigTab = computed(() => tab.value === 'config')
@@ -158,13 +161,13 @@ const isConfigTab = computed(() => tab.value === 'config')
         <div class="head-line">
           <span class="dialog-title">{{ shortName(name) }}</span>
           <el-tag v-if="detail" size="small" :type="detail.online ? 'success' : 'info'" effect="plain">
-            {{ detail.online ? '在线' : '离线' }}
+            {{ detail.online ? t('common.online') : t('common.offline') }}
           </el-tag>
           <span v-if="detail?.remote" class="mono faint">{{ detail.remote }}</span>
         </div>
         <div class="head-sub faint" :title="name">
           <span class="mono">{{ name }}</span>
-          <template v-if="detail?.has_stored"> · 最近更新 {{ detail.updated_at }}</template>
+          <template v-if="detail?.has_stored"> · {{ t('clientDialog.recentlyUpdated', { value: detail.updated_at }) }}</template>
         </div>
       </div>
     </template>
@@ -173,10 +176,10 @@ const isConfigTab = computed(() => tab.value === 'config')
     <el-skeleton v-else-if="loading && !detail" :rows="6" animated />
 
     <el-tabs v-else-if="detail" v-model="tab" class="cfg-tabs">
-      <el-tab-pane label="服务端配置" name="config">
+      <el-tab-pane :label="t('clientDialog.tabConfig')" name="config">
         <el-alert
           v-if="detail.stored_raw"
-          title="现有内容不是合法 JSON，保存后将被整体覆盖。"
+          :title="t('clientDialog.invalidJsonWarn')"
           type="warning"
           :closable="false"
           show-icon
@@ -184,20 +187,25 @@ const isConfigTab = computed(() => tab.value === 'config')
         />
 
         <el-form label-position="top">
-          <el-form-item label="日志级别（只作用于该客户端会话，下次连接生效）">
+          <el-form-item :label="t('clientDialog.logLevelLabel')">
             <el-select v-model="logLevel" style="width: 12rem">
-              <el-option v-for="l in logLevels" :key="l.value" :label="l.label" :value="l.value" />
+              <el-option
+                v-for="l in logLevels"
+                :key="l.value"
+                :label="l.value === 'info' ? t('users.logLevelDefault') : l.label"
+                :value="l.value"
+              />
             </el-select>
           </el-form-item>
 
-          <el-form-item label="并发上限（同时路由到该客户端的隧道流数，0 = 不限）">
+          <el-form-item :label="t('clientDialog.concurrencyLabel')">
             <el-input-number v-model="concurrency" :min="0" controls-position="right" style="width: 12rem" />
           </el-form-item>
 
           <div class="json-head">
             <span class="json-title">server_config（JSON）</span>
             <div class="spacer" />
-            <el-button link :icon="MagicStick" @click="formatJson">格式化</el-button>
+            <el-button link :icon="MagicStick" @click="formatJson">{{ t('clientDialog.format') }}</el-button>
           </div>
 
           <el-input
@@ -210,32 +218,30 @@ const isConfigTab = computed(() => tab.value === 'config')
           />
 
           <p class="page-hint">
-            写穿到 client_bindings.server_config；下拉框的日志级别会覆盖 JSON 里的同名字段，其余键原样保留。
-            并发上限与 Host / 映射一起下发。
+            {{ t('clientDialog.configHint') }}
           </p>
         </el-form>
       </el-tab-pane>
 
-      <el-tab-pane label="Host 与映射" name="hosts">
+      <el-tab-pane :label="t('clientDialog.tabHosts')" name="hosts">
         <p class="page-hint">
-          此处只编辑该客户端的独立配置；「客户端配置」页里的全局规则自动继承。
-          客户端先匹配此处的 Host 与 IP 段规则，未命中才使用全局配置；命中后不再改写。
+          {{ t('clientDialog.hostsHint') }}
         </p>
         <div class="section">
           <div class="section-head">
-            <span class="muted">自定义 Host（域名 → 固定 IP）</span>
+            <span class="muted">{{ t('clientDialog.hostsSection') }}</span>
             <div class="spacer" />
             <el-button size="small" :icon="Plus" @click="hosts.push({ domain: '', ip: '' })">
-              添加记录
+              {{ t('clientDialog.addRecord') }}
             </el-button>
           </div>
-          <el-table :data="hosts" size="small" empty-text="还没有自定义 Host">
-            <el-table-column label="域名" min-width="220">
+          <el-table :data="hosts" size="small" :empty-text="t('clientDialog.hostsEmpty')">
+            <el-table-column :label="t('clientConfig.colDomain')" min-width="220">
               <template #default="{ row }">
                 <el-input v-model="row.domain" placeholder="example.com" />
               </template>
             </el-table-column>
-            <el-table-column label="固定 IP" min-width="180">
+            <el-table-column :label="t('clientConfig.colFixedIP')" min-width="180">
               <template #default="{ row }">
                 <el-input v-model="row.ip" placeholder="192.168.1.10" class="mono" />
               </template>
@@ -250,19 +256,19 @@ const isConfigTab = computed(() => tab.value === 'config')
 
         <div class="section">
           <div class="section-head">
-            <span class="muted">IP 段映射（源段 → 目标段，每段为 0-255 或 *）</span>
+            <span class="muted">{{ t('clientDialog.mapsSection') }}</span>
             <div class="spacer" />
             <el-button size="small" :icon="Plus" @click="ipMaps.push({ from: '', to: '' })">
-              添加映射
+              {{ t('clientConfig.addMap') }}
             </el-button>
           </div>
-          <el-table :data="ipMaps" size="small" empty-text="还没有 IP 段映射">
-            <el-table-column label="源段" min-width="200">
+          <el-table :data="ipMaps" size="small" :empty-text="t('clientDialog.mapsEmpty')">
+            <el-table-column :label="t('clientConfig.colFrom')" min-width="200">
               <template #default="{ row }">
                 <el-input v-model="row.from" placeholder="123.123.*.*" class="mono" />
               </template>
             </el-table-column>
-            <el-table-column label="目标段" min-width="200">
+            <el-table-column :label="t('clientConfig.colTo')" min-width="200">
               <template #default="{ row }">
                 <el-input v-model="row.to" placeholder="192.168.*.*" class="mono" />
               </template>
@@ -276,22 +282,22 @@ const isConfigTab = computed(() => tab.value === 'config')
         </div>
 
         <p class="page-hint">
-          Host 与映射随「保存并下发」提交：在线客户端立即生效，离线客户端下次认证时补发。并发上限在「服务端配置」里。
+          {{ t('clientDialog.hostsTip') }}
         </p>
       </el-tab-pane>
 
-      <el-tab-pane label="上报快照" name="reported">
+      <el-tab-pane :label="t('clientDialog.tabReported')" name="reported">
         <div v-if="detail.reported_json" class="section">
           <div class="section-head">
-            <span class="muted">客户端认证时上报的完整配置（只读）</span>
+            <span class="muted">{{ t('clientDialog.reportedSection') }}</span>
             <div class="spacer" />
-            <el-button size="small" :icon="CopyDocument" @click="copyReported">复制</el-button>
+            <el-button size="small" :icon="CopyDocument" @click="copyReported">{{ t('common.copy') }}</el-button>
           </div>
           <pre class="log-view">{{ detail.reported_json }}</pre>
         </div>
         <el-empty
           v-else
-          description="还没有上报记录：客户端连上来之后，这里会显示它的完整配置快照"
+          :description="t('clientDialog.reportedEmpty')"
           :image-size="72"
         />
       </el-tab-pane>
@@ -300,17 +306,17 @@ const isConfigTab = computed(() => tab.value === 'config')
     <template #footer>
       <div class="dialog-footer">
         <span class="faint">
-          {{ tab === 'reported' ? '只读快照，不可编辑' : isConfigTab ? '日志级别、并发上限与 JSON 一起提交' : 'Host 与映射（含并发上限）一并下发' }}
+          {{ tab === 'reported' ? t('clientDialog.footerReported') : isConfigTab ? t('clientDialog.footerConfig') : t('clientDialog.footerHosts') }}
         </span>
         <div class="spacer" />
-        <el-button @click="visible = false">关闭</el-button>
+        <el-button @click="visible = false">{{ t('common.close') }}</el-button>
         <el-button
           v-if="detail && tab !== 'reported'"
           type="primary"
           :loading="!!saving"
           @click="isConfigTab ? saveConfig() : saveHosts()"
         >
-          {{ isConfigTab ? '保存配置' : '保存并下发' }}
+          {{ isConfigTab ? t('clientDialog.saveConfig') : t('clientDialog.savePush') }}
         </el-button>
       </div>
     </template>

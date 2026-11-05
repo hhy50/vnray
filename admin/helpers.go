@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -42,7 +43,8 @@ func clientMatches(info ClientInfo, q string) bool {
 }
 
 // clientOptions 汇总客户端下拉候选：在线客户端（标注"在线"）与已注册记录，按名字去重排序。
-func (s *AdminService) clientOptions() []apiClientOption {
+// 标注文案随请求语言变化，因此需要 r。
+func (s *AdminService) clientOptions(r *http.Request) []apiClientOption {
 	seen := make(map[string]bool)
 	out := make([]apiClientOption, 0, 8)
 	for _, info := range s.clientsSnapshot() {
@@ -51,7 +53,7 @@ func (s *AdminService) clientOptions() []apiClientOption {
 			continue
 		}
 		seen[name] = true
-		out = append(out, apiClientOption{Name: name, Label: name + "（在线）"})
+		out = append(out, apiClientOption{Name: name, Label: msg(r, msgClientLabelOnline, name)})
 	}
 	if s.opts.Bindings != nil {
 		for _, cb := range s.opts.Bindings.ClientSnapshot() {
@@ -59,9 +61,9 @@ func (s *AdminService) clientOptions() []apiClientOption {
 				continue
 			}
 			seen[cb.ClientKey] = true
-			label := cb.ClientKey + "（已注册）"
+			label := msg(r, msgClientLabelRegistered, cb.ClientKey)
 			if cb.ClientType == store.ClientTypeLocal {
-				label = cb.ClientKey + "（本机）"
+				label = msg(r, msgClientLabelLocal, cb.ClientKey)
 			}
 			out = append(out, apiClientOption{Name: cb.ClientKey, Label: label})
 		}
@@ -71,8 +73,8 @@ func (s *AdminService) clientOptions() []apiClientOption {
 }
 
 // clientOptionsForPortMap 去掉本机出口：端口映射不支持本机出口。
-func (s *AdminService) clientOptionsForPortMap() []apiClientOption {
-	all := s.clientOptions()
+func (s *AdminService) clientOptionsForPortMap(r *http.Request) []apiClientOption {
+	all := s.clientOptions(r)
 	out := make([]apiClientOption, 0, len(all))
 	for _, o := range all {
 		if o.Name == transport.LocalClientName {

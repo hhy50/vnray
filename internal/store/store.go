@@ -63,7 +63,7 @@ const ClientTypeProxy ClientType = "proxy"
 const ClientTypeLocal ClientType = "local"
 
 // UserConfig 是用户记录 Config 列的 JSON 结构：上下行限速（字节/秒，0 = 不限）、
-// 该用户会话的日志级别（空视为 info）与最大并发隧道数（0 = 不限）。
+// 该用户会话的日志级别（空视为 info）、最大并发隧道数（0 = 不限）与出站规则名。
 type UserConfig struct {
 	// SSMethod 为空时沿用 SS 插件的默认加密方法。
 	SSMethod  string `json:"ss_method,omitempty"`
@@ -72,6 +72,8 @@ type UserConfig struct {
 	LogLevel  string `json:"log_level,omitempty"`
 	// Concurrency 是该用户同时存活的转发隧道上限；0 = 不限。
 	Concurrency int `json:"concurrency,omitempty"`
+	// Rule 是该用户使用的出站规则名（服务端 rule.<name>）；空视为预置的 default。
+	Rule string `json:"rule,omitempty"`
 }
 
 // ParseUserConfig 解析用户配置 JSON；空串或非法 JSON 一律返回零值（视为不限速）。
@@ -88,7 +90,8 @@ func ParseUserConfig(raw string) UserConfig {
 
 // Encode 序列化用户配置；全零返回空串，避免库里堆积空对象。
 func (c UserConfig) Encode() string {
-	if c.UpLimit == 0 && c.DownLimit == 0 && c.LogLevel == "" && c.Concurrency == 0 && c.SSMethod == "" {
+	if c.UpLimit == 0 && c.DownLimit == 0 && c.LogLevel == "" && c.Concurrency == 0 &&
+		c.SSMethod == "" && c.Rule == "" {
 		return ""
 	}
 	b, err := json.Marshal(c)

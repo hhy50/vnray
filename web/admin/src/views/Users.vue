@@ -1,14 +1,19 @@
 <script setup lang="ts">
 // 用户：协议 × user_key 的绑定记录，限速/并发/日志级别集中在这里配置。
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Plus, Search, CopyDocument, ArrowDown } from '@element-plus/icons-vue'
+import { Plus, Search, CopyDocument, ArrowDown, Filter } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { User } from '../api/types'
+import RulesDialog from '../components/RulesDialog.vue'
 import { bytes, copyText, rate, shortName } from '../lib/format'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const users = ref<User[]>([])
 const clients = ref<{ name: string; label: string }[]>([])
 const protocols = ref<string[]>([])
+const rules = ref<string[]>([])
 const q = ref('')
 const protocol = ref('')
 const loading = ref(false)
@@ -16,15 +21,31 @@ const loadError = ref('')
 
 const showAdd = ref(false)
 const saving = ref(false)
-const addForm = reactive({ name: '', protocol: 'vless', client: '', user_key: '', ss_method: 'aes-256-gcm' })
+// rule 为空串即内置 default：判定时空规则名按 default 处理，不必写冗余值。
+const addForm = reactive({
+  name: '',
+  protocol: 'vless',
+  client: '',
+  user_key: '',
+  ss_method: 'aes-256-gcm',
+  rule: 'default',
+})
 const ssMethods = ['aes-256-gcm', 'aes-128-gcm', 'chacha20-ietf-poly1305']
+
+// 出站规则改成用户页的弹窗入口：规则本身不再占独立菜单。
+const showRules = ref(false)
+// default 排在最前，其余按服务端返回的名字升序。
+const ruleOptions = computed(() => [
+  'default',
+  ...rules.value.filter((name) => name !== 'default'),
+])
 
 const limitsFor = ref<User | null>(null)
 const limitsSaving = ref(false)
-const limits = reactive({ up_kbps: 0, down_kbps: 0, concurrency: 0, log_level: 'info' })
+const limits = reactive({ up_kbps: 0, down_kbps: 0, concurrency: 0, log_level: 'info', rule: '' })
 
 const logLevels = [
-  { value: 'info', label: 'info（默认）' },
+  { value: 'info', label: 'info' },
   { value: 'debug', label: 'debug' },
   { value: 'warn', label: 'warn' },
   { value: 'error', label: 'error' },
@@ -39,8 +60,8 @@ const selectedClientLabel = computed(() => {
 })
 
 const emptyText = computed(() => {
-  if (q.value.trim() || protocol.value) return '没有符合条件的用户，换个关键字或协议试试。'
-  return '还没有用户。点右上角「添加用户」，把某个协议的 user_key 绑定到出口客户端。'
+  if (q.value.trim() || protocol.value) return t('users.emptyFiltered')
+  return t('users.emptyAll')
 })
 
 async function load(silent = false) {
@@ -50,9 +71,10 @@ async function load(silent = false) {
     users.value = data.users
     clients.value = data.clients
     protocols.value = data.protocols
+    rules.value = data.rules ?? []
     loadError.value = ''
   } catch (err) {
-    loadError.value = err instanceof ApiError ? err.message : '加载失败'
+    loadError.value = err instanceof ApiError ? err.message : t('common.loadFailed')
   } finally {
     loading.value = false
   }
@@ -65,6 +87,7 @@ function openAdd() {
   addForm.client = ''
   addForm.user_key = generateKey('vless')
   addForm.ss_method = 'aes-256-gcm'
+  addForm.rule = 'default'
   showAdd.value = true
 }
 
@@ -98,12 +121,13 @@ async function submitAdd() {
       client: addForm.client.trim(),
       enabled: true,
       ss_method: addForm.protocol === 'ss' ? addForm.ss_method : undefined,
+      rule: addForm.rule,
     })
     showAdd.value = false
-    ElMessage.success('用户已添加')
+    ElMessage.success(t('users.added'))
     await load(true)
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '添加失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('users.addFailed'))
   } finally {
     saving.value = false
   }
@@ -115,29 +139,29 @@ async function toggleStatus(u: User, enabled: boolean) {
   u.enabled = enabled
   try {
     await api.userStatus(u.protocol, u.user_key, enabled)
-    ElMessage.success(enabled ? '已启用' : '已停用')
+    ElMessage.success(enabled ? t('users.enabled') : t('users.disabled'))
   } catch (err) {
     u.enabled = previous
-    ElMessage.error(err instanceof ApiError ? err.message : '操作失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.opFailed'))
   }
 }
 
 async function removeUser(u: User) {
   try {
     await ElMessageBox.confirm(
-      `删除用户 ${u.user_key}（${u.protocol}）？该操作立即生效且不可撤销。`,
-      '删除用户',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      t('users.deleteConfirm', { key: u.user_key, protocol: u.protocol }),
+      t('users.deleteTitle'),
+      { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') },
     )
   } catch {
     return
   }
   try {
     await api.userDelete(u.protocol, u.user_key)
-    ElMessage.success('已删除')
+    ElMessage.success(t('common.deleted'))
     await load(true)
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '删除失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.deleteFailed'))
   }
 }
 
@@ -147,6 +171,7 @@ function openLimits(u: User) {
   limits.down_kbps = u.limit_down_kb
   limits.concurrency = u.concurrency
   limits.log_level = u.log_level || 'info'
+  limits.rule = u.rule || 'default'
 }
 
 async function saveLimits() {
@@ -159,12 +184,13 @@ async function saveLimits() {
       down_kbps: limits.down_kbps,
       concurrency: limits.concurrency,
       log_level: limits.log_level,
+      rule: limits.rule,
     })
     limitsFor.value = null
-    ElMessage.success('已保存，限速即时生效')
+    ElMessage.success(t('users.limitsSaved'))
     await load(true)
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.saveFailed'))
   } finally {
     limitsSaving.value = false
   }
@@ -174,23 +200,19 @@ async function copyLink(u: User, legacy = false) {
   // 两代链接互斥：新版用证书指纹，旧版用 allowInsecure，混在一份配置里会让新内核拒绝启动。
   const link = legacy ? u.share_link_legacy : u.share_link
   if (!link) {
-    ElMessage.warning(
-      legacy
-        ? '没有旧版链接：只有自签证书才需要，且插件需已启用 TLS'
-        : '该用户没有可分享的链接（插件未设置端口或协议不适用）',
-    )
+    ElMessage.warning(legacy ? t('users.noLegacyLink') : t('users.noLink'))
     return
   }
   if (await copyText(link)) {
-    ElMessage.success(legacy ? '旧版链接已复制（仅限 Xray < 26.2.6）' : '链接已复制')
+    ElMessage.success(legacy ? t('users.legacyLinkCopied') : t('users.linkCopied'))
   } else {
-    ElMessage.error('复制失败')
+    ElMessage.error(t('common.copyFailed'))
   }
 }
 
 async function copyKey(u: User) {
-  if (await copyText(u.user_key)) ElMessage.success('user_key 已复制')
-  else ElMessage.error('复制失败')
+  if (await copyText(u.user_key)) ElMessage.success(t('users.keyCopied'))
+  else ElMessage.error(t('common.copyFailed'))
 }
 
 onMounted(load)
@@ -200,22 +222,23 @@ onMounted(load)
   <el-card shadow="never" class="stack">
     <template #header>
       <div class="toolbar">
-        <strong>共 {{ users.length }} 个用户</strong>
+        <strong>{{ t('users.count', { n: users.length }) }}</strong>
         <div class="spacer" />
         <el-input
           v-model="q"
-          placeholder="搜索 user_key / 名称 / 出口客户端"
+          :placeholder="t('users.searchPlaceholder')"
           clearable
           :prefix-icon="Search"
           style="width: 17rem"
           @keyup.enter="load()"
         />
-        <el-select v-model="protocol" placeholder="全部协议" style="width: 7.5rem" @change="load()">
-          <el-option label="全部协议" value="" />
+        <el-select v-model="protocol" :placeholder="t('users.allProtocols')" style="width: 7.5rem" @change="load()">
+          <el-option :label="t('users.allProtocols')" value="" />
           <el-option v-for="p in protocols" :key="p" :label="p" :value="p" />
         </el-select>
-        <el-button :loading="loading" @click="load()">查询</el-button>
-        <el-button type="primary" :icon="Plus" @click="openAdd">添加用户</el-button>
+        <el-button :loading="loading" @click="load()">{{ t('users.query') }}</el-button>
+        <el-button :icon="Filter" @click="showRules = true">{{ t('users.rulesButton') }}</el-button>
+        <el-button type="primary" :icon="Plus" @click="openAdd">{{ t('users.add') }}</el-button>
       </div>
     </template>
 
@@ -229,7 +252,7 @@ onMounted(load)
       :row-key="rowKey"
       :empty-text="emptyText"
     >
-      <el-table-column label="协议" min-width="150">
+      <el-table-column :label="t('users.colProtocol')" min-width="150">
         <template #default="{ row }">
           <el-tag size="small" type="info" effect="plain">{{ row.protocol }}</el-tag>
           <div v-if="row.protocol === 'ss'" class="faint">{{ row.ss_method }}</div>
@@ -240,59 +263,67 @@ onMounted(load)
         <template #default="{ row }">
           <div class="key-cell">
             <span class="mono ellipsis" :title="row.user_key">{{ row.user_key }}</span>
-            <el-tooltip content="复制 user_key" placement="top">
+            <el-tooltip :content="t('users.copyKey')" placement="top">
               <el-icon class="copy-btn" @click="copyKey(row)"><CopyDocument /></el-icon>
             </el-tooltip>
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="名称" min-width="100" show-overflow-tooltip>
+      <el-table-column :label="t('users.colName')" min-width="100" show-overflow-tooltip>
         <template #default="{ row }">{{ row.name || '—' }}</template>
       </el-table-column>
 
-      <el-table-column label="状态" width="86">
+      <el-table-column :label="t('users.colStatus')" width="86">
         <template #default="{ row }">
           <el-switch
             :model-value="row.enabled"
             size="small"
             inline-prompt
-            active-text="启用"
-            inactive-text="停用"
+            :active-text="t('common.on')"
+            :inactive-text="t('common.off')"
             @change="(v: string | number | boolean) => toggleStatus(row, Boolean(v))"
           />
         </template>
       </el-table-column>
 
-      <el-table-column label="出口客户端" min-width="130" show-overflow-tooltip>
+      <el-table-column :label="t('users.colClient')" min-width="130" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="mono">{{ shortName(row.client) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="限速 / 并发" width="120">
+      <el-table-column :label="t('users.colRule')" width="110" show-overflow-tooltip>
         <template #default="{ row }">
-          <div class="faint">↑ {{ rate(row.limit_up_kb) }}</div>
-          <div class="faint">↓ {{ rate(row.limit_down_kb) }}</div>
-          <div class="faint">并发 {{ row.concurrency || '不限' }}</div>
+          <span class="mono">{{ row.rule || 'default' }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="累计转发" width="96">
+      <el-table-column :label="t('users.colLimits')" width="120">
+        <template #default="{ row }">
+          <div class="faint">↑ {{ rate(row.limit_up_kb) }}</div>
+          <div class="faint">↓ {{ rate(row.limit_down_kb) }}</div>
+          <div class="faint">
+            {{ row.concurrency ? t('users.concurrency', { value: row.concurrency }) : t('common.unlimited') }}
+          </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column :label="t('users.colTraffic')" width="96">
         <template #default="{ row }">
           <div class="faint">↑ {{ bytes(row.up_bytes) }}</div>
           <div class="faint">↓ {{ bytes(row.down_bytes) }}</div>
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="240" align="right" fixed="right">
+      <el-table-column :label="t('users.colActions')" width="240" align="right" fixed="right">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button link type="primary" @click="openLimits(row)">配置</el-button>
+            <el-button link type="primary" @click="openLimits(row)">{{ t('common.configure') }}</el-button>
             <el-tooltip
               v-if="row.shareable"
               :disabled="!!row.share_link"
-              :content="'该协议还没有对应的监听端口'"
+              :content="t('users.noPortTip')"
               placement="top"
             >
               <span class="share-action">
@@ -311,22 +342,22 @@ onMounted(load)
                     :icon="CopyDocument"
                     :disabled="!row.share_link"
                   >
-                    复制链接<el-icon class="share-arrow"><ArrowDown /></el-icon>
+                    {{ t('users.copyLink') }}<el-icon class="share-arrow"><ArrowDown /></el-icon>
                   </el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item command="modern">
                         <div class="share-option">
                           <span class="share-option-title">
-                            新版链接<el-tag size="small" effect="light">推荐</el-tag>
+                            {{ t('users.newLink') }}<el-tag size="small" effect="light">{{ t('users.recommended') }}</el-tag>
                           </span>
-                          <span class="share-option-description">使用证书指纹校验</span>
+                          <span class="share-option-description">{{ t('users.newLinkDesc') }}</span>
                         </div>
                       </el-dropdown-item>
                       <el-dropdown-item command="legacy" divided>
                         <div class="share-option">
-                          <span class="share-option-title">旧版兼容链接</span>
-                          <span class="share-option-description">允许不安全 · 仅限 Xray &lt; 26.2.6</span>
+                          <span class="share-option-title">{{ t('users.legacyLink') }}</span>
+                          <span class="share-option-description">{{ t('users.legacyLinkDesc') }}</span>
                         </div>
                       </el-dropdown-item>
                     </el-dropdown-menu>
@@ -341,89 +372,106 @@ onMounted(load)
                   :icon="CopyDocument"
                   :disabled="!row.share_link"
                   @click="copyLink(row)"
-                >复制链接</el-button>
+                >{{ t('users.copyLink') }}</el-button>
               </span>
             </el-tooltip>
-            <el-button link type="danger" @click="removeUser(row)">删除</el-button>
+            <el-button link type="danger" @click="removeUser(row)">{{ t('common.delete') }}</el-button>
           </div>
         </template>
       </el-table-column>
     </el-table>
   </el-card>
 
-  <el-dialog v-model="showAdd" title="添加用户" width="min(600px, 94vw)" :close-on-click-modal="false">
+  <el-dialog v-model="showAdd" :title="t('users.add')" width="min(600px, 94vw)" :close-on-click-modal="false">
     <el-form label-position="top" @submit.prevent="submitAdd">
-      <el-form-item label="名称">
-        <el-input v-model="addForm.name" placeholder="给这个用户起个一眼能认出的名字" />
+      <el-form-item :label="t('users.colName')">
+        <el-input v-model="addForm.name" :placeholder="t('users.namePlaceholder')" />
       </el-form-item>
       <div class="form-row">
-        <el-form-item label="协议" style="flex: 1">
+        <el-form-item :label="t('users.colProtocol')" style="flex: 1">
           <el-select v-model="addForm.protocol" @change="addForm.user_key = generateKey(addForm.protocol)">
             <el-option v-for="p in protocols" :key="p" :label="p" :value="p" />
           </el-select>
         </el-form-item>
-        <el-form-item label="出口客户端" style="flex: 1">
+        <el-form-item :label="t('users.colClient')" style="flex: 1">
           <el-select
             v-model="addForm.client"
             filterable
             allow-create
             default-first-option
-            placeholder="选择或输入客户端名"
+            :placeholder="t('users.clientPlaceholder')"
           >
             <el-option v-for="c in clients" :key="c.name" :label="c.label" :value="c.name" />
           </el-select>
         </el-form-item>
       </div>
-      <el-form-item v-if="addForm.protocol === 'ss'" label="加密类型">
+      <el-form-item v-if="addForm.protocol === 'ss'" :label="t('users.ssMethod')">
         <el-select v-model="addForm.ss_method">
           <el-option v-for="method in ssMethods" :key="method" :label="method" :value="method" />
         </el-select>
       </el-form-item>
-      <el-form-item label="user_key / uuid / 密码">
+      <el-form-item :label="t('users.ruleAddLabel')">
+        <el-select v-model="addForm.rule" filterable style="width: 100%">
+          <el-option v-for="r in ruleOptions" :key="r" :label="r" :value="r" />
+        </el-select>
+      </el-form-item>
+      <el-form-item :label="t('users.keyLabel')">
         <div class="key-row">
           <el-input v-model="addForm.user_key" class="mono" />
-          <el-button @click="addForm.user_key = generateKey(addForm.protocol)">生成</el-button>
+          <el-button @click="addForm.user_key = generateKey(addForm.protocol)">{{ t('users.generate') }}</el-button>
         </div>
       </el-form-item>
       <p class="hint-inline">
-        当前出口：<span class="mono">{{ selectedClientLabel || '未选择' }}</span>
+        {{ t('users.currentEgress') }}<span class="mono">{{ selectedClientLabel || t('users.notSelected') }}</span>
       </p>
     </el-form>
     <template #footer>
-      <el-button @click="showAdd = false">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="submitAdd">添加</el-button>
+      <el-button @click="showAdd = false">{{ t('common.cancel') }}</el-button>
+      <el-button type="primary" :loading="saving" @click="submitAdd">{{ t('common.add') }}</el-button>
     </template>
   </el-dialog>
 
+  <RulesDialog v-model="showRules" @changed="load(true)" />
+
   <el-dialog
     :model-value="!!limitsFor"
-    :title="limitsFor ? `配置 · ${limitsFor.user_key}（${limitsFor.protocol}）` : '配置'"
+    :title="limitsFor ? t('users.configTitle', { key: limitsFor.user_key, protocol: limitsFor.protocol }) : t('users.configFallback')"
     width="min(560px, 94vw)"
     @update:model-value="limitsFor = null"
   >
     <el-form label-position="top">
       <div class="form-row">
-        <el-form-item label="↑ 上行 KB/s（0 = 不限）" style="flex: 1">
+        <el-form-item :label="t('users.upLimit')" style="flex: 1">
           <el-input-number v-model="limits.up_kbps" :min="0" controls-position="right" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="↓ 下行 KB/s（0 = 不限）" style="flex: 1">
+        <el-form-item :label="t('users.downLimit')" style="flex: 1">
           <el-input-number v-model="limits.down_kbps" :min="0" controls-position="right" style="width: 100%" />
         </el-form-item>
       </div>
       <div class="form-row">
-        <el-form-item label="最大并发连接（0 = 不限）" style="flex: 1">
+        <el-form-item :label="t('users.maxConcurrency')" style="flex: 1">
           <el-input-number v-model="limits.concurrency" :min="0" controls-position="right" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="日志级别（下次连接生效）" style="flex: 1">
+        <el-form-item :label="t('users.logLevel')" style="flex: 1">
           <el-select v-model="limits.log_level">
-            <el-option v-for="l in logLevels" :key="l.value" :label="l.label" :value="l.value" />
+            <el-option
+              v-for="l in logLevels"
+              :key="l.value"
+              :label="l.value === 'info' ? t('users.logLevelDefault') : l.label"
+              :value="l.value"
+            />
           </el-select>
         </el-form-item>
       </div>
+      <el-form-item :label="t('users.ruleLabel')">
+        <el-select v-model="limits.rule" filterable style="width: 100%">
+          <el-option v-for="r in ruleOptions" :key="r" :label="r" :value="r" />
+        </el-select>
+      </el-form-item>
     </el-form>
     <template #footer>
-      <el-button @click="limitsFor = null">取消</el-button>
-      <el-button type="primary" :loading="limitsSaving" @click="saveLimits">保存</el-button>
+      <el-button @click="limitsFor = null">{{ t('common.cancel') }}</el-button>
+      <el-button type="primary" :loading="limitsSaving" @click="saveLimits">{{ t('common.save') }}</el-button>
     </template>
   </el-dialog>
 </template>

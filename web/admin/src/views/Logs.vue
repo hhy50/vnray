@@ -4,6 +4,9 @@ import { Search, Refresh, CopyDocument, Delete } from '@element-plus/icons-vue'
 import { api } from '../api/client'
 import type { Logs } from '../api/types'
 import { copyText } from '../lib/format'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const lines = ref<string[]>([])
 const path = ref('')
@@ -22,7 +25,16 @@ const visibleLines = computed(() => {
   return filter ? lines.value.filter((line) => line.includes(filter)) : lines.value
 })
 const text = computed(() => visibleLines.value.join('\n'))
-const status = computed(() => !live.value ? '已暂停' : connected.value ? '实时接收中' : loadError.value ? '连接异常' : '连接中')
+const status = computed(() =>
+  !live.value
+    ? t('logs.paused')
+    : connected.value
+      ? t('logs.streaming')
+      : loadError.value
+        ? t('logs.connError')
+        : t('logs.connecting'),
+)
+
 
 function stop() {
   source?.close()
@@ -79,11 +91,11 @@ function start() {
   stream.onerror = () => {
     if (source !== stream) return
     connected.value = false
-    loadError.value = '日志连接中断，正在自动重连'
+    loadError.value = t('logs.streamBroken')
     if (stream.readyState === EventSource.CLOSED) {
-      loadError.value = '日志连接已关闭，请重新连接或登录'
+      loadError.value = t('logs.streamClosed')
       void api.session().catch(() => {
-        if (source === stream) loadError.value = '登录已失效，请重新登录'
+        if (source === stream) loadError.value = t('logs.sessionExpired')
       })
     }
   }
@@ -109,8 +121,8 @@ function onVisibility() {
 }
 
 async function copyAll() {
-  if (await copyText(text.value)) ElMessage.success('日志已复制')
-  else ElMessage.error('复制失败')
+  if (await copyText(text.value)) ElMessage.success(t('logs.copied'))
+  else ElMessage.error(t('common.copyFailed'))
 }
 
 onMounted(() => {
@@ -129,28 +141,28 @@ onBeforeUnmount(() => {
       <div class="toolbar">
         <el-input
           v-model="q"
-          placeholder="过滤当前页面日志"
+          :placeholder="t('logs.filterPlaceholder')"
           clearable
           :prefix-icon="Search"
           style="width: 17rem"
         />
-        <el-switch v-model="live" size="small" active-text="实时日志" @change="start" />
+        <el-switch v-model="live" size="small" :active-text="t('logs.live')" @change="start" />
         <span class="faint">{{ status }}</span>
         <div class="spacer" />
         <span class="faint log-summary" :title="path">
-          {{ visibleLines.length }} 行 · {{ path || '等待日志' }}
-          <template v-if="truncated"> · 已保留最近日志</template>
+          {{ t('logs.summary', { n: visibleLines.length, path: path || t('logs.waiting') }) }}
+          <template v-if="truncated"> · {{ t('logs.keptRecent') }}</template>
         </span>
-        <el-button :icon="CopyDocument" :disabled="!text" @click="copyAll">复制</el-button>
-        <el-tooltip content="只清空当前页面，后续日志继续显示">
-          <el-button :icon="Delete" @click="clearPage">清空页面</el-button>
+        <el-button :icon="CopyDocument" :disabled="!text" @click="copyAll">{{ t('common.copy') }}</el-button>
+        <el-tooltip :content="t('logs.clearTip')">
+          <el-button :icon="Delete" @click="clearPage">{{ t('logs.clearPage') }}</el-button>
         </el-tooltip>
-        <el-button :icon="Refresh" @click="reconnect">重新连接</el-button>
+        <el-button :icon="Refresh" @click="reconnect">{{ t('logs.reconnect') }}</el-button>
       </div>
     </template>
 
     <el-alert v-if="loadError" :title="loadError" type="warning" :closable="false" show-icon />
-    <pre class="log-view is-plain log-body">{{ text || (q.trim() ? '（没有匹配的日志）' : '（等待新日志）') }}</pre>
+    <pre class="log-view is-plain log-body">{{ text || (q.trim() ? t('logs.noMatch') : t('logs.empty')) }}</pre>
   </el-card>
 </template>
 

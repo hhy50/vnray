@@ -5,6 +5,9 @@ import { Plus, Refresh } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { PortMap } from '../api/types'
 import { rate, shortName } from '../lib/format'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const rows = ref<PortMap[]>([])
 const clients = ref<{ name: string; label: string }[]>([])
@@ -37,7 +40,7 @@ async function load() {
     clients.value = data.clients
     loadError.value = ''
   } catch (err) {
-    loadError.value = err instanceof ApiError ? err.message : '加载失败'
+    loadError.value = err instanceof ApiError ? err.message : t('common.loadFailed')
   } finally {
     loading.value = false
   }
@@ -79,15 +82,15 @@ function openEdit(m: PortMap) {
 
 async function save() {
   if (!form.client) {
-    ElMessage.warning('请选择客户端')
+    ElMessage.warning(t('portmaps.needClient'))
     return
   }
   if (!form.remote_port || !form.local_port) {
-    ElMessage.warning('远程端口与本地端口都必须大于 0')
+    ElMessage.warning(t('portmaps.needPorts'))
     return
   }
   if (form.tls_enabled && (!editing.value || form.cert_pem || form.key_pem) && (!form.cert_pem || !form.key_pem)) {
-    ElMessage.warning(editing.value ? '更换 HTTPS 配置时请同时填写证书和私钥' : '请输入证书和私钥')
+    ElMessage.warning(editing.value ? t('portmaps.needCertChange') : t('portmaps.needCert'))
     advancedOpen.value = ['advanced']
     return
   }
@@ -99,10 +102,10 @@ async function save() {
   try {
     await api.portMapSave({ ...form }, editing.value)
     showForm.value = false
-    ElMessage.success('已保存，监听器已热更新')
+    ElMessage.success(t('portmaps.saved'))
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -113,26 +116,26 @@ async function toggle(m: PortMap) {
     await api.portMapToggle(m.id)
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '操作失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.opFailed'))
   }
 }
 
 async function remove(m: PortMap) {
   try {
     await ElMessageBox.confirm(
-      `删除映射 ${m.remote_port} → ${m.local_host}:${m.local_port}？`,
-      '删除映射',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      t('portmaps.deleteConfirm', { remote: m.remote_port, local: `${m.local_host}:${m.local_port}` }),
+      t('portmaps.deleteTitle'),
+      { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') },
     )
   } catch {
     return
   }
   try {
     await api.portMapDelete(m.id)
-    ElMessage.success('已删除')
+    ElMessage.success(t('common.deleted'))
     await load()
   } catch (err) {
-    ElMessage.error(err instanceof ApiError ? err.message : '删除失败')
+    ElMessage.error(err instanceof ApiError ? err.message : t('common.deleteFailed'))
   }
 }
 
@@ -143,10 +146,10 @@ onMounted(load)
   <el-card shadow="never" class="stack">
     <template #header>
       <div class="toolbar">
-        <strong>共 {{ rows.length }} 条映射</strong>
+        <strong>{{ t('portmaps.count', { n: rows.length }) }}</strong>
         <div class="spacer" />
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Plus" @click="openCreate">添加映射</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('common.refresh') }}</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">{{ t('portmaps.add') }}</el-button>
       </div>
     </template>
 
@@ -158,13 +161,13 @@ onMounted(load)
       :data="rows"
       size="small"
       row-key="id"
-      empty-text="还没有配置端口映射。添加后服务端立即在远程端口上监听，外部访问「服务器地址:远程端口」会被转发到客户端本地目标。"
+      :empty-text="t('portmaps.empty')"
     >
-      <el-table-column label="远程端口" width="92">
+      <el-table-column :label="t('portmaps.colRemote')" width="92">
         <template #default="{ row }"><span class="mono port">{{ row.remote_port }}</span></template>
       </el-table-column>
 
-      <el-table-column label="客户端" min-width="168">
+      <el-table-column :label="t('portmaps.colClient')" min-width="168">
         <template #default="{ row }">
           <div class="client-cell" :title="row.client">
             <span class="dot" :class="row.client_online ? 'on' : 'off'" />
@@ -173,41 +176,41 @@ onMounted(load)
         </template>
       </el-table-column>
 
-      <el-table-column label="本地目标" min-width="176">
+      <el-table-column :label="t('portmaps.colLocal')" min-width="176">
         <template #default="{ row }">
           <span class="mono">{{ row.local_host }}:{{ row.local_port }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="限速 ↑ / ↓" width="112">
+      <el-table-column :label="t('portmaps.colLimits')" width="112">
         <template #default="{ row }">
           <span class="faint">{{ rate(row.limit_up_kb) }} / {{ rate(row.limit_down_kb) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="126">
+      <el-table-column :label="t('portmaps.colStatus')" width="126">
         <template #default="{ row }">
-          <el-tag v-if="!row.enabled" size="small" type="info" effect="plain">已停用</el-tag>
-          <el-tag v-else-if="row.listening" size="small" type="success">运行中</el-tag>
-          <el-tooltip v-else content="端口被占用或监听启动失败，检查服务端日志" placement="top">
-            <el-tag size="small" type="danger" effect="plain">未监听</el-tag>
+          <el-tag v-if="!row.enabled" size="small" type="info" effect="plain">{{ t('portmaps.disabledTag') }}</el-tag>
+          <el-tag v-else-if="row.listening" size="small" type="success">{{ t('portmaps.running') }}</el-tag>
+          <el-tooltip v-else :content="t('portmaps.notListeningTip')" placement="top">
+            <el-tag size="small" type="danger" effect="plain">{{ t('portmaps.notListening') }}</el-tag>
           </el-tooltip>
         </template>
       </el-table-column>
 
-      <el-table-column label="备注" min-width="130" show-overflow-tooltip>
+      <el-table-column :label="t('portmaps.colRemark')" min-width="130" show-overflow-tooltip>
         <template #default="{ row }"><span class="faint">{{ row.remark || '—' }}</span></template>
       </el-table-column>
 
-      <el-table-column label="更新时间" width="146">
+      <el-table-column :label="t('portmaps.colUpdated')" width="146">
         <template #default="{ row }"><span class="faint">{{ row.updated_at }}</span></template>
       </el-table-column>
 
-      <el-table-column label="操作" width="156" align="right" fixed="right">
+      <el-table-column :label="t('portmaps.colActions')" width="156" align="right" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-button link @click="toggle(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
-          <el-button link type="danger" @click="remove(row)">删除</el-button>
+          <el-button link type="primary" @click="openEdit(row)">{{ t('common.edit') }}</el-button>
+          <el-button link @click="toggle(row)">{{ row.enabled ? t('common.off') : t('common.on') }}</el-button>
+          <el-button link type="danger" @click="remove(row)">{{ t('common.delete') }}</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -215,13 +218,13 @@ onMounted(load)
 
   <el-dialog
     v-model="showForm"
-    :title="editing ? '编辑映射' : '添加映射'"
+    :title="editing ? t('portmaps.editTitle') : t('portmaps.addTitle')"
     width="min(600px, 94vw)"
     :close-on-click-modal="false"
   >
     <el-form label-position="top">
       <div class="form-row">
-        <el-form-item label="远程端口（服务端监听）" style="flex: 1">
+        <el-form-item :label="t('portmaps.remotePort')" style="flex: 1">
           <el-input-number
             v-model="form.remote_port"
             :min="1"
@@ -230,7 +233,7 @@ onMounted(load)
             style="width: 100%"
           />
         </el-form-item>
-        <el-form-item label="本地端口" style="flex: 1">
+        <el-form-item :label="t('portmaps.localPort')" style="flex: 1">
           <el-input-number
             v-model="form.local_port"
             :min="1"
@@ -240,30 +243,30 @@ onMounted(load)
           />
         </el-form-item>
       </div>
-      <el-form-item label="客户端">
+      <el-form-item :label="t('portmaps.colClient')">
         <el-select v-model="form.client" filterable allow-create default-first-option placeholder="namespace:group:name">
           <el-option v-for="c in clients" :key="c.name" :label="c.label" :value="c.name" />
         </el-select>
       </el-form-item>
-      <el-form-item label="本地主机（客户端侧）">
+      <el-form-item :label="t('portmaps.localHost')">
         <el-input v-model="form.local_host" class="mono" />
       </el-form-item>
       <div class="form-row">
-        <el-form-item label="上行限速 KB/s（0 = 不限）" style="flex: 1">
+        <el-form-item :label="t('portmaps.upLimit')" style="flex: 1">
           <el-input-number v-model="form.limit_up_kb" :min="0" controls-position="right" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="下行限速 KB/s（0 = 不限）" style="flex: 1">
+        <el-form-item :label="t('portmaps.downLimit')" style="flex: 1">
           <el-input-number v-model="form.limit_down_kb" :min="0" controls-position="right" style="width: 100%" />
         </el-form-item>
       </div>
-      <el-form-item label="备注">
-        <el-input v-model="form.remark" placeholder="例如：办公室 NAS" />
+      <el-form-item :label="t('portmaps.remark')">
+        <el-input v-model="form.remark" :placeholder="t('portmaps.remarkPlaceholder')" />
       </el-form-item>
       <el-collapse v-model="advancedOpen" class="advanced-options">
         <el-collapse-item name="advanced">
           <template #title>
-            <span>高级参数</span>
-            <el-tag v-if="form.tls_enabled" size="small" type="success" effect="plain" class="advanced-status">HTTPS 已启用</el-tag>
+            <span>{{ t('portmaps.advanced') }}</span>
+            <el-tag v-if="form.tls_enabled" size="small" type="success" effect="plain" class="advanced-status">{{ t('portmaps.httpsOn') }}</el-tag>
           </template>
           <el-form-item>
             <div class="tls-row">
@@ -272,10 +275,10 @@ onMounted(load)
             </div>
           </el-form-item>
           <template v-if="form.tls_enabled">
-            <el-form-item label="证书（PEM 格式）">
+            <el-form-item :label="t('portmaps.certLabel')">
               <el-input v-model="form.cert_pem" type="textarea" :rows="5" class="mono" placeholder="-----BEGIN CERTIFICATE-----" />
             </el-form-item>
-            <el-form-item label="私钥（PEM 格式）">
+            <el-form-item :label="t('portmaps.keyLabel')">
               <el-input v-model="form.key_pem" type="textarea" :rows="5" class="mono" placeholder="-----BEGIN PRIVATE KEY-----" />
             </el-form-item>
           </template>
@@ -283,8 +286,8 @@ onMounted(load)
       </el-collapse>
     </el-form>
     <template #footer>
-      <el-button @click="showForm = false">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      <el-button @click="showForm = false">{{ t('common.cancel') }}</el-button>
+      <el-button type="primary" :loading="saving" @click="save">{{ t('common.save') }}</el-button>
     </template>
   </el-dialog>
 </template>

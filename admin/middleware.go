@@ -58,7 +58,7 @@ func apiFail(w http.ResponseWriter, code int, msg string) {
 // apiDecode 解析 JSON 请求体；失败时已经写好 400，调用方直接 return。
 func apiDecode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
-		apiFail(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgBadJSON, err)
 		return false
 	}
 	return true
@@ -113,7 +113,7 @@ func requireAuth(next http.Handler) http.Handler {
 		sess := CtxSession(r)
 		if sess == nil {
 			if wantsJSON(r) {
-				apiFail(w, http.StatusUnauthorized, "authentication required")
+				apiFailKey(w, r, http.StatusUnauthorized, msgAuthRequired)
 			} else {
 				http.Redirect(w, r, "/admin/ui/login", http.StatusSeeOther)
 			}
@@ -139,9 +139,9 @@ func csrfMiddleware(next http.Handler) http.Handler {
 		got := csrfFromRequest(r)
 		if !csrfValid(got, sess.CSRFToken) {
 			if wantsJSON(r) {
-				apiFail(w, http.StatusForbidden, "CSRF 令牌无效")
+				apiFailKey(w, r, http.StatusForbidden, msgCSRFInvalid)
 			} else {
-				http.Error(w, "CSRF 令牌无效", http.StatusForbidden)
+				http.Error(w, msg(r, msgCSRFInvalid), http.StatusForbidden)
 			}
 			return
 		}

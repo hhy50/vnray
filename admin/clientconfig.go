@@ -38,7 +38,7 @@ func (s *AdminService) apiGlobalClientConfig(w http.ResponseWriter, r *http.Requ
 // 由 ServiceSettings.Apply 推送给在线客户端，离线客户端下次连接时取到。
 func (s *AdminService) apiGlobalClientConfigSave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Settings == nil {
-		apiFail(w, http.StatusServiceUnavailable, "运行时配置未接入")
+		apiFailKey(w, r, http.StatusServiceUnavailable, msgRuntimeMissing)
 		return
 	}
 	var in struct {
@@ -52,14 +52,14 @@ func (s *AdminService) apiGlobalClientConfigSave(w http.ResponseWriter, r *http.
 		IPMaps:      in.GlobalClient.IPMaps,
 	})
 	if err != nil {
-		apiFail(w, http.StatusBadRequest, err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	next := s.currentServiceSettings()
 	next.GlobalClient = global
 	if err := s.opts.Settings.Apply(next); err != nil {
 		logging.Error("admin: client config apply failed", "err", err)
-		apiFail(w, http.StatusBadRequest, "保存失败: "+err.Error())
+		apiFailKey(w, r, http.StatusBadRequest, msgSaveFailedDetail, err)
 		return
 	}
 	logging.Info("admin: client config saved", "actor", actorOf(r))

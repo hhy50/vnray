@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -170,6 +171,26 @@ func (l *loginLimiter) succeed(key string) {
 
 // --- 认证服务 ---
 
+// 登录失败的错误值：文案在 HTTP 边界按请求语言决定，这里只表达原因。
+var (
+	// errBadCredentials 同时覆盖"账号不存在"与"口令错误"，不区分以免枚举用户名。
+	errBadCredentials = errors.New("invalid username or password")
+	errSessionToken   = errors.New("generate session token")
+	errCSRFToken      = errors.New("generate csrf token")
+)
+
+// loginErrKey 把登录失败原因映射成文案键。
+func loginErrKey(err error) msgKey {
+	switch {
+	case errors.Is(err, errSessionToken):
+		return msgSessionFailed
+	case errors.Is(err, errCSRFToken):
+		return msgCSRFFailed
+	default:
+		return msgBadCredentials
+	}
+}
+
 // AuthService 封装认证与会话：凭证只存在于进程内存。
 type AuthService struct {
 	username string
@@ -207,19 +228,19 @@ func newAuthService(opts AdminOptions) (*AuthService, error) {
 func (a *AuthService) Login(username, password string) (sessionToken, csrfToken string, err error) {
 	if username != a.username {
 		_ = bcrypt.CompareHashAndPassword(a.passHash, []byte(password))
-		return "", "", fmt.Errorf("用户名或密码错误")
+		return "", "", errBadCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword(a.passHash, []byte(password)); err != nil {
-		return "", "", fmt.Errorf("用户名或密码错误")
+		return "", "", errBadCredentials
 	}
 
 	sessToken, err := randToken(32)
 	if err != nil {
-		return "", "", fmt.Errorf("生成会话失败")
+		return "", "", errSessionToken
 	}
 	csrfToken, err = randToken(32)
 	if err != nil {
-		return "", "", fmt.Errorf("生成 CSRF 失败")
+		return "", "", errCSRFToken
 	}
 
 	a.sessions.set(sessToken, &session{
