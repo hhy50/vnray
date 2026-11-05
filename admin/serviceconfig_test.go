@@ -1,12 +1,41 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/hhy50/vnray/internal/config"
 )
+
+func TestServiceConfigTransportEncryption(t *testing.T) {
+	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
+	service := &AdminService{opts: AdminOptions{Settings: fake}}
+	for _, enabled := range []bool{false, true} {
+		w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{TransportEncryption: &enabled}, nil)
+		service.apiServiceConfigSave(w, r)
+		if w.Code != http.StatusOK || fake.cur.TransportEncryption != enabled {
+			t.Fatalf("save encryption=%v: status=%d, settings=%+v", enabled, w.Code, fake.cur)
+		}
+		w, r = apiContext(http.MethodGet, "/admin/ops/api/service-config", nil, nil)
+		service.apiServiceConfig(w, r)
+		var response struct {
+			Data apiDurationFields `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Data.TransportEncryption == nil || *response.Data.TransportEncryption != enabled {
+			t.Fatalf("get encryption=%v: %s", enabled, w.Body.String())
+		}
+		w, r = apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{LogLevel: "warn"}, nil)
+		service.apiServiceConfigSave(w, r)
+		if w.Code != http.StatusOK || fake.cur.TransportEncryption != enabled {
+			t.Fatal("omitted encryption setting changed the saved value")
+		}
+	}
+}
 
 // fakeSettings 是 ServiceSettings 的测试实现：记录最后一次 Apply 的值。
 type fakeSettings struct {

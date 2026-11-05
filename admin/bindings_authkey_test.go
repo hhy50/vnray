@@ -32,19 +32,19 @@ func mustAuthKey(t *testing.T, b *Bindings, key, scope string) {
 func TestBindingsAuthKeys(t *testing.T) {
 	b := newTestBindings(t)
 
-	if err := b.SetAuthKey("key-alpha-01", "*"); err != nil {
+	if err := b.SetAuthKey("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "*"); err != nil {
 		t.Fatalf("set auth key: %v", err)
 	}
 	// 同密钥换范围即覆盖，不产生第二条记录。
-	if err := b.SetAuthKey("key-alpha-01", "team1:*"); err != nil {
+	if err := b.SetAuthKey("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "team1:*"); err != nil {
 		t.Fatalf("overwrite auth key: %v", err)
 	}
-	if err := b.SetAuthKey("key-beta-02", "team1:group:name"); err != nil {
+	if err := b.SetAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=", "team1:group:name"); err != nil {
 		t.Fatalf("set second auth key: %v", err)
 	}
 
 	snap := b.AuthKeySnapshot()
-	if len(snap) != 2 || snap[0].Key != "key-alpha-01" || snap[1].Key != "key-beta-02" {
+	if len(snap) != 2 || snap[0].Key != "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=" || snap[1].Key != "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=" {
 		t.Fatalf("snapshot = %+v, want 2 keys in asc order", snap)
 	}
 	if snap[0].Scope != "team1:*" {
@@ -54,11 +54,11 @@ func TestBindingsAuthKeys(t *testing.T) {
 		t.Errorf("mirrored key must carry id and created_at, got %+v", snap[0])
 	}
 
-	deleted, err := b.DeleteAuthKey("key-beta-02")
+	deleted, err := b.DeleteAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=")
 	if err != nil || !deleted {
 		t.Fatalf("delete = (%v, %v), want (true, nil)", deleted, err)
 	}
-	if deleted, _ = b.DeleteAuthKey("key-beta-02"); deleted {
+	if deleted, _ = b.DeleteAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A="); deleted {
 		t.Error("delete again must report false")
 	}
 	if got := len(b.AuthKeySnapshot()); got != 1 {
@@ -86,20 +86,20 @@ func TestMatchClientAuthKey(t *testing.T) {
 		t.Fatalf("empty table = (%v, %v), want (false, false)", configured, ok)
 	}
 
-	mustAuthKey(t, b, "key-global-1", "*")
-	mustAuthKey(t, b, "key-team-22", "team1:*")
-	mustAuthKey(t, b, "key-solo-33", "team2:group:solo")
+	mustAuthKey(t, b, "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", "*")
+	mustAuthKey(t, b, "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", "team1:*")
+	mustAuthKey(t, b, "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "team2:group:solo")
 
 	cases := []struct {
 		name, key string
 		want      bool
 	}{
-		{"team1:g:a", "key-team-22", true},
-		{"team1:g:b", "key-global-1", true},
-		{"team2:group:solo", "key-solo-33", true},
-		{"team2:group:solo", "key-team-22", false},
-		{"team2:group:solo", "key-global-1", true},
-		{"team1:g:a", "key-solo-33", false},
+		{"team1:g:a", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", true},
+		{"team1:g:b", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
+		{"team2:group:solo", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", true},
+		{"team2:group:solo", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", false},
+		{"team2:group:solo", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
+		{"team1:g:a", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", false},
 		{"team1:g:a", "wrong-key", false},
 	}
 	for _, tt := range cases {

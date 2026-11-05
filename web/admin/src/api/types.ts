@@ -202,6 +202,7 @@ export interface ClientConfig {
 }
 
 export interface ServiceConfig {
+  transport_encryption: boolean
   public_host: string
   heartbeat_enabled: boolean
   heartbeat_interval: string

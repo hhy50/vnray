@@ -9,6 +9,7 @@ import (
 // TestServiceSettingsRoundTrip 断言整份运行时配置按段摊成 KV 后能原样解回来。
 func TestServiceSettingsRoundTrip(t *testing.T) {
 	in := DefaultServiceSettings()
+	in.TransportEncryption = false
 	in.PublicHost = "vpn.example.com"
 	in.GlobalClient = GlobalClientSettings{
 		CustomHosts: []CustomHost{{Domain: "youyuevpn4.route", IP: "192.168.60.1"}},
@@ -29,8 +30,8 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if len(kv) != 9 {
-		t.Fatalf("kv has %d sections, want 9: %v", len(kv), kv)
+	if len(kv) != 10 {
+		t.Fatalf("kv has %d sections, want 10: %v", len(kv), kv)
 	}
 	if kv[SettingPublicHost] != "vpn.example.com" || kv[SettingTrafficFlush] != "3s" {
 		t.Fatalf("scalar sections should be stored as plain text: %v", kv)
@@ -48,12 +49,18 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 // 库里旧记录不会把新字段清零；未知段忽略，坏值报错。
 func TestDecodeServiceSettingsKeepsDefaults(t *testing.T) {
 	base := DefaultServiceSettings()
+	if !base.TransportEncryption {
+		t.Fatal("transport encryption must default to enabled")
+	}
 	out, err := DecodeServiceSettings(map[string]string{SettingLogLevel: "warn"}, base)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.LogLevel != "warn" {
 		t.Fatalf("log level = %q, want warn", out.LogLevel)
+	}
+	if !out.TransportEncryption {
+		t.Fatal("missing transport setting disabled encryption")
 	}
 	if out.Heartbeat != base.Heartbeat || out.Session != base.Session || out.LogRotation != base.LogRotation ||
 		!reflect.DeepEqual(out.ServerProxy, base.ServerProxy) {

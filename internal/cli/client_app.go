@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/hhy50/vnray/internal/acl"
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/client"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/dispatch"
@@ -35,7 +36,7 @@ func (a *clientApp) Run(ctx context.Context) error {
 
 // serveOnce 建立一次连接并服务到会话结束；ctx 结束会主动关掉会话让 Serve 返回。
 func (a *clientApp) serveOnce(ctx context.Context) error {
-	c, err := client.Dial(a.serverAddr, a.dispatcher, a.dialOpts)
+	c, err := client.DialContext(ctx, a.serverAddr, a.dispatcher, a.dialOpts)
 	if err != nil {
 		return fmt.Errorf("dial server: %w", err)
 	}
@@ -60,6 +61,9 @@ func (a *clientApp) serveOnce(ctx context.Context) error {
 
 // newClientApp 装配客户端：ACL 守卫包装配置翻译出的路由，并挂上自定义域名表。
 func newClientApp(cfg config.Client) (*clientApp, error) {
+	if _, err := authkey.Parse(cfg.Server.AuthKey); err != nil {
+		return nil, err
+	}
 	guard, err := acl.NewGuard(cfg.Public, cfg.Private)
 	if err != nil {
 		return nil, err

@@ -155,7 +155,7 @@ export const api = {
     ),
 
   keys: () => request<{ keys: KeyRow[] }>('/api/keys'),
-  keySave: (body: { key: string; scope: string }) => request('/api/keys', json('POST', body)),
+  keySave: (body: { scope: string }) => request<{ key: string; scope: string }>('/api/keys', json('POST', body)),
   keyDelete: (key: string) => request(`/api/keys${query({ key })}`, json('DELETE')),
 
   logs: (params: { q?: string; lines?: number } = {}) =>

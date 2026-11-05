@@ -29,7 +29,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	limits := ratelimit.NewRegistry()
 	cfg := config.DefaultServer()
 	cfg.Server.Listen = "127.0.0.1:0"
-	cfg.Server.Auth.Key = ""
+	cfg.Server.Auth.Key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 	svc := NewConnectorService(&cfg, transport.NewSessionManager(), b, limits)
 	svc.SetSessionConfig(b)
 	initial := config.DefaultServiceSettings()
@@ -70,7 +70,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	connect := func() (*client.Client, <-chan protocol.PushConfig) {
 		t.Helper()
 		updates := make(chan protocol.PushConfig, 32)
-		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Info: protocol.ClientInfo{Name: "edge"}, OnConfig: func(v protocol.PushConfig) { updates <- v }})
+		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key}, Info: protocol.ClientInfo{Name: "edge"}, OnConfig: func(v protocol.PushConfig) { updates <- v }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +176,7 @@ func TestClientResolvesPushedLayers(t *testing.T) {
 	limits := ratelimit.NewRegistry()
 	cfg := config.DefaultServer()
 	cfg.Server.Listen = "127.0.0.1:0"
-	cfg.Server.Auth.Key = ""
+	cfg.Server.Auth.Key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 	svc := NewConnectorService(&cfg, transport.NewSessionManager(), b, limits)
 	svc.SetSessionConfig(b)
 	initial := config.DefaultServiceSettings()
@@ -203,7 +203,7 @@ func TestClientResolvesPushedLayers(t *testing.T) {
 
 	// 与生产装配一致（internal/cli/client_app.go）：两层交给共享表，拨号前查表改写。
 	hosts, ipMaps := dispatch.NewHosts(), dispatch.NewIPMaps()
-	c, err := client.Dial(svc.Addr(), nil, client.DialOptions{
+	c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key},
 		Info: protocol.ClientInfo{Name: "edge"},
 		OnConfig: func(v protocol.PushConfig) {
 			hosts.UpdateLayers(v.ClientConfig.CustomHosts, v.GlobalConfig.CustomHosts)

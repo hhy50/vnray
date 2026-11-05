@@ -14,10 +14,11 @@ import (
 // Server 是事件驱动的多路复用监听器（功能级 extension.Feature）：打开监听、为每条连接
 // 建立会话并派发成对事件；会话登记由 SessionManager 负责，事件接收方在构造时给定。
 type Server struct {
-	addr     string
-	cfg      atomic.Pointer[SessionConfig]
-	muxer    Muxer
-	listener EventListener
+	addr          string
+	cfg           atomic.Pointer[SessionConfig]
+	muxer         Muxer
+	listener      EventListener
+	connHandshake func(context.Context, net.Conn) (net.Conn, error)
 
 	ln     atomic.Pointer[net.Listener]
 	closed atomic.Bool
@@ -30,6 +31,12 @@ type Option func(*serverOptions)
 type serverOptions struct {
 	sessionConfig *SessionConfig
 	muxer         Muxer
+	connHandshake func(context.Context, net.Conn) (net.Conn, error)
+}
+
+// WithConnectionHandshake upgrades a connection before creating its mux session.
+func WithConnectionHandshake(fn func(context.Context, net.Conn) (net.Conn, error)) Option {
+	return func(o *serverOptions) { o.connHandshake = fn }
 }
 
 // WithSessionConfig 覆盖多路复用层参数（keepalive 周期/超时、单流窗口）；nil 用默认值。
@@ -58,6 +65,7 @@ func NewServer(addr string, listener EventListener, opts ...Option) *Server {
 		muxer = DefaultMuxer()
 	}
 	s := &Server{addr: addr, muxer: muxer, listener: listener}
+	s.connHandshake = o.connHandshake
 	s.cfg.Store(cfg)
 	return s
 }
@@ -88,7 +96,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	routine.Go("tcp.eventloop", func() {
-		if err := s.serve(); err != nil {
+		if err := s.serve(ctx); err != nil {
 			logging.Errorf("tcp event loop stopped: %v", err)
 		}
 	})
@@ -135,7 +143,9 @@ type EventListener interface {
 }
 
 // serve 是 Accept 循环，为每条新连接建立会话并派发成对事件；监听关闭引起的错误视为正常退出。
-func (s *Server) serve() error {
+func (s *Server) serve(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	lnp := s.ln.Load()
 	if lnp == nil {
 		return fmt.Errorf("tcp: not started")
@@ -150,15 +160,24 @@ func (s *Server) serve() error {
 			}
 			return err
 		}
-		routine.Go("tcp.session", func() { s.serveSession(conn) })
+		routine.Go("tcp.session", func() { s.serveSession(ctx, conn) })
 	}
 }
 
 // serveSession 把一条已接受的连接转成多路复用会话并驱动其一生；
 // 只有握手通过并登记（OnSessionOpen）之后才派发流事件，握手失败只关会话、不发任何事件。
-func (s *Server) serveSession(conn net.Conn) {
+func (s *Server) serveSession(ctx context.Context, conn net.Conn) {
 	listener := s.listener
 	r := conn.RemoteAddr()
+	if s.connHandshake != nil {
+		upgraded, err := s.connHandshake(ctx, conn)
+		if err != nil {
+			_ = conn.Close()
+			logging.Warn("tcp: connection handshake rejected", "remote", r, "err", err)
+			return
+		}
+		conn = upgraded
+	}
 	session, err := s.muxer.Server(conn, s.cfg.Load())
 	if err != nil {
 		logging.Errorf("tcp: create %s session remote=%s, error: %v", s.muxer.Name(), r, err)
@@ -166,6 +185,7 @@ func (s *Server) serveSession(conn net.Conn) {
 		return
 	}
 
+	session = &connectionSession{Session: session, conn: conn}
 	info, err := listener.Handshake(session)
 	if err != nil {
 		logging.Warnf("tcp: handshake failed, remote=%s: %v", r, err)

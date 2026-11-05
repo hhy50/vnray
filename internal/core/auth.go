@@ -1,14 +1,18 @@
 package core
 
 import (
+	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
+	"github.com/hhy50/vnray/internal/secure"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/transport"
@@ -24,7 +28,7 @@ var ErrAuthRejected = errors.New("authentication rejected")
 var errKeyMismatch = errors.New("key mismatch")
 
 // Handshake 实现 tcp.EventListener：在会话转入数据面之前完成认证，并按首帧区分角色——
-// Auth（客户端）走共享密钥比对，UserAuth（用户）查绑定表得到其绑定的客户端名。
+// Auth（客户端）校验已证明的传输身份与范围，UserAuth（用户）查绑定表。
 // 返回的元数据由 SessionManager 在**认证成功之后**登记；任一路径失败都返回零值，不入表。
 func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, error) {
 	// AcceptStream 的 deadline 是会话级设置，握手期间独享，返回前必须清掉。
@@ -48,6 +52,11 @@ func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, erro
 	}
 	switch frame.Type {
 	case protocol.Auth:
+		if _, ok := tcp.Connection(session).(*secure.Conn); !ok {
+			_ = frame.CloseBody()
+			protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "authenticated client transport required"})
+			return tcp.SessionInfo{}, ErrAuthRejected
+		}
 		return s.handshakeClient(session, stream, frame)
 	case protocol.UserAuth:
 		return s.handshakeUser(session, stream, frame)
@@ -57,7 +66,7 @@ func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, erro
 	}
 }
 
-// handshakeClient 校验客户端共享密钥；通过后返回会话元数据供 SessionManager 登记。
+// handshakeClient 校验客户端传输身份及范围授权。
 func (s *ConnectorService) handshakeClient(session tcp.Session, stream tcp.Stream, frame *protocol.Frame) (tcp.SessionInfo, error) {
 	payload, err := protocol.ReadPayload(frame)
 	if err != nil {
@@ -67,6 +76,16 @@ func (s *ConnectorService) handshakeClient(session tcp.Session, stream tcp.Strea
 	if err != nil {
 		return tcp.SessionInfo{}, err
 	}
+	conn, authenticated := tcp.Connection(session).(*secure.Conn)
+	if !authenticated || req.Key != fmt.Sprintf("%x", conn.KeyID()) {
+		return tcp.SessionInfo{}, ErrAuthRejected
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), AuthTimeout)
+	defer cancel()
+	key, err := s.lookupTransportKey(ctx, conn.KeyID())
+	if err != nil {
+		return tcp.SessionInfo{}, ErrAuthRejected
+	}
 
 	// 保留名归服务端本机出口：真实客户端不得冒用（防止它顶替本机出口出现在管理台）。
 	if req.Info.Name == transport.LocalClientName {
@@ -74,7 +93,7 @@ func (s *ConnectorService) handshakeClient(session tcp.Session, stream tcp.Strea
 		return tcp.SessionInfo{}, fmt.Errorf("%w: reserved client name %q", ErrAuthRejected, req.Info.Name)
 	}
 
-	if err := s.verifyKey(req.Info.Name, req.Key); err != nil {
+	if err := s.verifyKey(req.Info.Name, base64.StdEncoding.EncodeToString(key[:])); err != nil {
 		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: err.Error()})
 		return tcp.SessionInfo{}, fmt.Errorf("%w: %v", ErrAuthRejected, err)
 	}
@@ -169,8 +188,7 @@ func (s *ConnectorService) userAuthReply(clientName string) protocol.Reply {
 }
 
 // verifyKey 校验客户端认证。密钥表已配置（管理台可管）时按范围 key 判定：客户端名
-// 落在某条记录的范围里且密钥相等才放行；表为空时回退配置文件的共享密钥，两者都没
-// 配就放行（未启用认证的部署）。
+// 落在某条记录的范围里且密钥相等才放行；表为空时回退配置文件的随机密钥，无密钥则拒绝。
 func (s *ConnectorService) verifyKey(clientName, key string) error {
 	if s.sessionCfg != nil {
 		configured, ok := s.sessionCfg.MatchClientAuthKey(clientName, key)
@@ -181,8 +199,8 @@ func (s *ConnectorService) verifyKey(clientName, key string) error {
 			return nil
 		}
 	}
-	if s.authKey == "" {
-		return nil
+	if _, err := authkey.Parse(s.authKey); err != nil {
+		return errKeyMismatch
 	}
 	if subtle.ConstantTimeCompare([]byte(key), []byte(s.authKey)) != 1 {
 		return errKeyMismatch

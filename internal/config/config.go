@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,16 +91,23 @@ func (l *Log) Validate() error {
 // IsStdOutput 判断 Output 是否为标准错误/标准输出。
 func (l Log) IsStdOutput() bool { return validOutputs[l.Output] }
 
-// Auth 是握手认证配置：两端用同一个共享密钥，客户端上报、服务端比对。
-// 服务端 Key 为空表示不校验（启动时会告警）；设置后长度至少 8 个字符。
+// Auth holds the generated fallback transport key; empty requires managed keys.
 type Auth struct {
 	Key string `yaml:"key"`
 }
 
-// Validate 校验认证配置；未启用（Key 为空）时不做要求。
+// Validate validates a configured fallback key.
 func (a Auth) Validate() error {
-	if a.Key != "" && len(a.Key) < 8 {
-		return fmt.Errorf("auth.key: must be at least 8 characters when set")
+	if a.Key != "" {
+		return validateAuthKey("auth.key", a.Key)
+	}
+	return nil
+}
+
+func validateAuthKey(field, value string) error {
+	b, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil || len(b) != 32 || base64.StdEncoding.EncodeToString(b) != value {
+		return fmt.Errorf("%s: requires a generated 32-byte Base64 key", field)
 	}
 	return nil
 }

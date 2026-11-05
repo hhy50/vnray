@@ -63,7 +63,7 @@ func TestInvalidLogLevelFromFile(t *testing.T) {
 
 // 关闭重连且服务端未运行时，客户端应快速失败而非进入重连循环。
 func TestClientDialFailure(t *testing.T) {
-	path := writeConfig(t, "server:\n  reconnect:\n    enabled: false\n")
+	path := writeConfig(t, "server:\n  auth_key: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=\n  reconnect:\n    enabled: false\n")
 	_, err := execute(t, NewClientCommand, "--config", path, "--server", "127.0.0.1:1")
 	if err == nil || !strings.Contains(err.Error(), "dial server") {
 		t.Fatalf("expected dial server error, got %v", err)
@@ -115,6 +115,12 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.Contains(out, "client version dev") {
 		t.Fatalf("version output = %q", out)
+	}
+}
+
+func TestMissingTransportKeyRejected(t *testing.T) {
+	if _, err := newClientApp(config.DefaultClient()); err == nil {
+		t.Fatal("client without transport key accepted")
 	}
 }
 

@@ -90,7 +90,7 @@ func TestPortMapEndToEnd(t *testing.T) {
 
 	cfg := config.DefaultServer()
 	cfg.Server.Listen = "127.0.0.1:0"
-	cfg.Server.Auth.Key = "portmap-e2e-key"
+	cfg.Server.Auth.Key = "mHoyP2JKFQkNOhVPHMBXBZV+yyj0M12bCv/6gRvyOqM="
 
 	sessions := transport.NewSessionManager()
 	limits := ratelimit.NewRegistry()

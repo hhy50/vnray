@@ -50,7 +50,7 @@ import (
 const downloadFileSize = 128 << 20
 
 // testAuthKey 是集成测试两端共用的认证密钥；两端一致才建会话。
-const testAuthKey = "test-shared-key"
+const testAuthKey = "2It45TVRDAw7WSdVWgqPqstkV6VdTB9MtVO7IKOIY2o="
 
 // testClientInfo 是测试客户端随认证上报的配置与环境，供往返断言。
 func testClientInfo() protocol.ClientInfo {
@@ -593,7 +593,7 @@ func TestUserForwardACL(t *testing.T) {
 }
 
 // TestAuthHandshake 验证握手认证：密钥一致才建会话，且服务端能读到客户端上报的配置与环境；
-// 密钥不一致（或客户端未上报）时拨号被拒（client.ErrAuthRejected），服务端始终不登记会话。
+// 错误或缺失的密钥会在加密握手前后被拒，服务端始终不登记会话。
 func TestAuthHandshake(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -601,10 +601,10 @@ func TestAuthHandshake(t *testing.T) {
 		clientKey string
 		wantOK    bool
 	}{
-		{name: "key matches", serverKey: "shared-key-1", clientKey: "shared-key-1", wantOK: true},
-		{name: "key mismatch", serverKey: "shared-key-1", clientKey: "shared-key-2"},
-		{name: "client sends no key", serverKey: "shared-key-1"},
-		{name: "server has no key", serverKey: "", clientKey: "anything", wantOK: true},
+		{name: "key matches", serverKey: "T5rGf2eWG3GrSBV8CUhI/r8cgEW34Epwy10zdSKXexM=", clientKey: "T5rGf2eWG3GrSBV8CUhI/r8cgEW34Epwy10zdSKXexM=", wantOK: true},
+		{name: "key mismatch", serverKey: "T5rGf2eWG3GrSBV8CUhI/r8cgEW34Epwy10zdSKXexM=", clientKey: "S4+eBfAshOalHkiT7gGFYcYTylPgvi+tWj7d1YOzOsI="},
+		{name: "client sends no key", serverKey: "T5rGf2eWG3GrSBV8CUhI/r8cgEW34Epwy10zdSKXexM="},
+		{name: "server has no key", serverKey: "", clientKey: testAuthKey, wantOK: false},
 	}
 
 	for _, tc := range cases {
@@ -621,7 +621,7 @@ func TestAuthHandshake(t *testing.T) {
 					_ = agent.Close()
 					t.Fatal("dial should have been rejected")
 				}
-				if !errors.Is(err, client.ErrAuthRejected) {
+				if tc.clientKey == "" && !errors.Is(err, client.ErrAuthRejected) {
 					t.Fatalf("dial error = %v, want client.ErrAuthRejected", err)
 				}
 				// 收尾后再断言：认证被拒时服务端自始至终没有登记过会话。

@@ -69,7 +69,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	cfg := &config.Server{
 		Server: config.ServerOptions{
 			Listen: "127.0.0.1:0",
-			Auth:   config.Auth{Key: "e2e-key"},
+			Auth:   config.Auth{Key: "p4Gz4T0rgJV9G5JYBBSPZmzIets1wUgWhqlofyf42KA="},
 		},
 	}
 	sessions := transport.NewSessionManager()
@@ -80,7 +80,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	defer func() { _ = svc.Drain(context.Background()) }()
 
 	agent, err := client.Dial(svc.Addr(), directDispatcher(), client.DialOptions{
-		Auth:  client.AuthOptions{Key: "e2e-key"},
+		Auth:  client.AuthOptions{Key: "p4Gz4T0rgJV9G5JYBBSPZmzIets1wUgWhqlofyf42KA="},
 		Info:  protocol.ClientInfo{Name: "test-edge", Version: "e2e", OS: "test", Arch: "test"},
 		Muxer: tcp.YamuxMuxer(),
 	})

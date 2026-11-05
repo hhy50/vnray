@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/store"
@@ -69,12 +70,13 @@ type userCacheEntry struct {
 }
 
 // Bindings 是绑定表的管理面门面：列表与写直达持久层（sqlite/mysql），写成功后
-// 同步通知观察者；仅凭据点查（LookupUser）走短 TTL 缓存。它实现
+// 同步通知观察者；用户凭据走短 TTL 缓存，客户端密钥走写穿内存索引。它实现
 // transport.UserRegistry 与 core.SessionConfig。
 type Bindings struct {
 	globalClient atomic.Pointer[protocol.ClientConfig]
 	pushMu       sync.Mutex
 	store        store.Store
+	authKeys     authKeyIndex
 
 	// 观察者表只在装配期写入、此后只读，无需加锁。
 	observers []UserObserver
@@ -379,28 +381,55 @@ func (b *Bindings) Close() error { return b.store.Close() }
 
 // --- 接入密钥（范围 key）---
 
-// MinAuthKeyLen 是接入密钥的最小长度，与 config.Auth 的校验口径一致。
-const MinAuthKeyLen = 8
-
 // SetAuthKey 新增或按密钥覆盖一条接入密钥（同一密钥换范围即覆盖）。
 // 密钥唯一，范围 key 不做唯一约束——允许多把密钥共用一个范围。
 func (b *Bindings) SetAuthKey(key, scope string) error {
-	if len(key) < MinAuthKeyLen {
-		return fmt.Errorf("admin: auth key must be at least %d characters", MinAuthKeyLen)
+	parsed, err := authkey.Parse(key)
+	if err != nil {
+		return err
 	}
 	if err := store.ValidateAuthScope(scope); err != nil {
 		return err
 	}
 	ctx, cancel := queryCtx()
 	defer cancel()
-	return b.store.SetAuthKey(ctx, store.AuthKey{Key: key, Scope: scope})
+	b.authKeys.mu.Lock()
+	defer b.authKeys.mu.Unlock()
+	if !b.authKeys.loaded {
+		if err := b.loadAuthKeysLocked(ctx); err != nil {
+			return err
+		}
+	}
+	if err := b.store.SetAuthKey(ctx, store.AuthKey{Key: key, Scope: scope}); err != nil {
+		b.authKeys.invalidate()
+		return err
+	}
+	b.authKeys.rows[key] = struct{}{}
+	b.authKeys.byID[parsed.ID()] = authKeyEntry{key: parsed, scope: scope}
+	return nil
 }
 
 // DeleteAuthKey 删除一条接入密钥。
 func (b *Bindings) DeleteAuthKey(key string) (bool, error) {
 	ctx, cancel := queryCtx()
 	defer cancel()
-	return b.store.DeleteAuthKey(ctx, key)
+	b.authKeys.mu.Lock()
+	defer b.authKeys.mu.Unlock()
+	if !b.authKeys.loaded {
+		if err := b.loadAuthKeysLocked(ctx); err != nil {
+			return false, err
+		}
+	}
+	deleted, err := b.store.DeleteAuthKey(ctx, key)
+	if err != nil {
+		b.authKeys.invalidate()
+		return false, err
+	}
+	delete(b.authKeys.rows, key)
+	if parsed, err := authkey.Parse(key); err == nil {
+		delete(b.authKeys.byID, parsed.ID())
+	}
+	return deleted, nil
 }
 
 // AuthKeySnapshot 返回按密钥升序排列的全部密钥；读库失败只告警并返回空表。
@@ -415,25 +444,36 @@ func (b *Bindings) AuthKeySnapshot() []store.AuthKey {
 	return keys
 }
 
-// MatchClientAuthKey 报告一次客户端认证的判定结果：configured 为 false 表示密钥表
-// 为空（服务端未配置任何密钥，调用方回退旧校验路径）；否则 ok 即放行判定。
-// 未命中范围的条目也参与比对，避免提前退出暴露"命中的是哪条范围"。
-// 读库失败按已配置但拒绝处理：认证决策宁严勿宽，不因故障放行。
+// MatchClientAuthKey 按索引校验密钥与范围；索引加载失败时拒绝配置文件回退。
 func (b *Bindings) MatchClientAuthKey(clientName, key string) (configured, ok bool) {
-	keys := b.AuthKeySnapshot()
-	if len(keys) == 0 {
+	if err := b.lockAuthKeys(context.Background()); err != nil {
+		return true, false
+	}
+	defer b.authKeys.mu.RUnlock()
+	if len(b.authKeys.rows) == 0 {
 		return false, false
 	}
-	matched := false
-	for _, k := range keys {
-		if !store.ScopeMatches(k.Scope, clientName) {
-			continue
-		}
-		if subtle.ConstantTimeCompare([]byte(k.Key), []byte(key)) == 1 {
-			matched = true
-		}
+	parsed, err := authkey.Parse(key)
+	if err != nil {
+		return true, false
 	}
-	return true, matched
+	entry, found := b.authKeys.byID[parsed.ID()]
+	return true, found && subtle.ConstantTimeCompare(entry.key[:], parsed[:]) == 1 && store.ScopeMatches(entry.scope, clientName)
+}
+
+// LookupTransportKey resolves a key without falling back when storage fails.
+func (b *Bindings) LookupTransportKey(ctx context.Context, id authkey.ID) (authkey.Key, bool, error) {
+	if err := b.lockAuthKeys(ctx); err != nil {
+		return authkey.Key{}, true, err
+	}
+	defer b.authKeys.mu.RUnlock()
+	if entry, found := b.authKeys.byID[id]; found {
+		return entry.key, true, nil
+	}
+	if len(b.authKeys.rows) != 0 {
+		return authkey.Key{}, true, errTransportKeyNotRegistered
+	}
+	return authkey.Key{}, false, nil
 }
 
 // GORM 返回底层存储的 GORM 连接；管理台用它把账号、审计、指标建进业务同一个库。

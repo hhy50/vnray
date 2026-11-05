@@ -65,6 +65,19 @@ onMounted(load)
 
       <el-card shadow="never" class="config-card">
         <template #header>
+          <div class="card-title">加密传输</div>
+        </template>
+        <el-form-item label="启用客户端与服务端之间的加密传输">
+          <el-switch v-model="form.transport_encryption" />
+        </el-form-item>
+        <p class="field-tip">
+          默认开启。开启后，握手后的通讯使用 AEAD 加密；关闭后，握手后的数据明文传输。
+          两种模式均校验 auth_key，客户端自动跟随服务端设置。保存后用于新连接，在线连接重连后生效。
+        </p>
+      </el-card>
+
+      <el-card shadow="never" class="config-card">
+        <template #header>
           <div class="card-title">对外分享主机</div>
         </template>
         <el-form-item label="public_host（vmess / vless 分享链接对外暴露的主机）" class="w-md">

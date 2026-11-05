@@ -115,21 +115,31 @@ Start the server:
 
 ### 3. Start the client
 
+First sign in at `http://<server-address>:8080` and add a key on the **Authentication keys** page. Choose its scope, then copy the server-generated key. Custom passwords are no longer accepted. The example configurations contain no key, so this step is required before connecting a client.
+
 Edit [`configs/client.yaml`](configs/client.yaml):
 
 ```yaml
 server:
   addr: <public-server-address>:9000
-  auth_key: <same-key-as-the-server>
+  auth_key: <generated-key-copied-from-admin>
 ```
 
-The client's `auth_key` must match `server.auth.key` in the server configuration. Start the client on a machine that can reach the target service:
+Without the admin console, run `./vnserver keygen` and copy its output into both the server's `server.auth.key` and the client's `server.auth_key`. Keys encode 32 random bytes in standard Base64. A nonempty managed key table takes precedence over the configuration key. Clients are rejected when no valid key is available. Start the client on a machine that can reach the target service:
 
 ```bash
 ./vnclient -c configs/client.yaml
 ```
 
 The client maintains a long-lived connection and reconnects automatically after a disconnection by default.
+
+The server indexes client keys in memory at startup. Handshake lookup and scope authorization take average O(1) time. Admin changes update the local index immediately; direct database edits or changes made by another server sharing the database require restarting the affected servers to synchronize their indexes.
+
+**BREAKING upgrade:** Update the server and internal clients together. Plaintext internal clients, old passwords, and manually supplied keys in the admin creation API are no longer supported. Generate new managed keys, update clients, and remove old keys; stored credentials are not silently rewritten. Deleting a key rejects future connections. Disconnect existing sessions in the client list to revoke them immediately.
+
+The admin console's **Service configuration → Encrypted transport** switch controls communication after the handshake and defaults to enabled. Enabled connections use ChaCha20-Poly1305 AEAD between TCP and yamux for authentication, heartbeat, configuration and tunneled data. Disabled connections carry plaintext after the handshake, without confidentiality or integrity protection for business data. Both modes require auth_key proof and scope authorization. Clients follow the server automatically. Changes persist and apply to new connections; existing connections adopt the setting after reconnecting.
+
+Both peers contribute random challenges. HKDF-SHA256 and HMAC-SHA256 authenticate the selected mode, and Auth sends only the public key identifier, never the PSK. This PSK design has no forward secrecy, and holders of a shared key belong to the same trust domain. Transport v2 is incompatible with the previous AEAD v1 handshake: update both peers together; existing generated keys remain valid. Other entry points retain their own protocols: VLESS/VMess/SS, admin HTTP, and legacy `vn-v1` user connections. A plaintext user connection cannot authenticate as an internal client. See the [protocol](docs/PROTOCOL.md) and [ADR 0045](docs/adr/0045-negotiated-transport-encryption.md).
 
 ### 4. Open the admin console and create a user
 
@@ -186,10 +196,10 @@ The client also supports temporarily overriding the server address from the comm
 
 ## Security
 
-The example configuration is intended for local verification and contains public default credentials and a shared key. Before exposing the service to the public Internet:
+The example configuration is intended for local verification and contains public default admin credentials. Before exposing the service to the public Internet:
 
 - Change the admin username and password.
-- Change the shared authentication key used by the server and clients.
+- Generate client keys and restrict their authorization scope to the intended clients or namespaces.
 - Open only the ports you actually need and restrict access to the admin console.
 - Set reasonable bandwidth, concurrency, and client access limits for each user.
 - For production use, prefer VLESS with TLS and protect the certificates and private keys carefully.

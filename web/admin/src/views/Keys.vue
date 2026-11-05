@@ -12,7 +12,7 @@ const loading = ref(false)
 
 const showAdd = ref(false)
 const saving = ref(false)
-const form = reactive({ key: '', scope: '*' })
+const form = reactive({ scope: '*' })
 
 const scopeOptions = [
   { value: '*', label: '* — 所有客户端' },
@@ -33,27 +33,16 @@ async function load() {
 }
 
 function openAdd() {
-  form.key = generateKey()
   form.scope = '*'
   showAdd.value = true
 }
 
-function generateKey(): string {
-  const b = new Uint8Array(24)
-  crypto.getRandomValues(b)
-  return Array.from(b, (x) => ('0' + x.toString(16)).slice(-2)).join('')
-}
-
 async function save() {
-  if (form.key.trim().length < 8) {
-    ElMessage.warning('密钥至少 8 个字符')
-    return
-  }
   saving.value = true
   try {
-    await api.keySave({ key: form.key.trim(), scope: form.scope.trim() || '*' })
+    await api.keySave({ scope: form.scope.trim() || '*' })
     showAdd.value = false
-    ElMessage.success('已保存，即时生效')
+    ElMessage.success('已生成密钥，可在列表中复制到客户端配置')
     await load()
   } catch (err) {
     ElMessage.error(err instanceof ApiError ? err.message : '保存失败')
@@ -64,7 +53,7 @@ async function save() {
 
 async function remove(k: KeyRow) {
   try {
-    await ElMessageBox.confirm(`删除密钥 ${k.key}？删除后该密钥立即失效。`, '删除密钥', {
+    await ElMessageBox.confirm('删除后将拒绝使用此密钥的新连接。已在线会话需在客户端列表中主动断开。', '删除密钥', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -108,7 +97,7 @@ onMounted(load)
       :data="keys"
       size="small"
       row-key="key"
-      empty-text="还没有配置任何密钥。未配置时客户端认证按服务端配置文件里的 auth.key 校验（也没有则放行）；在这里添加密钥后，以本页为准。"
+      empty-text="还没有配置密钥。请添加密钥并复制到客户端的 auth_key；若服务端配置了生成的 auth.key，则使用该密钥。没有可用密钥时拒绝客户端连接。"
     >
       <el-table-column label="范围" width="170">
         <template #default="{ row }">
@@ -147,18 +136,13 @@ onMounted(load)
     <p class="page-hint">
       范围决定密钥可供哪些客户端使用：<span class="mono">*</span> 所有客户端；
       <span class="mono">namespace:*</span> 该 namespace 下的客户端；具体客户端名则只有它能用。
-      密钥唯一，同密钥再次提交即修改范围；已在线会话不受影响。
+      密钥由服务端随机生成，用于客户端通讯加密。删除后拒绝新连接，已在线会话不受影响。
     </p>
   </el-card>
 
   <el-dialog v-model="showAdd" title="添加密钥" width="min(560px, 94vw)" :close-on-click-modal="false">
     <el-form label-position="top">
-      <el-form-item label="密钥（至少 8 个字符）">
-        <div class="key-row">
-          <el-input v-model="form.key" class="mono" />
-          <el-button @click="form.key = generateKey()">重新生成</el-button>
-        </div>
-      </el-form-item>
+      <p class="hint-inline">添加时自动生成密钥，添加后可从列表复制到客户端配置。</p>
       <el-form-item label="范围">
         <el-select
           v-model="form.scope"
@@ -205,12 +189,6 @@ onMounted(load)
 
 .copy-btn:hover {
   color: var(--el-color-primary);
-}
-
-.key-row {
-  display: flex;
-  gap: 8px;
-  width: 100%;
 }
 
 .hint-inline {

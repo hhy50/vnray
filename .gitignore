@@ -10,7 +10,13 @@
 .roo/
 .workbuddy/
 .workbuddy-ai/
-docs/
+docs/*
+!docs/PROTOCOL.md
+!docs/adr/
+docs/adr/*
+!docs/adr/0043-client-aead-transport.md
+!docs/adr/0044-auth-key-index.md
+!docs/adr/0045-negotiated-transport-encryption.md
 logs/
 log/
 .DS_Store

@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
+	"github.com/hhy50/vnray/internal/secure"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
@@ -53,7 +55,21 @@ type Client struct {
 
 // Dial 连接服务端、建立多路复用会话并完成认证握手；之后用 Serve 接收服务端发起的请求流。
 func Dial(addr string, dispatcher dispatch.Dispatcher, opts DialOptions) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", addr, DialTimeout)
+	return DialContext(context.Background(), addr, dispatcher, opts)
+}
+
+// DialContext establishes an authenticated session in the server-selected transport mode.
+func DialContext(ctx context.Context, addr string, dispatcher dispatch.Dispatcher, opts DialOptions) (*Client, error) {
+	key, err := authkey.Parse(opts.Auth.Key)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrAuthRejected, err)
+	}
+	dialer := net.Dialer{Timeout: DialTimeout}
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := secure.Client(ctx, raw, key)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +82,23 @@ func Dial(addr string, dispatcher dispatch.Dispatcher, opts DialOptions) (*Clien
 		_ = conn.Close()
 		return nil, err
 	}
-	if err := authenticate(session, opts.Auth, opts.Info, opts.OnConfig); err != nil {
+	stopped := make(chan struct{})
+	finished := make(chan struct{})
+	routine.Go("client.auth.cancel", func() {
+		defer close(stopped)
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+		case <-finished:
+		}
+	})
+	err = authenticate(session, conn.KeyID(), opts.Info, opts.OnConfig)
+	close(finished)
+	<-stopped
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
 		_ = session.Close()
 		return nil, err
 	}
@@ -78,7 +110,7 @@ func Dial(addr string, dispatcher dispatch.Dispatcher, opts DialOptions) (*Clien
 }
 
 // authenticate 完成客户端侧握手：开一条一次性流发 Auth 帧，等服务端 AuthResult。
-func authenticate(session tcp.Session, auth AuthOptions, info protocol.ClientInfo, applyConfig func(protocol.PushConfig)) error {
+func authenticate(session tcp.Session, id authkey.ID, info protocol.ClientInfo, applyConfig func(protocol.PushConfig)) error {
 	stream, err := session.OpenStream()
 	if err != nil {
 		return fmt.Errorf("client: open auth stream: %w", err)
@@ -88,7 +120,7 @@ func authenticate(session tcp.Session, auth AuthOptions, info protocol.ClientInf
 		return fmt.Errorf("client: set auth deadline: %w", err)
 	}
 
-	frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: auth.Key, Info: info})
+	frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: fmt.Sprintf("%x", id), Info: info})
 	if err != nil {
 		return err
 	}

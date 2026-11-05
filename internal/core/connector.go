@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
@@ -29,18 +30,21 @@ type SessionConfig interface {
 	// MatchClientAuthKey 按范围密钥表判定客户端认证；configured 为 false 表示
 	// 表为空（未配置任何密钥），调用方回退到配置文件的共享密钥。
 	MatchClientAuthKey(clientName, key string) (configured, ok bool)
+	// LookupTransportKey returns configured=true even when a managed key cannot be resolved.
+	LookupTransportKey(context.Context, authkey.ID) (authkey.Key, bool, error)
 }
 
 // ConnectorService 是数据面服务：客户端与用户共用主端口，按握手首帧区分角色。
 // 它把认证与流处理委托给会话管理器（认证成功后由 SessionManager 登记），并驱动心跳、
 // 把用户的转发流桥接到其绑定的客户端。会话登记表由 SessionManager 持有，本服务不另存副本。
 type ConnectorService struct {
-	server   *tcp.Server
-	sessions *transport.SessionManager
-	bindings transport.UserRegistry
-	limits   *ratelimit.Registry
-	authKey  string
-	hub      *forwardHub
+	server              *tcp.Server
+	sessions            *transport.SessionManager
+	bindings            transport.UserRegistry
+	limits              *ratelimit.Registry
+	authKey             string
+	transportEncryption atomic.Bool
+	hub                 *forwardHub
 	// heartbeat 是当前心跳策略，运行期可经 ApplyHeartbeat 热改；heartbeatReload 唤醒调度协程。
 	heartbeat       atomic.Pointer[HeartbeatOptions]
 	heartbeatReload chan struct{}
@@ -64,6 +68,11 @@ func (s *ConnectorService) ApplyHeartbeat(interval, timeout time.Duration) {
 // ApplySessionConfig 热更新多路复用会话参数：仅对之后建立的新连接生效。
 func (s *ConnectorService) ApplySessionConfig(cfg *tcp.SessionConfig) {
 	s.server.SetSessionConfig(cfg)
+}
+
+// ApplyTransportEncryption 设置新连接握手后的加密模式，既有连接保持原模式。
+func (s *ConnectorService) ApplyTransportEncryption(enabled bool) {
+	s.transportEncryption.Store(enabled)
 }
 
 // SetExitResolver 覆盖出口解析器（含本机出口时由装配层注入）；须在 Start 前调用。
@@ -98,6 +107,7 @@ func NewConnectorServiceWith(cfg *config.Server, sessions *transport.SessionMana
 		heartbeatReload: make(chan struct{}, 1),
 	}
 	hb := config.DefaultHeartbeat()
+	s.ApplyTransportEncryption(true)
 	s.heartbeat.Store(&HeartbeatOptions{Interval: hb.Interval.Std(), Timeout: hb.Timeout.Std()})
 	// exits 默认为会话管理器（仅远程会话）；装配层可经 SetExitResolver 附带本机出口。
 	if bindings != nil {
@@ -106,6 +116,7 @@ func NewConnectorServiceWith(cfg *config.Server, sessions *transport.SessionMana
 	// 认证与流处理是业务决策，注入给管理器；登记/注销/索引由管理器负责。
 	sessions.Auth = s.Handshake
 	sessions.Streams = s.onStreamOpen
+	opts = append(opts, tcp.WithConnectionHandshake(s.upgradeConnection))
 	s.server = tcp.NewServer(cfg.Server.Listen, sessions, opts...)
 	return s
 }

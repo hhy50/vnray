@@ -114,6 +114,10 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	// 运行时服务配置（管理台可在线改）先于组件构造解析：会话参数与心跳在此定基线。
 	settings := loadServiceSettings(appctx, st, cfg)
 	bindings := newBindings(st)
+	if err := bindings.ReloadAuthKeys(appctx); err != nil {
+		_ = st.Close()
+		return nil, err
+	}
 	limits := ratelimit.NewRegistry()
 	meter := traffic.NewMeter(limits)
 	// 出口解析器：settings 里本机出口启用时附带它（保留名 server:self）。

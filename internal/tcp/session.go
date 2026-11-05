@@ -20,6 +20,19 @@ type Session interface {
 	SetDeadline(t time.Time) error
 }
 
+type connectionSession struct {
+	Session
+	conn net.Conn
+}
+
+// Connection returns the connection used by a server-side session, or nil.
+func Connection(session Session) net.Conn {
+	if s, ok := session.(*connectionSession); ok {
+		return s.conn
+	}
+	return nil
+}
+
 // Stream 是会话内的一条逻辑流，帧与裸字节都经它读写。Close 是半关闭：向对端发
 // FIN 结束本端写方向，读方向继续可用；整条流的回收由对端 FIN 或会话关闭完成
 // （yamux 后端语义，方向分离的转发依赖这一点）。

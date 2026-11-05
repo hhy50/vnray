@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/plugin"
@@ -472,7 +473,7 @@ type apiKeyIn struct {
 	Scope string `json:"scope"`
 }
 
-// apiKeySave 按密钥 upsert。
+// apiKeySave generates a key; callers only choose its scope.
 func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Bindings == nil {
 		apiFail(w, http.StatusNotFound, "认证密钥未配置")
@@ -482,7 +483,11 @@ func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	if !apiDecode(w, r, &in) {
 		return
 	}
-	key := strings.TrimSpace(in.Key)
+	if in.Key != "" {
+		apiFail(w, http.StatusBadRequest, "密钥由服务端生成，不接受手工指定")
+		return
+	}
+	key := authkey.Generate()
 	scope := strings.TrimSpace(in.Scope)
 	if err := s.opts.Bindings.SetAuthKey(key, scope); err != nil {
 		apiFail(w, http.StatusBadRequest, err.Error())
@@ -549,6 +554,7 @@ func queryInt(raw url.Values, key string, def int) int {
 
 // apiDurationFields 不包含 global_client：那一段由 clientconfig.go 独占读写。
 type apiDurationFields struct {
+	TransportEncryption  *bool  `json:"transport_encryption,omitempty"`
 	HeartbeatInterval    string `json:"heartbeat_interval"`
 	HeartbeatTimeout     string `json:"heartbeat_timeout"`
 	TrafficFlushInterval string `json:"traffic_flush_interval"`
@@ -578,6 +584,7 @@ func (s *AdminService) apiServiceConfig(w http.ResponseWriter, r *http.Request) 
 		routingText = ""
 	}
 	apiOK(w, apiDurationFields{
+		TransportEncryption:  &cur.TransportEncryption,
 		PublicHost:           cur.PublicHost,
 		HeartbeatEnabled:     cur.Heartbeat.Enabled,
 		HeartbeatInterval:    cur.Heartbeat.Interval.String(),
@@ -612,6 +619,9 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 	}
 	cur := s.currentServiceSettings()
 	next := cur
+	if in.TransportEncryption != nil {
+		next.TransportEncryption = *in.TransportEncryption
+	}
 	next.PublicHost = strings.TrimSpace(in.PublicHost)
 	next.Heartbeat.Enabled = in.HeartbeatEnabled
 	next.ServerProxy.Enabled = in.ServerProxyEnabled

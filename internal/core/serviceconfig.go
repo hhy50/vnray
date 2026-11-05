@@ -113,6 +113,7 @@ type serviceConfig struct {
 
 // newServiceConfig 构造分发中心；initial 是启动解析出的生效值。
 func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Meter, resolver *exitResolver, bindings *admin.Bindings, initial config.ServiceSettings) *serviceConfig {
+	svc.ApplyTransportEncryption(initial.TransportEncryption)
 	initial.GlobalClient = initial.GlobalClient.Clone()
 	if bindings != nil {
 		bindings.SetGlobalClientConfig(initial.GlobalClient)
@@ -196,6 +197,7 @@ func (c *serviceConfig) Apply(next config.ServiceSettings) error {
 
 // dispatch 把生效值推给各运行时组件并更新本地快照。日志级别非法不可能发生（已被校验）。
 func (c *serviceConfig) dispatch(next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
+	c.svc.ApplyTransportEncryption(next.TransportEncryption)
 	globalChanged := !reflect.DeepEqual(c.Current().GlobalClient, next.GlobalClient)
 	c.svc.ApplyHeartbeat(heartbeatIntervalOf(next.Heartbeat), next.Heartbeat.Timeout.Std())
 	c.svc.ApplySessionConfig(sess)

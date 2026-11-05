@@ -12,6 +12,38 @@ import (
 // recvTimeout 是等待事件落地的上限；远超本机回环实际耗时，给慢 CI 留余量。
 const recvTimeout = 5 * time.Second
 
+func TestStopCancelsConnectionHandshake(t *testing.T) {
+	entered, exited := make(chan struct{}), make(chan struct{})
+	srv := NewServer("127.0.0.1:0", newEventRecorder(), WithConnectionHandshake(func(ctx context.Context, _ net.Conn) (net.Conn, error) {
+		close(entered)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	}))
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	conn, err := net.DialTimeout("tcp", srv.Addr(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	select {
+	case <-entered:
+	case <-time.After(recvTimeout):
+		t.Fatal("connection handshake not started")
+	}
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(recvTimeout):
+		t.Fatal("connection handshake not canceled")
+	}
+}
+
 // testMuxers 是内置后端清单：每个用例都对清单里的后端各跑一遍，确保适配层行为一致。
 var testMuxers = []Muxer{YamuxMuxer()}
 

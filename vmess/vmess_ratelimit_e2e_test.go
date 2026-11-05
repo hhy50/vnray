@@ -98,7 +98,7 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 	cfg := &config.Server{
 		Server: config.ServerOptions{
 			Listen: "127.0.0.1:0",
-			Auth:   config.Auth{Key: "rl-key"},
+			Auth:   config.Auth{Key: "BobNgLwSfFd3+gss1vTKhgq2pHfpkVwJA0bBB2vW6T8="},
 		},
 	}
 	sessions := transport.NewSessionManager()
@@ -110,7 +110,7 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 
 	// D：项目客户端，与 B 同网（本测试里都在本机），用直连出站访问 B。
 	agent, err := client.Dial(svc.Addr(), directDispatcher(), client.DialOptions{
-		Auth: client.AuthOptions{Key: "rl-key"},
+		Auth: client.AuthOptions{Key: "BobNgLwSfFd3+gss1vTKhgq2pHfpkVwJA0bBB2vW6T8="},
 		Info: protocol.ClientInfo{Name: "test-edge", Version: "rl", OS: "test", Arch: "test"},
 	})
 	if err != nil {

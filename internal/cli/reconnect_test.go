@@ -137,6 +137,7 @@ func TestRunWithoutReconnectReturnsDialError(t *testing.T) {
 // configWithReconnectDisabled 造一个指向必然拒连地址、且关闭重连的客户端配置。
 func configWithReconnectDisabled() config.Client {
 	cfg := config.DefaultClient()
+	cfg.Server.AuthKey = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 	cfg.Server.Addr = "127.0.0.1:1"
 	cfg.Server.Reconnect = &config.Reconnect{Enabled: false}
 	return cfg

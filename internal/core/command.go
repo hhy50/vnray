@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 )
@@ -42,6 +43,15 @@ func NewServerCommand() *cobra.Command {
 		RunE:          runServer,
 	}
 	registerConfigFlag(cmd)
+	cmd.AddCommand(&cobra.Command{
+		Use:   "keygen",
+		Short: "生成客户端 AEAD 通讯密钥",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), authkey.Generate())
+			return err
+		},
+	})
 	return cmd
 }
 

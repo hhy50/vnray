@@ -112,8 +112,10 @@ func (c Client) Validate() error {
 			return fmt.Errorf("name: %w", err)
 		}
 	}
-	if c.Server.AuthKey != "" && len(c.Server.AuthKey) < 8 {
-		return fmt.Errorf("server.auth_key: must be at least 8 characters when set")
+	if c.Server.AuthKey != "" {
+		if err := validateAuthKey("server.auth_key", c.Server.AuthKey); err != nil {
+			return err
+		}
 	}
 	if _, err := ParseNetworkPatterns(c.Public); err != nil {
 		return fmt.Errorf("public: %w", err)

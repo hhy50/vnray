@@ -81,18 +81,18 @@ func (s tracedStore) ListClients(ctx context.Context) (out []ClientBinding, err 
 }
 
 func (s tracedStore) SetAuthKey(ctx context.Context, k AuthKey) (err error) {
-	defer traceQuery(time.Now(), "SetAuthKey", k.Key, &err)
+	defer traceQuery(time.Now(), "SetAuthKey", "[redacted]", &err)
 	return s.Store.SetAuthKey(ctx, k)
 }
 
 func (s tracedStore) GetAuthKey(ctx context.Context, key string) (k AuthKey, ok bool, err error) {
-	defer traceQuery(time.Now(), "GetAuthKey", key, &err)
+	defer traceQuery(time.Now(), "GetAuthKey", "[redacted]", &err)
 	k, ok, err = s.Store.GetAuthKey(ctx, key)
 	return k, ok, err
 }
 
 func (s tracedStore) DeleteAuthKey(ctx context.Context, key string) (deleted bool, err error) {
-	defer traceQuery(time.Now(), "DeleteAuthKey", key, &err)
+	defer traceQuery(time.Now(), "DeleteAuthKey", "[redacted]", &err)
 	return s.Store.DeleteAuthKey(ctx, key)
 }
 

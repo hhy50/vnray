@@ -77,7 +77,7 @@ type ClientMatch struct {
 	Port          []int    `json:"port,omitempty"`
 }
 
-// AuthRequest 是 Auth 帧的载荷：共享密钥 + 客户端自报信息。
+// AuthRequest 是 Auth 帧的载荷：已证明的公开密钥标识 + 客户端自报信息。
 type AuthRequest struct {
 	Key  string     `json:"key"`
 	Info ClientInfo `json:"client"`

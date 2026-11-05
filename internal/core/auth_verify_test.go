@@ -25,7 +25,7 @@ func testBindings(t *testing.T) *admin.Bindings {
 type authKeySeed struct{ key, scope string }
 
 // TestVerifyKeyScopedKeys 覆盖接入密钥的判定优先级：密钥表已配置时只认范围匹配的
-// 条目（配置文件密钥不再生效）；表为空时回退配置文件密钥；两者皆空则放行。
+// 条目（配置文件密钥不再生效）；表为空时回退配置文件密钥；两者皆空则拒绝。
 func TestVerifyKeyScopedKeys(t *testing.T) {
 	newService := func(shared string, keys []authKeySeed) *ConnectorService {
 		b := testBindings(t)
@@ -45,24 +45,24 @@ func TestVerifyKeyScopedKeys(t *testing.T) {
 		present string
 		allow   bool
 	}{
-		{name: "scope star matches any client", keys: []authKeySeed{{"key-global-1", "*"}},
-			client: "team1:g:a", present: "key-global-1", allow: true},
-		{name: "namespace scope", keys: []authKeySeed{{"key-team-22", "team1:*"}},
-			client: "team1:g:a", present: "key-team-22", allow: true},
-		{name: "namespace scope wrong ns", keys: []authKeySeed{{"key-team-22", "team1:*"}},
-			client: "team2:g:a", present: "key-team-22", allow: false},
-		{name: "exact client", keys: []authKeySeed{{"key-solo-33", "team2:group:solo"}},
-			client: "team2:group:solo", present: "key-solo-33", allow: true},
-		{name: "exact client other name", keys: []authKeySeed{{"key-solo-33", "team2:group:solo"}},
-			client: "team2:group:other", present: "key-solo-33", allow: false},
-		{name: "configured table ignores config key", keys: []authKeySeed{{"key-solo-33", "*"}},
-			shared: "shared-key-9", client: "any:g:a", present: "shared-key-9", allow: false},
-		{name: "empty table falls back to config key", shared: "shared-key-9",
-			client: "any:g:a", present: "shared-key-9", allow: true},
-		{name: "empty table config key mismatch", shared: "shared-key-9",
-			client: "any:g:a", present: "other-key", allow: false},
-		{name: "nothing configured allows all",
-			client: "any:g:a", present: "", allow: true},
+		{name: "scope star matches any client", keys: []authKeySeed{{"cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", "*"}},
+			client: "team1:g:a", present: "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", allow: true},
+		{name: "namespace scope", keys: []authKeySeed{{"r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", "team1:*"}},
+			client: "team1:g:a", present: "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", allow: true},
+		{name: "namespace scope wrong ns", keys: []authKeySeed{{"r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", "team1:*"}},
+			client: "team2:g:a", present: "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", allow: false},
+		{name: "exact client", keys: []authKeySeed{{"iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "team2:group:solo"}},
+			client: "team2:group:solo", present: "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", allow: true},
+		{name: "exact client other name", keys: []authKeySeed{{"iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "team2:group:solo"}},
+			client: "team2:group:other", present: "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", allow: false},
+		{name: "configured table ignores config key", keys: []authKeySeed{{"iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "*"}},
+			shared: "6mBcn2BvVg//SqHyz9JJZXctu3JbP42h1WpU1agIMwU=", client: "any:g:a", present: "6mBcn2BvVg//SqHyz9JJZXctu3JbP42h1WpU1agIMwU=", allow: false},
+		{name: "empty table falls back to config key", shared: "6mBcn2BvVg//SqHyz9JJZXctu3JbP42h1WpU1agIMwU=",
+			client: "any:g:a", present: "6mBcn2BvVg//SqHyz9JJZXctu3JbP42h1WpU1agIMwU=", allow: true},
+		{name: "empty table config key mismatch", shared: "6mBcn2BvVg//SqHyz9JJZXctu3JbP42h1WpU1agIMwU=",
+			client: "any:g:a", present: "WAhD0D0iFv8aJ10JkbrWbk0a+HEXHZKeneYEt5Wfm8o=", allow: false},
+		{name: "nothing configured rejects clients",
+			client: "any:g:a", present: "", allow: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := newService(tt.shared, tt.keys)

@@ -16,7 +16,7 @@ const AuthTimeout = 5 * time.Second
 // ErrAuthRejected 表示服务端拒绝了这次认证。
 var ErrAuthRejected = errors.New("authentication rejected")
 
-// AuthOptions 是握手认证配置：两端共用同一个密钥，客户端上报、服务端比对。
+// AuthOptions holds the generated key used for transport encryption and authorization.
 type AuthOptions struct {
 	Key string
 }
