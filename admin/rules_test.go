@@ -42,7 +42,7 @@ func (f *fakeRules) Exists(name string) bool {
 	return ok
 }
 
-func (f *fakeRules) SaveRule(name string, r rule.Rule) error {
+func (f *fakeRules) SaveRule(_ context.Context, name string, r rule.Rule) error {
 	if _, err := rule.Compile(name, r); err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func (f *fakeRules) SaveRule(name string, r rule.Rule) error {
 	return nil
 }
 
-func (f *fakeRules) DeleteRule(name string) error {
+func (f *fakeRules) DeleteRule(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.items, name)
@@ -64,7 +64,7 @@ func newRulesAdmin(t *testing.T) (*AdminService, *fakeRules) {
 	t.Helper()
 	s := newTestAdminService(t)
 	rules := newFakeRules()
-	if err := rules.SaveRule(rule.NameDefault, rule.Rule{}); err != nil {
+	if err := rules.SaveRule(context.Background(), rule.NameDefault, rule.Rule{}); err != nil {
 		t.Fatalf("seed default rule: %v", err)
 	}
 	s.opts.Rules = rules
@@ -144,7 +144,7 @@ func TestAPIRulesCRUD(t *testing.T) {
 // TestAPIUserRuleField 断言用户配置读写带上出站规则名，未定义的规则名被拒。
 func TestAPIUserRuleField(t *testing.T) {
 	s, rules := newRulesAdmin(t)
-	if err := rules.SaveRule("office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
+	if err := rules.SaveRule(context.Background(), "office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
 		t.Fatalf("seed rule: %v", err)
 	}
 	st, err := store.Open(context.Background(), "sqlite", filepath.Join(t.TempDir(), "bindings.db"))
@@ -153,7 +153,7 @@ func TestAPIUserRuleField(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	s.opts.Bindings = NewBindings(st)
-	if err := s.opts.Bindings.SetUser(Binding{
+	if err := s.opts.Bindings.(*Bindings).SetUser(context.Background(), Binding{
 		UserKey: "alice", Protocol: store.ProtocolVNV1, Name: "alice",
 		Status: store.UserEnabled, Client: "edge-1",
 	}); err != nil {
@@ -165,7 +165,7 @@ func TestAPIUserRuleField(t *testing.T) {
 	if rec := doJSON(t, h, s.auth, http.MethodPut, "/admin/ops/api/users/limits?protocol=vn-v1&key=alice", body); rec.Code != http.StatusOK {
 		t.Fatalf("save user rule = %d, body: %s", rec.Code, rec.Body.String())
 	}
-	if got, ok := s.opts.Bindings.Lookup(store.ProtocolVNV1, "alice"); !ok || got.Config.Rule != "office" {
+	if got, ok := s.opts.Bindings.Lookup(context.Background(), store.ProtocolVNV1, "alice"); !ok || got.Config.Rule != "office" {
 		t.Fatalf("user rule = %q, want office", got.Config.Rule)
 	}
 
@@ -178,7 +178,7 @@ func TestAPIUserRuleField(t *testing.T) {
 // TestAPIUserSaveRule 断言新增用户时可以直接选规则：带了就落库，不带就保持原值。
 func TestAPIUserSaveRule(t *testing.T) {
 	s, rules := newRulesAdmin(t)
-	if err := rules.SaveRule("office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
+	if err := rules.SaveRule(context.Background(), "office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
 		t.Fatalf("seed rule: %v", err)
 	}
 	st, err := store.Open(context.Background(), "sqlite", filepath.Join(t.TempDir(), "bindings.db"))
@@ -193,7 +193,7 @@ func TestAPIUserSaveRule(t *testing.T) {
 	if rec := doJSON(t, h, s.auth, http.MethodPost, "/admin/ops/api/users", body); rec.Code != http.StatusOK {
 		t.Fatalf("create user with rule = %d, body: %s", rec.Code, rec.Body.String())
 	}
-	if got, ok := s.opts.Bindings.Lookup(store.ProtocolVNV1, "bob"); !ok || got.Config.Rule != "office" {
+	if got, ok := s.opts.Bindings.Lookup(context.Background(), store.ProtocolVNV1, "bob"); !ok || got.Config.Rule != "office" {
 		t.Fatalf("user rule = %q, want office", got.Config.Rule)
 	}
 
@@ -202,7 +202,7 @@ func TestAPIUserSaveRule(t *testing.T) {
 	if rec := doJSON(t, h, s.auth, http.MethodPost, "/admin/ops/api/users", body); rec.Code != http.StatusOK {
 		t.Fatalf("resave user = %d, body: %s", rec.Code, rec.Body.String())
 	}
-	if got, _ := s.opts.Bindings.Lookup(store.ProtocolVNV1, "bob"); got.Config.Rule != "office" || got.Name != "bob-2" {
+	if got, _ := s.opts.Bindings.Lookup(context.Background(), store.ProtocolVNV1, "bob"); got.Config.Rule != "office" || got.Name != "bob-2" {
 		t.Fatalf("rule lost on resave: %+v", got)
 	}
 

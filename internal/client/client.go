@@ -24,14 +24,16 @@ import (
 // DialOptions 是客户端拨号选项。
 type DialOptions struct {
 	Auth AuthOptions
-	// Info 是客户端随认证上报的自身配置与环境摘要。
+	// Info 是客户端上报的自身配置与环境摘要。
 	Info protocol.ClientInfo
+	// ReportInfo 每次上报时采集最新信息；nil 时沿用 Info。
+	ReportInfo func() protocol.ClientInfo
 	// SessionConfig 覆盖多路复用层参数；nil 用默认值，须与服务端一致。
 	SessionConfig *tcp.SessionConfig
 	// Muxer 选择多路复用后端；nil 用 tcp.DefaultMuxer。必须与服务端一致
 	// （线格式随后端而异）。
 	Muxer tcp.Muxer
-	// OnConfig 在收到服务端下发的全量配置快照时被调用（认证应答或下发帧）；
+	// OnConfig 在收到服务端下发的全量配置快照时被调用（配置上报应答或下发帧）；
 	// nil 表示客户端不维护服务端下发的配置。实现方负责并发安全。
 	OnConfig func(cfg protocol.PushConfig)
 	// Direct 是"直连"分发器：隧道帧带 Direct 标志时用它出站，跳过本客户端的路由
@@ -49,12 +51,15 @@ const maxFramePayload = 32 * 1024
 
 // Client 主动连接服务端，接收服务端发起的流并在本地代理分发。
 type Client struct {
-	session          tcp.Session
-	dispatcher       dispatch.Dispatcher
-	direct           dispatch.Dispatcher
-	onConfig         func(protocol.PushConfig)
-	configMu         sync.Mutex
-	lastConfigStream uint32
+	session            tcp.Session
+	dispatcher         dispatch.Dispatcher
+	direct             dispatch.Dispatcher
+	onConfig           func(protocol.PushConfig)
+	configMu           sync.Mutex
+	lastConfigStream   uint32
+	lastConfigRevision uint64
+	reportInfo         func() protocol.ClientInfo
+	reportMu           sync.Mutex
 }
 
 // Dial 连接服务端、建立多路复用会话并完成认证握手；之后用 Serve 接收服务端发起的请求流。
@@ -86,19 +91,24 @@ func DialContext(ctx context.Context, addr string, dispatcher dispatch.Dispatche
 		_ = conn.Close()
 		return nil, err
 	}
-	stopped := make(chan struct{})
-	finished := make(chan struct{})
-	routine.Go("client.auth.cancel", func() {
-		defer close(stopped)
-		select {
-		case <-ctx.Done():
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	reportCtx, finish := context.WithCancel(ctx)
+	routine.Go("client.report.cancel", func() {
+		defer watcher.Done()
+		<-reportCtx.Done()
+		if ctx.Err() != nil {
 			_ = session.Close()
-		case <-finished:
 		}
 	})
-	err = authenticate(session, conn.KeyID(), opts.Info, opts.OnConfig)
-	close(finished)
-	<-stopped
+	reportInfo := opts.ReportInfo
+	if reportInfo == nil {
+		reportInfo = func() protocol.ClientInfo { return opts.Info }
+	}
+	c := &Client{session: session, dispatcher: dispatcher, direct: opts.Direct, onConfig: opts.OnConfig, reportInfo: reportInfo}
+	err = c.reportConfig()
+	finish()
+	watcher.Wait()
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
@@ -106,40 +116,34 @@ func DialContext(ctx context.Context, addr string, dispatcher dispatch.Dispatche
 		_ = session.Close()
 		return nil, err
 	}
-	return &Client{
-		session:    session,
-		dispatcher: dispatcher,
-		direct:     opts.Direct,
-		onConfig:   opts.OnConfig,
-	}, nil
+	return c, nil
 }
 
-// authenticate 完成客户端侧握手：开一条一次性流发 Auth 帧，等服务端 AuthResult。
-func authenticate(session tcp.Session, id authkey.ID, info protocol.ClientInfo, applyConfig func(protocol.PushConfig)) error {
-	stream, err := session.OpenStream()
+func (c *Client) reportConfig() error {
+	c.reportMu.Lock()
+	defer c.reportMu.Unlock()
+	stream, err := c.session.OpenStream()
 	if err != nil {
-		return fmt.Errorf("client: open auth stream: %w", err)
+		return fmt.Errorf("client: open config report stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
 	if err := stream.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
-		return fmt.Errorf("client: set auth deadline: %w", err)
+		return err
 	}
-
-	frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: fmt.Sprintf("%x", id), Info: info})
+	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: c.reportInfo()})
 	if err != nil {
 		return err
 	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
-		return fmt.Errorf("client: write auth frame: %w", err)
+		return err
 	}
-
 	resp, err := protocol.NewDecoder(stream).ReadFrame()
 	if err != nil {
-		return fmt.Errorf("client: read auth result: %w", err)
+		return err
 	}
-	if resp.Type != protocol.AuthResult {
+	if resp.Type != protocol.ConfigReportResult {
 		_ = resp.CloseBody()
-		return fmt.Errorf("%w: unexpected frame %d on auth stream", protocol.ErrProtocol, resp.Type)
+		return fmt.Errorf("%w: expected config report result, got %d", protocol.ErrProtocol, resp.Type)
 	}
 	payload, err := protocol.ReadPayload(resp)
 	if err != nil {
@@ -152,11 +156,31 @@ func authenticate(session tcp.Session, id authkey.ID, info protocol.ClientInfo, 
 	if !res.OK {
 		return fmt.Errorf("%w: %s", ErrAuthRejected, res.Reason)
 	}
-	// 重连时随认证带上服务端下发的全量配置，保证重启不丢配置。
-	if applyConfig != nil && res.Config != nil {
-		applyConfig(*res.Config)
+	if res.Config != nil {
+		c.applyConfig(0, *res.Config)
 	}
 	return nil
+}
+
+const configReportInterval = 5 * time.Minute
+
+func (c *Client) runConfigReports(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.session.CloseChan():
+			return
+		case <-ticker.C:
+			if err := c.reportConfig(); err != nil {
+				logging.Warn("client: config report failed", "err", err)
+				_ = c.Close()
+				return
+			}
+		}
+	}
 }
 
 // Close 关闭底层多路复用会话，进而关闭 TCP 连接。
@@ -164,8 +188,32 @@ func (c *Client) Close() error { return c.session.Close() }
 
 // Serve 接收服务端开启的流；会话结束后等待所有请求处理完成。
 func (c *Client) Serve() error {
+	return c.ServeContext(context.Background())
+}
+
+// ServeContext 服务到父级取消或会话结束，并等待全部流处理退出。
+func (c *Client) ServeContext(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	wg.Add(2)
+	routine.Go("client.session.cancel", func() {
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+		case <-c.session.CloseChan():
+		}
+		cancel()
+		_ = c.Close()
+	})
+	routine.Go("client.config.report", func() {
+		defer wg.Done()
+		c.runConfigReports(ctx, configReportInterval)
+	})
+	defer func() {
+		cancel()
+		_ = c.Close()
+		wg.Wait()
+	}()
 	for {
 		stream, err := c.session.AcceptStream()
 		if err != nil {
@@ -177,7 +225,7 @@ func (c *Client) Serve() error {
 		wg.Add(1)
 		routine.Go("client.stream", func() {
 			defer wg.Done()
-			c.handleStream(stream)
+			c.handleStream(ctx, stream)
 		})
 	}
 }
@@ -186,7 +234,9 @@ func (c *Client) Serve() error {
 //
 // 流的第一帧决定这条流的用途：Ping 是心跳探测（回 Pong 后即结束），
 // Data 是请求流（首帧的 Host/Port 为目标地址）。
-func (c *Client) handleStream(stream tcp.Stream) {
+func (c *Client) handleStream(ctx context.Context, stream tcp.Stream) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	defer stream.Close()
 	remote := stream.RemoteAddr().String()
 	sid := stream.ID()
@@ -205,11 +255,11 @@ func (c *Client) handleStream(stream tcp.Stream) {
 		return
 	}
 	if first.Type == protocol.Tunnel {
-		c.handleTunnel(stream, first)
+		c.handleTunnel(ctx, stream, first)
 		return
 	}
 	if first.Type == protocol.PortMap {
-		c.handlePortMap(stream, first)
+		c.handlePortMap(ctx, stream, first)
 		return
 	}
 	if first.Type == protocol.ConfigPush {
@@ -223,7 +273,7 @@ func (c *Client) handleStream(stream tcp.Stream) {
 // handleTunnel 处理一条隧道流：首帧带目标地址，之后该流承载裸字节。出口侧复用
 // dispatcher 分发目标，因此 ACL 与路由规则照常生效；帧上带 Direct 标志时改用直连
 // 分发器，跳过本客户端的路由规则（服务端出站规则的 direct 名单）。随后把两侧字节双向对接。
-func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
+func (c *Client) handleTunnel(ctx context.Context, stream tcp.Stream, first *protocol.Frame) {
 	remote := stream.RemoteAddr().String()
 	sid := stream.ID()
 	// 目标在载荷开头的地址块里，其后是 JSON 请求体。
@@ -247,7 +297,7 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 	}
 	logging.Info("client: tunnel requested", "remote", remote, "stream_id", sid, "destination", dest.String())
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	dispatcher := c.dispatcher
 	if req.Direct && c.direct != nil {
@@ -262,15 +312,15 @@ func (c *Client) handleTunnel(stream tcp.Stream, first *protocol.Frame) {
 	}
 	defer link.Reader.Interrupt()
 	defer link.Writer.Interrupt()
-	routine.Go("client.watchClose", func() {
-		select {
-		case <-c.session.CloseChan():
-			cancel()
-			link.Reader.Interrupt()
-			link.Writer.Interrupt()
-			_ = stream.Close()
-		case <-ctx.Done():
-		}
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	defer func() { cancel(); watcher.Wait() }()
+	routine.Go("client.tunnel.cancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		link.Reader.Interrupt()
+		link.Writer.Interrupt()
+		_ = stream.Close()
 	})
 
 	protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: true})
@@ -327,14 +377,27 @@ func (c *Client) handleConfigPush(streamID uint32, first *protocol.Frame) {
 		logging.Warn("client: bad push config frame", "err", err)
 		return
 	}
-	// 流按编号递增开启，但处理协程可能乱序；旧快照不得覆盖新快照。
-	c.configMu.Lock()
-	defer c.configMu.Unlock()
-	if streamID <= c.lastConfigStream {
+	c.applyConfig(streamID, cfg)
+}
+
+func (c *Client) applyConfig(streamID uint32, cfg protocol.PushConfig) {
+	if c.onConfig == nil {
 		return
 	}
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	if cfg.Revision != 0 {
+		if cfg.Revision <= c.lastConfigRevision {
+			return
+		}
+		c.lastConfigRevision = cfg.Revision
+	} else {
+		if c.lastConfigRevision != 0 || (streamID != 0 && streamID <= c.lastConfigStream) {
+			return
+		}
+		c.lastConfigStream = streamID
+	}
 	c.onConfig(cfg)
-	c.lastConfigStream = streamID
 }
 
 // handleHeartbeat 应答服务端的心跳探测：回一个 Pong，原样回显 Ping 载荷里的毫秒时间戳，

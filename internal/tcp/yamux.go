@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
 
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/routine"
 )
 
 // yamuxBackend 把 hashicorp/yamux 适配到 Muxer。
@@ -24,7 +26,7 @@ func (yamuxBackend) Server(conn net.Conn, cfg *SessionConfig) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &yamuxSession{Session: s}, nil
+	return newYamuxSession(s), nil
 }
 
 // Client 实现 Muxer。
@@ -33,7 +35,7 @@ func (yamuxBackend) Client(conn net.Conn, cfg *SessionConfig) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &yamuxSession{Session: s}, nil
+	return newYamuxSession(s), nil
 }
 
 // minYamuxStreamWindow 是 yamux 允许的最小单流窗口（其 initialStreamWindow，
@@ -97,16 +99,99 @@ type yamuxSession struct {
 	*yamux.Session
 	// acceptDeadline 是会话级 AcceptStream 等待上限（零值表示不设限）：
 	// yamux 没有 Session.SetDeadline，用 AcceptStreamWithContext 等价实现。
-	acceptDeadline atomic.Value // time.Time
+	acceptDeadline atomic.Value
+	openOnce       sync.Once
+	openRequests   chan streamRequest
+	openWG         sync.WaitGroup
+}
+
+type streamRequest struct {
+	ctx    context.Context
+	result chan streamResult
+}
+
+type streamResult struct {
+	stream Stream
+	err    error
+}
+
+func newYamuxSession(session *yamux.Session) *yamuxSession {
+	return &yamuxSession{Session: session}
 }
 
 // OpenStream 开一条出站逻辑流。
 func (s *yamuxSession) OpenStream() (Stream, error) {
-	st, err := s.Session.OpenStream()
-	if err != nil {
+	return s.OpenStreamContext(context.Background())
+}
+
+// OpenStreamContext 允许调用方取消排队；迟到的流由会话级开流任务回收。
+func (s *yamuxSession) OpenStreamContext(ctx context.Context) (Stream, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return yamuxStream{st}, nil
+	s.openOnce.Do(func() {
+		s.openRequests = make(chan streamRequest)
+		s.openWG.Add(1)
+		routine.Go("tcp.yamux.open", s.openLoop)
+	})
+	request := streamRequest{ctx: ctx, result: make(chan streamResult)}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.CloseChan():
+		return nil, yamux.ErrSessionShutdown
+	case s.openRequests <- request:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.CloseChan():
+		return nil, yamux.ErrSessionShutdown
+	case result := <-request.result:
+		return result.stream, result.err
+	}
+}
+
+func (s *yamuxSession) openLoop() {
+	defer s.openWG.Done()
+	// 异常退出也关闭会话，让等待结果的调用者解除阻塞。
+	defer func() { _ = s.Session.Close() }()
+	for {
+		var request streamRequest
+		select {
+		case <-s.CloseChan():
+			return
+		case request = <-s.openRequests:
+		}
+		if request.ctx.Err() != nil {
+			continue
+		}
+		// yamux 不支持取消 SYN 槽等待；每会话只保留一个任务，Close 负责等待它。
+		stream, err := s.Session.OpenStream()
+		var wrapped Stream
+		if stream != nil {
+			wrapped = yamuxStream{stream}
+		}
+		select {
+		case request.result <- streamResult{stream: wrapped, err: err}:
+		case <-request.ctx.Done():
+			if stream != nil {
+				_ = stream.SetDeadline(time.Now())
+				_ = stream.Close()
+			}
+		case <-s.CloseChan():
+			return
+		}
+	}
+}
+
+// Close 关闭会话并等待其开流任务退出。
+func (s *yamuxSession) Close() error {
+	err := s.Session.Close()
+	// 与首次开流共享 Once，确保 Wait 前已经完成 Add 或禁止启动。
+	s.openOnce.Do(func() {})
+	s.openWG.Wait()
+	return err
 }
 
 // AcceptStream 接受一条入站逻辑流：未设期限时阻塞等待，已设期限时用 context 限定。

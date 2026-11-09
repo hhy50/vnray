@@ -1,0 +1,63 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/admin/package-lock.json
+      - name: Build embedded admin UI
+        working-directory: web/admin
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check Go formatting
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.go' | xargs -0 -r gofmt -s -l > /tmp/unformatted-go.txt
+          if [ -s /tmp/unformatted-go.txt ]; then
+            cat /tmp/unformatted-go.txt
+            exit 1
+          fi
+      - name: Check client dependency boundary
+        run: |
+          set -euo pipefail
+          go list -buildvcs=false -deps -f '{{.ImportPath}}' ./cmd/client > /tmp/client-imports.txt
+          if grep -E '^(github.com/hhy50/vnray/(admin|internal/(core|store|plugin|inbound|sqliteweb))(/|$)|gorm.io/|github.com/glebarez/sqlite|modernc.org/sqlite)' /tmp/client-imports.txt; then
+            echo 'client imports server-only packages' >&2
+            exit 1
+          fi
+      - name: Check internal package boundaries
+        run: python3 .github/scripts/check-dependencies.py
+      - name: Go vet
+        run: go vet ./...
+      - name: Check Go module metadata
+        run: go mod tidy -diff
+      - name: Check new godoc findings
+        run: |
+          set -euo pipefail
+          go run github.com/mgechev/revive@v1.16.0 -config .github/revive.toml -formatter json ./... > /tmp/revive.json
+          python3 .github/scripts/check-revive-baseline.py /tmp/revive.json .github/revive-baseline.json
+      - name: Race tests
+        run: go test -race ./... -timeout=10m
+      - name: Repeat transport concurrency tests
+        run: go test -short ./internal/transport -count=20 -timeout=180s

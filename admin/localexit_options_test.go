@@ -5,6 +5,7 @@ package admin
 // 下拉里也就选不到——这是「出口选择本机」最容易让人困惑的地方，先固定住现状。
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,13 +34,13 @@ func localOptionLabel(opts []apiClientOption) (string, bool) {
 // 没有这一项（用户无从选择），登记后带「本机」标注。
 func TestClientOptionsLocalExit(t *testing.T) {
 	s := newTestAdminService(t)
-	s.opts.Bindings = NewBindings(s.opts.Store)
+	s.opts.Bindings = NewBindings(s.opts.Store.(store.Store))
 
 	if _, ok := localOptionLabel(s.clientOptions(zhRequest())); ok {
 		t.Fatal("未登记 server:self 时不该出现本机出口选项")
 	}
 
-	if err := s.opts.Bindings.SetClient(ClientBinding{
+	if err := s.opts.Bindings.(*Bindings).SetClient(context.Background(), ClientBinding{
 		ClientKey:  transport.LocalClientName,
 		ClientType: store.ClientTypeLocal,
 	}); err != nil {
@@ -58,8 +59,8 @@ func TestClientOptionsLocalExit(t *testing.T) {
 // 会话承载，本机出口不参与，混进去只会在保存后被判无效。
 func TestPortMapExcludesLocalExit(t *testing.T) {
 	s := newTestAdminService(t)
-	s.opts.Bindings = NewBindings(s.opts.Store)
-	if err := s.opts.Bindings.SetClient(ClientBinding{
+	s.opts.Bindings = NewBindings(s.opts.Store.(store.Store))
+	if err := s.opts.Bindings.(*Bindings).SetClient(context.Background(), ClientBinding{
 		ClientKey:  transport.LocalClientName,
 		ClientType: store.ClientTypeLocal,
 	}); err != nil {

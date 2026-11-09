@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/shadowsocks"
 )
@@ -25,7 +24,7 @@ func ssLink(target shareTarget, method, password, name string) string {
 }
 
 func (s *AdminService) ssShareSettings() (int, string) {
-	method := plugin.DefaultSSMethod
+	method := shadowsocks.DefaultMethod
 	if s.opts.Plugins == nil {
 		return 0, method
 	}

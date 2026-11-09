@@ -31,32 +31,29 @@ func (s *sqlStore) GORM() *gorm.DB { return s.db }
 
 // Open 打开一个 SQL 存储；driver 支持 sqlite 与 mysql，dsn 语义由驱动决定。
 // 返回值统一包一层 traceStore，查询日志只在那一处产生。
-func Open(ctx context.Context, driver, dsn string) (Store, error) {
-	var st Store
+func Open(ctx context.Context, driver, dsn string, opts ...OpenOption) (Store, error) {
+	var options openOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	var st *sqlStore
 	var err error
 	switch driver {
 	case "sqlite", "sqlite3":
-		st, err = openSQLite(ctx, dsn)
+		st, err = openSQLite(dsn)
 	case "mysql":
-		st, err = openMySQL(ctx, dsn)
+		st, err = openMySQL(dsn)
 	default:
 		return nil, fmt.Errorf("store: unknown driver %q (want sqlite or mysql)", driver)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return tracedStore{Store: st}, nil
-}
-
-// newSQLStore 用已打开的 GORM 连接构造存储：AutoMigrate 保证全部表存在。
-// 项目未上线，不保留历史结构的升级/迁移 DDL——表结构直接改，旧库删掉重建。
-func newSQLStore(ctx context.Context, db *gorm.DB) (*sqlStore, error) {
-	if err := db.WithContext(ctx).AutoMigrate(&UserBinding{}, &ClientBinding{}, &authKeyModel{},
-		&PluginState{}, &userTrafficModel{}, &clientTrafficModel{}, &PortMapping{},
-		&serviceSettingsModel{}); err != nil {
-		return nil, fmt.Errorf("store: migrate tables: %w", err)
+	if err := st.initialize(ctx, options.initial); err != nil {
+		_ = st.Close()
+		return nil, err
 	}
-	return &sqlStore{db: db}, nil
+	return tracedStore{Store: st}, nil
 }
 
 func (s *sqlStore) SetUser(ctx context.Context, b UserBinding) error {
@@ -134,6 +131,37 @@ func (s *sqlStore) GetClient(ctx context.Context, key string) (ClientBinding, bo
 		return ClientBinding{}, false, fmt.Errorf("store: get client binding: %w", err)
 	}
 	return m, true, nil
+}
+
+// SetClientReportedConfig 更新客户端上报列。
+func (s *sqlStore) SetClientReportedConfig(ctx context.Context, key, reported string) error {
+	return s.setClientConfigColumn(ctx, key, reported, "config")
+}
+
+// SetClientServerConfig 更新运维配置列。
+func (s *sqlStore) SetClientServerConfig(ctx context.Context, key, settings string) error {
+	return s.setClientConfigColumn(ctx, key, settings, "server_config")
+}
+
+func (s *sqlStore) setClientConfigColumn(ctx context.Context, key, value, column string) error {
+	b := ClientBinding{Key: key, Type: ClientTypeProxy}
+	if err := validateClient(b); err != nil {
+		return err
+	}
+	if column == "config" {
+		b.Config = value
+	} else {
+		b.ServerConfig = value
+	}
+	b.CreatedAt = time.Now()
+	b.UpdatedAt = b.CreatedAt
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "client_key"}},
+		DoUpdates: clause.AssignmentColumns([]string{column, "updated_at"}),
+	}).Create(&b).Error; err != nil {
+		return fmt.Errorf("store: set client %s: %w", column, err)
+	}
+	return nil
 }
 
 func (s *sqlStore) DeleteClient(ctx context.Context, key string) (bool, error) {
@@ -233,6 +261,34 @@ func (s *sqlStore) addTraffic(ctx context.Context, model any, where string, args
 	return nil
 }
 
+// AddTrafficBatch 在单个事务里累加整批流量：逐条走独立事务时，SQLite 的每次提交
+// 都是一次 fsync，一轮落库的代价随用户数线性增长。任一条失败整体回滚，调用方重试整批。
+func (s *sqlStore) AddTrafficBatch(ctx context.Context, batch TrafficBatch) error {
+	if batch.Empty() {
+		return nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txStore := &sqlStore{db: tx}
+		for _, d := range batch.Users {
+			if err := txStore.AddUserTraffic(ctx, d.Protocol, d.Key, d.Up, d.Down); err != nil {
+				return err
+			}
+		}
+		for _, d := range batch.Clients {
+			if err := txStore.AddClientTraffic(ctx, d.Key, d.Up, d.Down); err != nil {
+				return err
+			}
+		}
+		for _, d := range batch.PortMappings {
+			if err := txStore.AddPortMappingTraffic(ctx, d.ID, d.Up, d.Down); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AddUserTraffic 把一次增量累加进用户流量表。
 func (s *sqlStore) AddUserTraffic(ctx context.Context, p Protocol, key string, up, down int64) error {
 	if key == "" {
 		return fmt.Errorf("store: user traffic requires key")
@@ -367,6 +423,25 @@ func (s *sqlStore) ListPortMappings(ctx context.Context) ([]PortMapping, error) 
 	return models, nil
 }
 
+// AddPortMappingTraffic 原子累加现存映射的流量。
+func (s *sqlStore) AddPortMappingTraffic(ctx context.Context, id uint64, up, down int64) error {
+	if id == 0 || up < 0 || down < 0 {
+		return fmt.Errorf("store: invalid port mapping traffic")
+	}
+	if up == 0 && down == 0 {
+		return nil
+	}
+	// 只更新现存映射，避免删除后在途连接的迟到增量重新创建记录。
+	err := s.db.WithContext(ctx).Model(&PortMapping{}).Where("id = ?", id).UpdateColumns(map[string]any{
+		"up_bytes":   gorm.Expr("up_bytes + ?", up),
+		"down_bytes": gorm.Expr("down_bytes + ?", down),
+	}).Error
+	if err != nil {
+		return fmt.Errorf("store: add port mapping traffic: %w", err)
+	}
+	return nil
+}
+
 func (s *sqlStore) Close() error {
 	if sqlDB, err := s.db.DB(); err == nil {
 		return sqlDB.Close()
@@ -411,7 +486,7 @@ func (s *sqlStore) ListPlugins(ctx context.Context) ([]PluginState, error) {
 	return rows, nil
 }
 
-// GetServiceSettings 实现 Store：读取全部运行时配置段（段名 → 原文，含初始化标记行）。
+// GetServiceSettings 实现 Store：读取全部运行时配置段（段名 → 原文）。
 func (s *sqlStore) GetServiceSettings(ctx context.Context) (map[string]string, error) {
 	var rows []serviceSettingsModel
 	if err := s.db.WithContext(ctx).Find(&rows).Error; err != nil {

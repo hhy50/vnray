@@ -24,10 +24,9 @@ const (
 	Ping Type = 4
 	// Pong 是 client→server 的心跳应答，载荷原样回显 Ping 的时间戳。
 	Pong Type = 5
-	// Auth 是 client→server 的认证帧，载荷为密钥与客户端自报信息的 JSON。
+	// Auth 是已退役的客户端认证帧编号，永不复用。
 	Auth Type = 6
-	// AuthResult 是 server→client 的认证应答，载荷为通过与否及拒绝原因的 JSON；
-	// 同时用作 UserAuth 的应答，用户路径还回带绑定的客户端配置。
+	// AuthResult 是 UserAuth 的应答，回带绑定的客户端配置。
 	AuthResult Type = 7
 	// Forward 是用户→server 的转发请求，载荷以地址块开头；
 	// 用户身份在会话级 UserAuth 已确认，转发按其绑定的客户端选路。
@@ -46,8 +45,12 @@ const (
 	// 承载裸字节。数据面与 Tunnel 完全同构，仅拨号语义不同（见 ADR 0030）。
 	PortMap Type = 13
 	// ConfigPush 是 server→client 的全量配置下发：载荷为 PushConfig JSON 快照，
-	// 客户端分别替换独立与全局规则（见 ADR 0042），重连时也随 AuthResult 携带。
+	// 客户端分别替换独立与全局规则（见 ADR 0042），上报应答也携带相同快照。
 	ConfigPush Type = 14
+	// ConfigReport 是 client→server 的配置上报。
+	ConfigReport Type = 15
+	// ConfigReportResult 是配置上报应答，携带服务端全量配置。
+	ConfigReportResult Type = 16
 )
 
 // header 是固定头的内存视图（10 字节：魔数2+类型2+标志1+保留3+载荷长2）。
@@ -71,7 +74,7 @@ func protocolError(format string, args ...any) error {
 // validType 判断类型是否为已定义的枚举。
 func validType(t Type) bool {
 	switch t {
-	case Ping, Pong, Auth, AuthResult, Forward, ForwardResult, Tunnel, TunnelResult, UserAuth, PortMap, ConfigPush:
+	case Ping, Pong, AuthResult, Forward, ForwardResult, Tunnel, TunnelResult, UserAuth, PortMap, ConfigPush, ConfigReport, ConfigReportResult:
 		return true
 	default:
 		return false

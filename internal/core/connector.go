@@ -2,39 +2,36 @@ package core
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
-	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/routine"
-	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
 )
 
-// SessionConfig 是握手期要用的运维配置来源（由 admin.Bindings 实现）：
+// SessionConfig 是握手期要用的运维配置来源（由 access.Bindings 实现）：
 // 用户与客户端的日志级别在这里取，客户端上报的配置快照与接入密钥的范围校验也经它；
 // 为 nil 时用默认日志级别、不持久化上报快照、按配置文件密钥校验。
 type SessionConfig interface {
-	UserConfig(p store.Protocol, key string) (store.UserConfig, bool)
-	ClientLogLevel(clientKey string) string
-	ClientConcurrency(clientKey string) int
-	SaveClientReportedConfig(clientKey, reported string) error
-	// PushConfig 返回服务端下发给该客户端的全量配置快照（随认证应答携带）。
-	PushConfig(clientKey string) protocol.PushConfig
+	// ClientRuntime 一次返回该客户端的日志级别、并发上限与待下发的配置快照。
+	ClientRuntime(context.Context, string) transport.ClientRuntime
+	SaveClientReportedConfig(context.Context, string, string) error
 	// MatchClientAuthKey 按范围密钥表判定客户端认证；configured 为 false 表示
 	// 表为空（未配置任何密钥），调用方回退到配置文件的共享密钥。
-	MatchClientAuthKey(clientName, key string) (configured, ok bool)
+	MatchClientAuthKey(context.Context, string, string) (configured, ok bool)
 	// LookupTransportKey returns configured=true even when a managed key cannot be resolved.
 	LookupTransportKey(context.Context, authkey.ID) (authkey.Key, bool, error)
 }
 
-// ConnectorService 是数据面服务：客户端与用户共用主端口，按握手首帧区分角色。
+// ConnectorService 提供客户端主端口与用户插件的会话处理。
 // 它把认证与流处理委托给会话管理器（认证成功后由 SessionManager 登记），并驱动心跳、
 // 把用户的转发流桥接到其绑定的客户端。会话登记表由 SessionManager 持有，本服务不另存副本。
 type ConnectorService struct {
@@ -48,6 +45,10 @@ type ConnectorService struct {
 	// heartbeat 是当前心跳策略，运行期可经 ApplyHeartbeat 热改；heartbeatReload 唤醒调度协程。
 	heartbeat       atomic.Pointer[HeartbeatOptions]
 	heartbeatReload chan struct{}
+	runCtx          context.Context
+	cancel          context.CancelFunc
+	heartbeatDone   chan struct{}
+	pingWG          sync.WaitGroup
 	// sessionCfg 与 traffic 由装配层注入；为 nil 时用默认日志级别、不落库流量。
 	sessionCfg SessionConfig
 	traffic    *traffic.Meter
@@ -142,17 +143,44 @@ func (s *ConnectorService) Sessions() *transport.SessionManager { return s.sessi
 
 // Start 启动接入，并以组件 ctx 驱动心跳调度。
 func (s *ConnectorService) Start(ctx context.Context) error {
-	if err := s.server.Start(ctx); err != nil {
+	if s.runCtx != nil {
+		return errors.New("connector: already started")
+	}
+	s.runCtx, s.cancel = context.WithCancel(ctx)
+	if err := s.server.Start(s.runCtx); err != nil {
+		s.cancel()
+		s.runCtx = nil
 		return err
 	}
-	routine.Go("core.connector.heartbeat", func() { s.runHeartbeatScheduler(ctx) })
+	s.heartbeatDone = make(chan struct{})
+	routine.Go("core.connector.heartbeat", func() {
+		defer close(s.heartbeatDone)
+		s.runHeartbeatScheduler(s.runCtx)
+		s.pingWG.Wait()
+	})
 	return nil
+}
+
+func (s *ConnectorService) context() context.Context {
+	return s.runCtx
 }
 
 // Drain 实现 extension.Drainer：关监听，再由管理器关掉全部已授权会话并停止登记。
 func (s *ConnectorService) Drain(ctx context.Context) error {
+	cancel, done := s.cancel, s.heartbeatDone
+	if cancel != nil {
+		cancel()
+	}
 	err := s.server.Stop(ctx)
 	s.sessions.Close()
+	err = errors.Join(err, s.server.Drain(ctx))
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			err = errors.Join(err, ctx.Err())
+		}
+	}
 	return err
 }
 
@@ -162,12 +190,10 @@ func clientOf(info *tcp.SessionInfo) *transport.Session {
 	return client
 }
 
-// onStreamOpen 是注入给会话管理器的流处理回调：用户会话的流交给转发桥（阻塞该流
-// 整个生命周期）；客户端会话不应有入站流，记告警后让事件循环关掉它。
+// onStreamOpen 分派客户端配置上报与用户转发流。
 func (s *ConnectorService) onStreamOpen(info *tcp.SessionInfo, stream tcp.Stream) error {
-	if info.Kind != tcp.KindUser {
-		logging.Warnf("unexpected inbound stream, remote=%s", stream.RemoteAddr().String())
-		return nil
+	if info.Kind == tcp.KindClient {
+		return s.handleClientReport(info, stream)
 	}
 	if s.hub == nil {
 		logging.Warnf("user stream without forward hub, remote=%s", stream.RemoteAddr().String())
@@ -176,6 +202,6 @@ func (s *ConnectorService) onStreamOpen(info *tcp.SessionInfo, stream tcp.Stream
 	// 用户会话的 Meta 是握手时记下的 UserMeta：限速与审计按 user_key 标识用户，
 	// 出站规则按其中记下的规则名判定。
 	meta, _ := info.Meta.(transport.UserMeta)
-	s.hub.handleUserStream(info.Log, meta.Key, meta.Rule, info.Name, stream, info.Session.CloseChan())
+	s.hub.handleUserStream(info.Context, info.Log, meta.Key, meta.Rule, info.Name, stream)
 	return nil
 }

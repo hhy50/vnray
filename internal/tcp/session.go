@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"context"
 	"net"
 	"time"
 
@@ -22,7 +23,33 @@ type Session interface {
 
 type connectionSession struct {
 	Session
-	conn net.Conn
+	conn   net.Conn
+	cancel context.CancelFunc
+}
+
+func (s *connectionSession) Close() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return s.Session.Close()
+}
+
+// OpenStreamContext 使用后端的可取消开流能力。
+func OpenStreamContext(ctx context.Context, session Session) (Stream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if opener, ok := session.(interface {
+		OpenStreamContext(context.Context) (Stream, error)
+	}); ok {
+		return opener.OpenStreamContext(ctx)
+	}
+	return session.OpenStream()
+}
+
+// OpenStreamContext 保留连接包装层下的可取消开流能力。
+func (s *connectionSession) OpenStreamContext(ctx context.Context) (Stream, error) {
+	return OpenStreamContext(ctx, s.Session)
 }
 
 // Connection returns the connection used by a server-side session, or nil.
@@ -46,7 +73,7 @@ type Stream interface {
 type Kind uint8
 
 const (
-	// KindClient 是主动发起请求的一端：握手发 Auth 帧认证共享密钥。
+	// KindClient 是通过安全握手并完成首次配置上报的内网客户端。
 	KindClient Kind = iota + 1
 	// KindUser 是转发用户：握手发 UserAuth 帧出示 user_key。
 	KindUser
@@ -54,6 +81,8 @@ const (
 
 // SessionInfo 是一条已建立会话的元数据：握手通过后由 Server 登记，会话终结时移除。
 type SessionInfo struct {
+	// Context 在会话终止或所属服务取消时结束。
+	Context context.Context
 	// Session 是底层会话。
 	Session Session
 	// Remote 是对端地址文本。

@@ -1,4 +1,4 @@
-package plugin
+package inbound
 
 // vless 用户把出口绑到保留名 server:self 时，流量要经服务端本机出口直接出站，
 // 而不是走远程客户端会话。这条路径此前没有任何覆盖：插件只依赖 ExitResolver
@@ -84,7 +84,7 @@ func freePluginPort(t *testing.T) int {
 // 两个端口都必须是合法值，否则 Enable 直接拒绝。
 func startVLESSInbound(t *testing.T, exits transport.ExitResolver) (*V2RayPlugin, int) {
 	t.Helper()
-	p := newV2RayPlugin(seedTestStore(t), nil, exits, nil)
+	p := NewV2RayPlugin(seedTestStore(t), nil, exits, nil)
 	vmessPort, vlessPort := freePluginPort(t), freePluginPort(t)
 	if err := p.Enable(context.Background(), map[string]string{
 		"vmess_port": strconv.Itoa(vmessPort),

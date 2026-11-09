@@ -4,6 +4,7 @@ package admin
 // rule.<name>），判定也在服务端做；这里只做增删改查。
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -19,9 +20,9 @@ type RuleSettings interface {
 	// Exists 报告规则名是否已定义。
 	Exists(name string) bool
 	// SaveRule 校验并落库一条规则，成功后对数据面即时生效。
-	SaveRule(name string, r rule.Rule) error
+	SaveRule(ctx context.Context, name string, r rule.Rule) error
 	// DeleteRule 删除一条自定义规则。
-	DeleteRule(name string) error
+	DeleteRule(ctx context.Context, name string) error
 }
 
 // apiRuleDTO 是管理台的规则视图。
@@ -70,7 +71,7 @@ func (s *AdminService) apiRuleSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item := rule.Rule{Reject: in.Reject, Direct: in.Direct}
-	if err := s.opts.Rules.SaveRule(name, item); err != nil {
+	if err := s.opts.Rules.SaveRule(r.Context(), name, item); err != nil {
 		logging.Warn("admin: save rule failed", "rule", name, "err", err)
 		apiFailKey(w, r, http.StatusBadRequest, msgSaveFailedDetail, err)
 		return
@@ -91,7 +92,7 @@ func (s *AdminService) apiRuleDelete(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgRuleNameInvalid, err)
 		return
 	}
-	if err := s.opts.Rules.DeleteRule(name); err != nil {
+	if err := s.opts.Rules.DeleteRule(r.Context(), name); err != nil {
 		logging.Warn("admin: delete rule failed", "rule", name, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
 		return

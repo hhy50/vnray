@@ -104,7 +104,8 @@ func TestPortMapEndToEnd(t *testing.T) {
 	}
 	defer svc.Drain(context.Background())
 
-	pm := portmap.NewManager(sessions, st, meter, limits)
+	pm := portmap.NewManager(ctx, sessions, st, meter, limits)
+	defer pm.Drain(context.Background())
 	if err := pm.Start(ctx); err != nil {
 		t.Fatalf("start portmap manager: %v", err)
 	}
@@ -158,6 +159,28 @@ func TestPortMapEndToEnd(t *testing.T) {
 	}
 	pm.Sync(ctx)
 	tlsRoundTrip(t, remotePort, "hello-tls-portmap")
+	wantTraffic := int64(len("hello-portmap") + len("hello-tls-portmap"))
+	stats := meter.PortMappingStats(1)
+	clientStats := meter.ClientStats(clientName)
+	deadline = time.Now().Add(5 * time.Second)
+	for stats.UpWrite.Load() != wantTraffic || stats.DownWrite.Load() != wantTraffic ||
+		clientStats.UpWrite.Load() != wantTraffic || clientStats.DownWrite.Load() != wantTraffic {
+		if time.Now().After(deadline) {
+			t.Fatalf("mapping traffic = %d/%d, want %d/%d", stats.UpWrite.Load(), stats.DownWrite.Load(), wantTraffic, wantTraffic)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	meter.Flush(ctx, st)
+	meter.Flush(ctx, st)
+	saved, ok, err = st.GetPortMapping(ctx, 1)
+	if err != nil || !ok || saved.Up != wantTraffic || saved.Down != wantTraffic {
+		t.Fatalf("persisted mapping traffic = %+v, ok=%v err=%v", saved, ok, err)
+	}
+	clientTraffic, err := st.ListClientTraffic(ctx)
+	if err != nil || len(clientTraffic) != 1 || clientTraffic[0].Key != clientName ||
+		clientTraffic[0].Up != wantTraffic || clientTraffic[0].Down != wantTraffic {
+		t.Fatalf("client traffic = %+v, err=%v", clientTraffic, err)
+	}
 
 	// 改限速 → Sync 热更新注册表速率（在途桶原地变速，监听器不重建）。
 	saved, ok, err = st.GetPortMapping(ctx, 1)
@@ -185,6 +208,10 @@ func TestPortMapEndToEnd(t *testing.T) {
 	pm.Sync(ctx)
 	if len(pm.ListeningIDs()) != 0 {
 		t.Fatalf("listener still running after disable: %v", pm.ListeningIDs())
+	}
+	saved, ok, err = st.GetPortMapping(ctx, 1)
+	if err != nil || !ok || saved.Up != wantTraffic || saved.Down != wantTraffic {
+		t.Fatalf("mapping traffic lost after config changes: %+v, ok=%v err=%v", saved, ok, err)
 	}
 	if conn, err := net.DialTimeout("tcp",
 		net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort)), time.Second); err == nil {

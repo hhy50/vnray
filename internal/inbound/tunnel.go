@@ -1,4 +1,4 @@
-package plugin
+package inbound
 
 // tunnel.go — v2ray 插件两条入站（vmess / vless）共用的隧道装配：绑定客户端查找、
 // 限速/统计选项汇总、单连接搬运与 mux 主连接服务。两个协议只在请求头编码上不同，
@@ -6,6 +6,7 @@ package plugin
 // （mux 主连接），限速与统计都按 (协议, uuid) 口径。
 
 import (
+	"context"
 	"net"
 	"time"
 
@@ -24,7 +25,9 @@ import (
 // relayDeps 汇总两个入站共用的装配件：用户表、会话表、限速与流量记账。
 // proto 是本次连接的协议（vmess / vless），限速与流量统计都按它命名身份。
 type relayDeps struct {
+	ctx     context.Context
 	users   UserStore
+	rules   RuleEvaluator
 	exits   transport.ExitResolver
 	limits  *ratelimit.Registry
 	traffic *traffic.Meter
@@ -60,7 +63,7 @@ func (d relayDeps) boundClient(log *logging.Scoped, proto, client, target string
 // options 汇总该 uuid 的限速与流量统计选项；跨 mux 子连接合计，与单连接共用
 // 同一对桶。
 func (d relayDeps) options(user, client string) transport.ProxyOptions {
-	var o transport.ProxyOptions
+	o := transport.ProxyOptions{Context: d.ctx}
 	if d.limits != nil {
 		pair := d.limits.Pair(ratelimit.Identity(d.proto, user))
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats
@@ -81,6 +84,13 @@ const udpIdle = 2 * time.Minute
 func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target dispatch.Destination, network string, conn net.Conn) {
 	proto := string(d.proto)
 	tgt := target.String()
+	policy := userPolicy{users: d.users, rules: d.rules, proto: d.proto, key: id.Key}
+	direct, err := policy.check(d.ctx, target.Host)
+	if err != nil {
+		log.Info(proto+": destination denied", "client", id.Client, "target", tgt, "err", err)
+		_ = conn.Close()
+		return
+	}
 	sess := d.boundClient(log, proto, id.Client, tgt)
 	if sess == nil {
 		_ = conn.Close()
@@ -89,14 +99,14 @@ func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target 
 	// 用户级并发：占一个并发位再建隧道，超限排队。
 	if d.limits != nil {
 		gate := d.limits.Gate(ratelimit.Identity(d.proto, id.Key))
-		if err := gate.Acquire(nil); err != nil {
+		if err := acquireUserGate(d.ctx, gate); err != nil {
 			log.Warn(proto+": user concurrency limit reached", "client", id.Client, "target", tgt, "err", err)
 			_ = conn.Close()
 			return
 		}
 		defer gate.Release()
 	}
-	tunnel, err := sess.OpenTunnel(target, protocol.TunnelRequest{Origin: proto, Network: network})
+	tunnel, err := transport.OpenTunnel(d.ctx, sess, target, protocol.TunnelRequest{Origin: proto, Network: network, Direct: direct})
 	if err != nil {
 		log.Warn(proto+": open tunnel failed", "client", id.Client, "target", tgt, "err", err)
 		_ = conn.Close()
@@ -136,10 +146,11 @@ func serveMuxConn(d relayDeps, log *logging.Scoped, id identity.Identity, conn n
 	srv := mux.NewServer(&muxTunnel{
 		log: log, client: id.Client, sess: sess,
 		limits: d.limits, identity: ratelimit.Identity(d.proto, id.Key),
-		opts: d.options(id.Key, id.Client),
+		opts:   d.options(id.Key, id.Client),
+		policy: userPolicy{users: d.users, rules: d.rules, proto: d.proto, key: id.Key},
 	})
 	log.Info(proto+": mux session started", "client", id.Client, "target", vmess.MuxCoolHost)
-	if err := srv.Serve(conn); err != nil {
+	if err := srv.ServeContext(d.ctx, conn); err != nil {
 		log.Warn(proto+": mux session ended",
 			"client", id.Client, "target", vmess.MuxCoolHost, "err", err)
 		return
@@ -155,23 +166,38 @@ type muxTunnel struct {
 	limits   *ratelimit.Registry
 	identity string
 	opts     transport.ProxyOptions
+	policy   userPolicy
 }
 
 // Open 开隧道并双向搬运；返回时子连接结束，mux.Conn 随之发出 End 帧。
 // 建连失败时以带 OptionError 的 End 收尾，对端立即知道该子连接未成立。
 func (m *muxTunnel) Open(target mux.Target, conn *mux.Conn) {
+	ctx, cancel := context.WithCancel(conn.Context())
+	defer cancel()
+	if target.Network == "udp" {
+		m.openUDP(ctx, target, conn)
+		return
+	}
+	// mux 主连接没有真实目标，必须逐条子连接检查当前用户规则。
+	direct, err := m.policy.check(ctx, target.Host)
+	if err != nil {
+		m.log.Info("mux: destination denied", "client", m.client, "target", target.String(), "err", err)
+		_ = conn.CloseWithError()
+		return
+	}
 	// 用户级并发：每条 mux 子连接占一个并发位，超限排队。
 	if m.limits != nil {
-		if err := m.limits.Gate(m.identity).Acquire(nil); err != nil {
+		gate := m.limits.Gate(m.identity)
+		if err := acquireUserGate(ctx, gate); err != nil {
 			m.log.Warn("mux: user concurrency limit reached", "client", m.client, "target", target.String(), "err", err)
 			_ = conn.CloseWithError()
 			return
 		}
-		defer m.limits.Gate(m.identity).Release()
+		defer gate.Release()
 	}
-	tunnel, err := m.sess.OpenTunnel(
+	tunnel, err := transport.OpenTunnel(ctx, m.sess,
 		dispatch.Destination{Host: target.Host, Port: target.Port, Network: target.Network},
-		protocol.TunnelRequest{Origin: "vmess-mux", Network: target.Network})
+		protocol.TunnelRequest{Origin: "vmess-mux", Network: target.Network, Direct: direct})
 	if err != nil {
 		m.log.Warn("mux: open tunnel failed",
 			"client", m.client, "target", target.String(), "err", err)
@@ -179,12 +205,9 @@ func (m *muxTunnel) Open(target mux.Target, conn *mux.Conn) {
 		return
 	}
 	m.log.Info("mux: tunnel established", "client", m.client, "target", target.String(), "network", target.Network)
-	if target.Network == "udp" {
-		transport.ProxyDatagramBidirectional(
-			conn, protocol.NewDatagramConn(tunnel), pumpMux+".udp", udpIdle, m.opts)
-	} else {
-		transport.ProxyBidirectional(conn, tunnel, pumpMux, m.opts)
-	}
+	opts := m.opts
+	opts.Context = ctx
+	transport.ProxyBidirectional(conn, tunnel, pumpMux, opts)
 	_ = conn.Close()
 	_ = tunnel.Close()
 	m.log.Info("mux: tunnel closed", "client", m.client, "target", target.String())

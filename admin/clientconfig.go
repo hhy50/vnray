@@ -55,9 +55,10 @@ func (s *AdminService) apiGlobalClientConfigSave(w http.ResponseWriter, r *http.
 		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
-	next := s.currentServiceSettings()
-	next.GlobalClient = global
-	if err := s.opts.Settings.Apply(next); err != nil {
+	if err := s.updateServiceSettings(r.Context(), func(next *config.ServiceSettings) error {
+		next.GlobalClient = global
+		return nil
+	}); err != nil {
 		logging.Error("admin: client config apply failed", "err", err)
 		apiFailKey(w, r, http.StatusBadRequest, msgSaveFailedDetail, err)
 		return

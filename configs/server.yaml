@@ -1,7 +1,6 @@
 server:
   listen: 0.0.0.0:9000
   auth:
-    # 留空时仅接受管理台生成的密钥；无管理台时填入 vnserver keygen 的输出。
     key: ""
 
 admin:

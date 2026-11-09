@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/rule"
 	"github.com/hhy50/vnray/internal/store"
+	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/transport"
 	"github.com/hhy50/vnray/internal/userclient"
 )
@@ -18,7 +20,8 @@ import (
 // TestLoadRuleSetSeedsDefault 断言首次启动只种 default，且删掉后重启不会复活。
 func TestLoadRuleSetSeedsDefault(t *testing.T) {
 	ctx := context.Background()
-	st := testStore(t)
+	cfg := config.DefaultServer()
+	st := initializedTestStore(t, &cfg)
 
 	rs := loadRuleSet(ctx, st)
 	if !rs.Exists(rule.NameDefault) {
@@ -36,7 +39,7 @@ func TestLoadRuleSetSeedsDefault(t *testing.T) {
 	}
 
 	// 改名单后重新加载：库里的值必须胜过预置值。
-	if err := rs.SaveRule(rule.NameDefault, rule.Rule{Reject: []string{"bad.example"}}); err != nil {
+	if err := rs.SaveRule(context.Background(), rule.NameDefault, rule.Rule{Reject: []string{"bad.example"}}); err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
 	if got, _ := loadRuleSet(ctx, st).Verdict(rule.NameDefault, "bad.example"); got != rule.Reject {
@@ -44,10 +47,10 @@ func TestLoadRuleSetSeedsDefault(t *testing.T) {
 	}
 
 	// 表里还有别的规则时，删掉的 default 不会被补回来。
-	if err := rs.SaveRule("office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
+	if err := rs.SaveRule(context.Background(), "office", rule.Rule{Direct: []string{"*.cn"}}); err != nil {
 		t.Fatalf("save office: %v", err)
 	}
-	if err := rs.DeleteRule(rule.NameDefault); err != nil {
+	if err := rs.DeleteRule(context.Background(), rule.NameDefault); err != nil {
 		t.Fatalf("delete default: %v", err)
 	}
 	reloaded := loadRuleSet(ctx, st)
@@ -59,7 +62,7 @@ func TestLoadRuleSetSeedsDefault(t *testing.T) {
 	}
 
 	// 删光之后重启：预置只做一次，不会再冒出 default。
-	if err := reloaded.DeleteRule("office"); err != nil {
+	if err := reloaded.DeleteRule(context.Background(), "office"); err != nil {
 		t.Fatalf("delete office: %v", err)
 	}
 	again := loadRuleSet(ctx, st)
@@ -68,51 +71,12 @@ func TestLoadRuleSetSeedsDefault(t *testing.T) {
 	}
 }
 
-// TestLoadRuleSetMigratesLegacyKeys 断言旧前缀 user.rule.* 的行迁到 rule.* 并删掉旧行；
-// 新旧同时存在时以新键为准。
-func TestLoadRuleSetMigratesLegacyKeys(t *testing.T) {
-	ctx := context.Background()
-	st := testStore(t)
-	if err := st.SetServiceSettings(ctx, map[string]string{
-		"user.rule.default": `{"reject":["old.example"],"direct":[]}`,
-		"user.rule.office":  `{"reject":[],"direct":["*.legacy"]}`,
-		"rule.office":       `{"reject":[],"direct":["*.cn"]}`,
-	}); err != nil {
-		t.Fatalf("seed legacy keys: %v", err)
-	}
-
-	rs := loadRuleSet(ctx, st)
-	if got, _ := rs.Verdict(rule.NameDefault, "old.example"); got != rule.Reject {
-		t.Fatalf("migrated default verdict = %v, want reject", got)
-	}
-	// 新旧同名时以新键为准。
-	if got, _ := rs.Verdict("office", "www.cn"); got != rule.Direct {
-		t.Fatalf("conflicting rule should keep the new key, verdict = %v", got)
-	}
-	if got, _ := rs.Verdict("office", "www.legacy"); got != rule.Pass {
-		t.Fatalf("legacy value must not win, verdict = %v", got)
-	}
-
-	kv, err := st.GetServiceSettings(ctx)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	for _, key := range []string{"user.rule.default", "user.rule.office"} {
-		if _, ok := kv[key]; ok {
-			t.Fatalf("legacy key %q should be removed, got %v", key, kv)
-		}
-	}
-	if _, ok := kv[rule.Key("office")]; !ok {
-		t.Fatalf("rule.office should stay, got %v", kv)
-	}
-}
-
 // TestRuleSetSaveDelete 断言写路径：保存后即时生效、删除后回到放行（default 也能删）。
 func TestRuleSetSaveDelete(t *testing.T) {
 	ctx := context.Background()
 	rs := loadRuleSet(ctx, testStore(t))
 
-	if err := rs.SaveRule("cn", rule.Rule{
+	if err := rs.SaveRule(context.Background(), "cn", rule.Rule{
 		Direct: []string{"*.cn", "10.0.0.0/8"},
 		Reject: []string{"ads.cn"},
 	}); err != nil {
@@ -124,7 +88,7 @@ func TestRuleSetSaveDelete(t *testing.T) {
 	if got, _ := rs.Verdict("cn", "ads.cn"); got != rule.Reject {
 		t.Fatalf("verdict = %v, want reject", got)
 	}
-	if err := rs.DeleteRule("cn"); err != nil {
+	if err := rs.DeleteRule(context.Background(), "cn"); err != nil {
 		t.Fatalf("delete rule: %v", err)
 	}
 	if rs.Exists("cn") {
@@ -133,13 +97,13 @@ func TestRuleSetSaveDelete(t *testing.T) {
 	if got, _ := rs.Verdict("cn", "www.cn"); got != rule.Pass {
 		t.Fatalf("missing rule should pass, got %v", got)
 	}
-	if err := rs.DeleteRule(rule.NameDefault); err != nil {
+	if err := rs.DeleteRule(context.Background(), rule.NameDefault); err != nil {
 		t.Fatalf("default rule should be deletable: %v", err)
 	}
 	if rs.Exists(rule.NameDefault) {
 		t.Fatal("default rule should be gone after delete")
 	}
-	if err := rs.SaveRule("bad name", rule.Rule{}); err == nil {
+	if err := rs.SaveRule(context.Background(), "bad name", rule.Rule{}); err == nil {
 		t.Fatal("invalid rule name must be rejected")
 	}
 }
@@ -167,7 +131,7 @@ func TestUserRuleEnforcedOnForward(t *testing.T) {
 		t.Fatalf("seed user: %v", err)
 	}
 	rs := loadRuleSet(ctx, st)
-	if err := rs.SaveRule("office", rule.Rule{Reject: []string{"blocked.example"}}); err != nil {
+	if err := rs.SaveRule(context.Background(), "office", rule.Rule{Reject: []string{"blocked.example"}}); err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
 
@@ -190,7 +154,12 @@ func TestUserRuleEnforcedOnForward(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Drain(context.Background()) })
 
-	user, err := userclient.Dial(svc.Addr(), protocol.UserAuthRequest{Key: testUser}, nil, nil)
+	users := tcp.NewServer("127.0.0.1:0", inbound.NewVNRayUserListener(sessions, bindings, bindings, sessions))
+	if err := users.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = users.Stop(context.Background()) })
+	user, err := userclient.Dial(users.Addr(), protocol.UserAuthRequest{Key: testUser}, nil, nil)
 	if err != nil {
 		t.Fatalf("dial user: %v", err)
 	}

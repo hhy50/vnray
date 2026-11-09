@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/routine"
 )
 
-// Server 是事件驱动的多路复用监听器（功能级 extension.Feature）：打开监听、为每条连接
-// 建立会话并派发成对事件；会话登记由 SessionManager 负责，事件接收方在构造时给定。
+// Server 是事件驱动的多路复用监听器：打开监听、为每条连接建立会话并派发成对事件；
+// 会话登记由 SessionManager 负责，事件接收方在构造时给定。
 type Server struct {
 	addr          string
 	cfg           atomic.Pointer[SessionConfig]
@@ -20,8 +21,17 @@ type Server struct {
 	listener      EventListener
 	connHandshake func(context.Context, net.Conn) (net.Conn, error)
 
-	ln     atomic.Pointer[net.Listener]
-	closed atomic.Bool
+	ln        atomic.Pointer[net.Listener]
+	closed    atomic.Bool
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	watchers  sync.WaitGroup
+	wg        sync.WaitGroup
+	draining  bool
+	drainOnce sync.Once
+	waitOnce  sync.Once
+	drained   chan struct{}
 }
 
 // Option 覆盖监听器的可选参数。
@@ -64,7 +74,7 @@ func NewServer(addr string, listener EventListener, opts ...Option) *Server {
 	if muxer == nil {
 		muxer = DefaultMuxer()
 	}
-	s := &Server{addr: addr, muxer: muxer, listener: listener}
+	s := &Server{addr: addr, muxer: muxer, listener: listener, drained: make(chan struct{})}
 	s.connHandshake = o.connHandshake
 	s.cfg.Store(cfg)
 	return s
@@ -90,13 +100,35 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("tcp: listen %s: %w", s.addr, err)
 	}
+	return s.StartListener(ctx, ln)
+}
+
+// StartListener 接管已准备的监听器；失败时也负责关闭监听器。
+func (s *Server) StartListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return fmt.Errorf("tcp: nil listener")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() || s.draining {
+		_ = ln.Close()
+		return fmt.Errorf("tcp: server is stopped")
+	}
 	if !s.ln.CompareAndSwap(nil, &ln) {
-		_ = ln.Close() // 并发 Start：败者关闭自己刚开的监听
+		_ = ln.Close()
 		return fmt.Errorf("tcp: already started")
 	}
-
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.watchers.Add(1)
+	routine.Go("tcp.listener.cancel", func() {
+		defer s.watchers.Done()
+		<-s.ctx.Done()
+		_ = s.Stop(context.Background())
+	})
+	s.wg.Add(1)
 	routine.Go("tcp.eventloop", func() {
-		if err := s.serve(ctx); err != nil {
+		defer s.wg.Done()
+		if err := s.serve(s.ctx); err != nil {
 			logging.Errorf("tcp event loop stopped: %v", err)
 		}
 	})
@@ -114,15 +146,50 @@ func (s *Server) Addr() string {
 // Name 返回功能名，用于启停日志与诊断。
 func (s *Server) Name() string { return "tcp" }
 
-// Stop 关闭监听；幂等。ctx 未被使用（关闭监听不阻塞），参数只为满足 extension.Feature 契约。
+// Stop 关闭监听；幂等。ctx 未被使用（关闭监听不阻塞）。
 func (s *Server) Stop(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	s.waitOnce.Do(func() {
+		routine.Go("tcp.wait", func() {
+			s.wg.Wait()
+			if s.cancel != nil {
+				s.cancel()
+			}
+			s.watchers.Wait()
+			close(s.drained)
+		})
+	})
 	if lnp := s.ln.Load(); lnp != nil {
 		return (*lnp).Close()
 	}
 	return nil
+}
+
+// Done 在监听结束且全部握手、会话和流处理退出后关闭。
+func (s *Server) Done() <-chan struct{} { return s.drained }
+
+// Drain 关闭监听和全部连接，并等待握手及流处理退出。
+func (s *Server) Drain(ctx context.Context) error {
+	s.drainOnce.Do(func() {
+		s.mu.Lock()
+		s.draining = true
+		cancel := s.cancel
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = s.Stop(ctx)
+	})
+	select {
+	case <-s.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // EventListener 接收接入事件：先握手产出会话元数据，登记由 SessionManager 在会话
@@ -144,8 +211,10 @@ type EventListener interface {
 
 // serve 是 Accept 循环，为每条新连接建立会话并派发成对事件；监听关闭引起的错误视为正常退出。
 func (s *Server) serve(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	defer func() { _ = s.Stop(ctx) }()
+	// 停止接入会取消未完成的握手，已建立会话继续受服务 ctx 控制。
+	handshakeCtx, cancelHandshake := context.WithCancel(ctx)
+	defer cancelHandshake()
 	lnp := s.ln.Load()
 	if lnp == nil {
 		return fmt.Errorf("tcp: not started")
@@ -160,17 +229,41 @@ func (s *Server) serve(ctx context.Context) error {
 			}
 			return err
 		}
-		routine.Go("tcp.session", func() { s.serveSession(ctx, conn) })
+		s.mu.Lock()
+		if s.closed.Load() || s.draining || ctx.Err() != nil {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		routine.Go("tcp.session", func() {
+			defer s.wg.Done()
+			defer func() {
+				_ = conn.Close()
+			}()
+			s.serveSession(ctx, handshakeCtx, conn)
+		})
 	}
 }
 
 // serveSession 把一条已接受的连接转成多路复用会话并驱动其一生；
 // 只有握手通过并登记（OnSessionOpen）之后才派发流事件，握手失败只关会话、不发任何事件。
-func (s *Server) serveSession(ctx context.Context, conn net.Conn) {
+func (s *Server) serveSession(ctx, handshakeCtx context.Context, conn net.Conn) {
+	ctx, cancel := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	raw := conn
+	routine.Go("tcp.session.cancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		_ = raw.Close()
+	})
+	defer func() { cancel(); watcher.Wait() }()
 	listener := s.listener
 	r := conn.RemoteAddr()
 	if s.connHandshake != nil {
-		upgraded, err := s.connHandshake(ctx, conn)
+		upgraded, err := s.connHandshake(handshakeCtx, conn)
 		if err != nil {
 			_ = conn.Close()
 			logging.Warn("tcp: connection handshake rejected", "remote", r, "err", err)
@@ -185,17 +278,19 @@ func (s *Server) serveSession(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	session = &connectionSession{Session: session, conn: conn}
+	session = &connectionSession{Session: session, conn: conn, cancel: cancel}
 	info, err := listener.Handshake(session)
 	if err != nil {
 		logging.Warnf("tcp: handshake failed, remote=%s: %v", r, err)
 		_ = session.Close()
 		return
 	}
+	info.Context = ctx
 	defer func() {
+		cancel()
 		// 先等在途流事件派发完再发 session.close：保证关闭事件排在所有流事件之后。
 		logging.Warnf("tcp session closed, remote=%s", r)
-		listener.OnSessionClose(&info) // 登记的注销由 SessionManager 在此事件里完成
+		listener.OnSessionClose(&info)
 		_ = session.Close()
 	}()
 
@@ -203,12 +298,18 @@ func (s *Server) serveSession(ctx context.Context, conn net.Conn) {
 		logging.Errorf("tcp: on session open error: %v", err)
 		return
 	}
-	acceptStreams(listener, &info)
+	acceptStreams(cancel, listener, &info)
 }
 
 // acceptStreams 是会话内的 Accept 循环：为每条入站流派发一对事件，会话关闭即退出。
-func acceptStreams(listener EventListener, info *SessionInfo) {
+func acceptStreams(cancel context.CancelFunc, listener EventListener, info *SessionInfo) {
 	session := info.Session
+	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		_ = session.Close()
+		wg.Wait()
+	}()
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
@@ -220,7 +321,9 @@ func acceptStreams(listener EventListener, info *SessionInfo) {
 			_ = stream.Close()
 			return
 		}
+		wg.Add(1)
 		routine.Go("tcp.stream", func() {
+			defer wg.Done()
 			serveStream(listener, info, stream)
 		})
 	}
@@ -230,6 +333,7 @@ func acceptStreams(listener EventListener, info *SessionInfo) {
 func serveStream(listener EventListener, info *SessionInfo, stream Stream) {
 	// 接受与派发之间会话可能恰好关闭，同样不再派发事件。
 	if info.Session.IsClosed() {
+		_ = stream.Close()
 		return
 	}
 	defer func() {

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"io"
 	"net"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
+	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
@@ -19,7 +21,7 @@ const portMapDialTimeout = 4 * time.Second
 
 // handlePortMap 处理一条端口映射流：首帧载荷为地址块（客户端侧本地目标），
 // 本地拨号成功回 OK 的 TunnelResult，之后该流承载裸字节直至任一侧关闭。
-func (c *Client) handlePortMap(stream tcp.Stream, first *protocol.Frame) {
+func (c *Client) handlePortMap(ctx context.Context, stream tcp.Stream, first *protocol.Frame) {
 	remote := stream.RemoteAddr().String()
 	sid := stream.ID()
 	addr, err := protocol.ReadAddress(first.Body)
@@ -39,13 +41,23 @@ func (c *Client) handlePortMap(stream tcp.Stream, first *protocol.Frame) {
 		return
 	}
 	target := net.JoinHostPort(addr.Host, strconv.Itoa(int(addr.Port)))
-	local, err := net.DialTimeout("tcp", target, portMapDialTimeout)
+	local, err := (&net.Dialer{Timeout: portMapDialTimeout}).DialContext(ctx, "tcp", target)
 	if err != nil {
 		logging.Warn("client: portmap local dial failed", "remote", remote, "stream_id", sid, "target", target, "err", err)
 		protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: false, Reason: err.Error()})
 		return
 	}
 	defer func() { _ = local.Close() }()
+	ctx, cancel := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	defer func() { cancel(); watcher.Wait() }()
+	routine.Go("client.portmap.cancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		_ = local.Close()
+		_ = stream.Close()
+	})
 
 	protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: true})
 	logging.Info("client: portmap established", "remote", remote, "stream_id", sid, "target", target)
@@ -54,16 +66,16 @@ func (c *Client) handlePortMap(stream tcp.Stream, first *protocol.Frame) {
 	// 只半关本地连接的写侧，响应方向保留；下行结束（本地服务回完）才整体断开。
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() {
+	routine.Go("client.portmap.up", func() {
 		defer wg.Done()
 		_, _ = io.Copy(local, stream)
 		closeWrite(local)
-	}()
-	go func() {
+	})
+	routine.Go("client.portmap.down", func() {
 		defer wg.Done()
 		_, _ = io.Copy(stream, local)
 		_ = stream.Close()
-	}()
+	})
 	wg.Wait()
 	logging.Info("client: portmap closed", "remote", remote, "stream_id", sid, "target", target)
 }

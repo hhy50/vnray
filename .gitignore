@@ -1,7 +1,13 @@
-# .github 下只放行 CI 工作流，其余（AI 工具目录、本地配置）不入库
+# .github 下只放行 CI 工作流、检查脚本与配置。
 .github/*
 !.github/workflows
 !.github/workflows/**
+!.github/revive.toml
+!.github/revive-baseline.json
+!.github/scripts/
+!.github/scripts/check-revive-baseline.py
+!.github/scripts/check-dependencies.py
+.github/scripts/__pycache__/
 .vscode/
 .idea/
 .claude/
@@ -14,9 +20,7 @@ docs/*
 !docs/PROTOCOL.md
 !docs/adr/
 docs/adr/*
-!docs/adr/0043-client-aead-transport.md
-!docs/adr/0044-auth-key-index.md
-!docs/adr/0045-negotiated-transport-encryption.md
+docs/
 logs/
 log/
 .DS_Store
@@ -34,3 +38,18 @@ web/admin/dist/
 
 # 本地构建产物
 /bin/
+/openwrt/__pycache__/
+/openwrt
+
+!docs/
+!docs/adr/
+!docs/adr/0048-client-command-assembly.md
+!docs/adr/0049-initial-client-auth-key.md
+
+!docs/adr/0050-unified-database-initialization.md
+!docs/adr/0051-server-lifecycle-and-control-boundaries.md
+!docs/adr/0052-plugin-packages-and-hot-path-convergence.md
+!docs/adr/0053-context-and-control-boundaries.md
+
+!docs/adr/0054-explicit-lock-removal.md
+!docs/adr/0055-snapshot-and-registry-locks.md

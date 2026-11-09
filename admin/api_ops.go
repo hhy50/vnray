@@ -6,6 +6,7 @@ package admin
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -29,6 +30,8 @@ type apiPortMapDTO struct {
 	LocalPort     int    `json:"local_port"`
 	LimitUpKB     int64  `json:"limit_up_kb"`
 	LimitDownKB   int64  `json:"limit_down_kb"`
+	UpBytes       int64  `json:"up_bytes"`
+	DownBytes     int64  `json:"down_bytes"`
 	TLSEnabled    bool   `json:"tls_enabled"`
 	TLSConfigured bool   `json:"tls_configured"`
 	// 证书与私钥随列表整体下发，编辑弹窗靠它回显原文；密钥不脱敏，
@@ -49,13 +52,13 @@ func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 		"clients":     s.clientOptionsForPortMap(r),
 		"public_host": s.shareHost(r),
 	}
-	if s.opts.Store == nil {
+	if s.opts.Mappings == nil {
 		apiOK(w, out)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
-	rows, err := s.opts.Store.ListPortMappings(ctx)
+	rows, err := s.opts.Mappings.List(ctx)
 	if err != nil {
 		logging.Warnf("admin: list port mappings: %v", err)
 	}
@@ -79,6 +82,8 @@ func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 			LocalPort:     m.LocalPort,
 			LimitUpKB:     m.Config.UpLimit / 1024,
 			LimitDownKB:   m.Config.DownLimit / 1024,
+			UpBytes:       m.Up,
+			DownBytes:     m.Down,
 			TLSEnabled:    m.Config.CertPEM != "" || m.Config.KeyPEM != "",
 			TLSConfigured: m.Config.CertPEM != "" && m.Config.KeyPEM != "",
 			CertPEM:       m.Config.CertPEM,
@@ -108,9 +113,11 @@ type apiPortMapIn struct {
 	Enabled    bool   `json:"enabled"`
 }
 
+var errPortMapInput = errors.New("invalid port mapping input")
+
 // apiPortMapSave 新增（POST /portmaps）或更新（PUT /portmaps/{id}）一条映射。
 func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Store == nil {
+	if s.opts.Mappings == nil {
 		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
@@ -118,7 +125,15 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 	if !apiDecode(w, r, &in) {
 		return
 	}
-	id, _ := strconv.ParseUint(strings.TrimSpace(r.PathValue("id")), 10, 64)
+	var id uint64
+	if raw := strings.TrimSpace(r.PathValue("id")); raw != "" {
+		var err error
+		id, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil || id == 0 {
+			apiFailKey(w, r, http.StatusBadRequest, msgPortMapBadID)
+			return
+		}
+	}
 	in.Client = strings.TrimSpace(in.Client)
 	in.LocalHost = strings.TrimSpace(in.LocalHost)
 	in.Remark = strings.TrimSpace(in.Remark)
@@ -136,27 +151,6 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgLimitNegative)
 		return
 	}
-	var previous store.PortMapping
-	if id != 0 && in.TLSEnabled != nil && *in.TLSEnabled && in.CertPEM == "" && in.KeyPEM == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
-		previous, _, _ = s.opts.Store.GetPortMapping(ctx, id)
-		cancel()
-		in.CertPEM = previous.Config.CertPEM
-		in.KeyPEM = previous.Config.KeyPEM
-	}
-	if in.TLSEnabled != nil && *in.TLSEnabled {
-		if in.CertPEM == "" || in.KeyPEM == "" {
-			apiFailKey(w, r, http.StatusBadRequest, msgTLSNeedCertKey)
-			return
-		}
-		if _, err := tls.X509KeyPair([]byte(in.CertPEM), []byte(in.KeyPEM)); err != nil {
-			apiFailKey(w, r, http.StatusBadRequest, msgTLSCertInvalid, err)
-			return
-		}
-	} else if in.CertPEM != "" || in.KeyPEM != "" {
-		apiFailKey(w, r, http.StatusBadRequest, msgCertKeyTogether)
-		return
-	}
 	m := store.PortMapping{
 		ID:         id,
 		Client:     in.Client,
@@ -167,22 +161,67 @@ func (s *AdminService) apiPortMapSave(w http.ResponseWriter, r *http.Request) {
 		Enabled:    in.Enabled,
 		Remark:     in.Remark,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
-	if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
+	var inputKey msgKey
+	var inputErr error
+	prepare := func(previous *store.PortMapping) error {
+		if in.TLSEnabled != nil && *in.TLSEnabled {
+			if previous != nil && m.Config.CertPEM == "" && m.Config.KeyPEM == "" {
+				m.Config.CertPEM, m.Config.KeyPEM = previous.Config.CertPEM, previous.Config.KeyPEM
+			}
+			if m.Config.CertPEM == "" || m.Config.KeyPEM == "" {
+				inputKey = msgTLSNeedCertKey
+				return errPortMapInput
+			}
+			if _, err := tls.X509KeyPair([]byte(m.Config.CertPEM), []byte(m.Config.KeyPEM)); err != nil {
+				inputKey, inputErr = msgTLSCertInvalid, err
+				return errPortMapInput
+			}
+		} else if m.Config.CertPEM != "" || m.Config.KeyPEM != "" {
+			inputKey = msgCertKeyTogether
+			return errPortMapInput
+		}
+		if previous != nil {
+			m.Up, m.Down = previous.Up, previous.Down
+			*previous = m
+		}
+		return nil
+	}
+	var err error
+	if id == 0 {
+		if err = prepare(nil); err == nil {
+			err = s.opts.Mappings.Save(ctx, m)
+		}
+	} else {
+		var exists bool
+		_, exists, err = s.opts.Mappings.Update(ctx, id, prepare)
+		if err == nil && !exists {
+			apiFailKey(w, r, http.StatusNotFound, msgPortMapNotFound)
+			return
+		}
+	}
+	if errors.Is(err, errPortMapInput) {
+		if inputErr != nil {
+			apiFailKey(w, r, http.StatusBadRequest, inputKey, inputErr)
+		} else {
+			apiFailKey(w, r, http.StatusBadRequest, inputKey)
+		}
+		return
+	}
+	if err != nil {
 		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
 	logging.Info("admin: port mapping saved", "id", id, "client", m.Client,
 		"remote_port", m.RemotePort, "local", fmt.Sprintf("%s:%d", m.LocalHost, m.LocalPort),
 		"actor", actorOf(r))
-	s.syncPortMaps()
 	apiOK(w, map[string]any{"id": m.ID})
 }
 
 // apiPortMapDelete 删除一条映射。
 func (s *AdminService) apiPortMapDelete(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Store == nil {
+	if s.opts.Mappings == nil {
 		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
@@ -191,22 +230,21 @@ func (s *AdminService) apiPortMapDelete(w http.ResponseWriter, r *http.Request) 
 		apiFailKey(w, r, http.StatusBadRequest, msgPortMapBadID)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
-	deleted, err := s.opts.Store.DeletePortMapping(ctx, id)
+	deleted, err := s.opts.Mappings.Delete(ctx, id)
 	if err != nil {
 		logging.Error("admin: port mapping delete failed", "id", id, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
 		return
 	}
 	logging.Info("admin: port mapping deleted", "id", id, "existed", deleted, "actor", actorOf(r))
-	s.syncPortMaps()
 	apiOK(w, map[string]any{"deleted": deleted})
 }
 
 // apiPortMapToggle 翻转启用状态。
 func (s *AdminService) apiPortMapToggle(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Store == nil {
+	if s.opts.Mappings == nil {
 		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotConfigured)
 		return
 	}
@@ -215,24 +253,21 @@ func (s *AdminService) apiPortMapToggle(w http.ResponseWriter, r *http.Request) 
 		apiFailKey(w, r, http.StatusBadRequest, msgPortMapBadID)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
 	defer cancel()
-	m, ok, err := s.opts.Store.GetPortMapping(ctx, id)
+	m, ok, err := s.opts.Mappings.Update(ctx, id, func(m *store.PortMapping) error {
+		m.Enabled = !m.Enabled
+		return nil
+	})
 	switch {
 	case err != nil:
-		apiFailKey(w, r, http.StatusInternalServerError, msgReadStoreFailed)
+		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	case !ok:
 		apiFailKey(w, r, http.StatusNotFound, msgPortMapNotFound)
 		return
 	}
-	m.Enabled = !m.Enabled
-	if err := s.opts.Store.SetPortMapping(ctx, m); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
 	logging.Info("admin: port mapping toggled", "id", id, "enabled", m.Enabled, "actor", actorOf(r))
-	s.syncPortMaps()
 	apiOK(w, map[string]any{"enabled": m.Enabled})
 }
 
@@ -248,6 +283,7 @@ type apiPortSlot struct {
 type apiPluginDTO struct {
 	Name         string            `json:"name"`
 	Enabled      bool              `json:"enabled"`
+	LastError    string            `json:"last_error,omitempty"`
 	Ports        []plugin.PortKV   `json:"ports"`
 	Params       map[string]string `json:"params"`
 	Slots        []apiPortSlot     `json:"slots"`
@@ -262,12 +298,14 @@ func (s *AdminService) apiPlugins(w http.ResponseWriter, r *http.Request) {
 	items := make([]apiPluginDTO, 0, 4)
 	for _, st := range s.pluginsList() {
 		dto := apiPluginDTO{
-			Name:    st.Name,
-			Enabled: st.Enabled,
-			Ports:   st.Ports,
-			Params:  st.Params,
-			Slots:   portSlots(st.Ports, serverPort),
-			TLS:     st.TLS,
+			Name:         st.Name,
+			AcceptsUsers: st.AcceptsUsers,
+			Enabled:      st.Enabled,
+			LastError:    st.LastError,
+			Ports:        st.Ports,
+			Params:       st.Params,
+			Slots:        portSlots(st.Ports, serverPort),
+			TLS:          st.TLS,
 		}
 		if dto.Ports == nil {
 			dto.Ports = []plugin.PortKV{}
@@ -339,11 +377,11 @@ func (s *AdminService) apiPluginAction(w http.ResponseWriter, r *http.Request, a
 	switch action {
 	case "start":
 		if err := p.Enable(ctx, in.Params); err != nil {
-			logging.Error("admin: plugin enable failed", "plugin", name, "params", in.Params, "err", err)
+			logging.Error("admin: plugin enable failed", "plugin", name, "err", err)
 			apiFailKey(w, r, http.StatusBadRequest, msgPluginEnableFailed, err)
 			return
 		}
-		logging.Info("admin: plugin enabled", "plugin", name, "params", in.Params, "actor", actorOf(r))
+		logging.Info("admin: plugin enabled", "plugin", name, "actor", actorOf(r))
 	case "stop":
 		if err := p.Disable(ctx); err != nil {
 			logging.Error("admin: plugin disable failed", "plugin", name, "err", err)
@@ -460,7 +498,7 @@ type apiKeyDTO struct {
 func (s *AdminService) apiKeys(w http.ResponseWriter, r *http.Request) {
 	rows := []apiKeyDTO{}
 	if s.opts.Bindings != nil {
-		for _, k := range s.opts.Bindings.AuthKeySnapshot() {
+		for _, k := range s.opts.Bindings.AuthKeySnapshot(r.Context()) {
 			rows = append(rows, apiKeyDTO{
 				Key:       k.Key,
 				Scope:     k.Scope,
@@ -493,7 +531,7 @@ func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	}
 	key := authkey.Generate()
 	scope := strings.TrimSpace(in.Scope)
-	if err := s.opts.Bindings.SetAuthKey(key, scope); err != nil {
+	if err := s.opts.Bindings.SetAuthKey(r.Context(), key, scope); err != nil {
 		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
@@ -512,7 +550,7 @@ func (s *AdminService) apiKeyDelete(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgKeyEmpty)
 		return
 	}
-	deleted, err := s.opts.Bindings.DeleteAuthKey(key)
+	deleted, err := s.opts.Bindings.DeleteAuthKey(r.Context(), key)
 	if err != nil {
 		logging.Error("admin: auth key delete failed", "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
@@ -621,78 +659,61 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 	if !apiDecode(w, r, &in) {
 		return
 	}
-	cur := s.currentServiceSettings()
-	next := cur
-	if in.TransportEncryption != nil {
-		next.TransportEncryption = *in.TransportEncryption
-	}
-	next.PublicHost = strings.TrimSpace(in.PublicHost)
-	next.Heartbeat.Enabled = in.HeartbeatEnabled
-	next.ServerProxy.Enabled = in.ServerProxyEnabled
-	next.ServerProxy.Public = strings.TrimSpace(in.ServerProxyPublic)
-	next.ServerProxy.Private = strings.TrimSpace(in.ServerProxyPrivate)
-	if strings.TrimSpace(in.ServerProxyRouting) != "" {
-		rc, err := config.DecodeRoutingText(in.ServerProxyRouting)
-		if err != nil {
-			apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-			return
+	err := s.updateServiceSettings(r.Context(), func(next *config.ServiceSettings) error {
+		if in.TransportEncryption != nil {
+			next.TransportEncryption = *in.TransportEncryption
 		}
-		next.ServerProxy.Routing = rc
-	}
-	if lv := strings.ToLower(strings.TrimSpace(in.LogLevel)); lv != "" {
-		next.LogLevel = lv
-	}
-
-	var err error
-	if next.Heartbeat.Interval, err = parseFormDuration("heartbeat_interval", in.HeartbeatInterval, cur.Heartbeat.Interval); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if next.Heartbeat.Timeout, err = parseFormDuration("heartbeat_timeout", in.HeartbeatTimeout, cur.Heartbeat.Timeout); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if next.TrafficFlushInterval, err = parseFormDuration("traffic_flush_interval", in.TrafficFlushInterval, cur.TrafficFlushInterval); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if next.Session.KeepAliveInterval, err = parseFormDuration("keepalive_interval", in.KeepAliveInterval, cur.Session.KeepAliveInterval); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if next.Session.KeepAliveTimeout, err = parseFormDuration("keepalive_timeout", in.KeepAliveTimeout, cur.Session.KeepAliveTimeout); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if next.Session.StreamOpenTimeout, err = parseFormDuration("stream_open_timeout", in.StreamOpenTimeout, cur.Session.StreamOpenTimeout); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if in.MaxStreamWindowKB != nil {
-		if *in.MaxStreamWindowKB <= 0 {
-			next.Session.MaxStreamWindow = 0
-		} else {
-			next.Session.MaxStreamWindow = *in.MaxStreamWindowKB * 1024
+		next.PublicHost = strings.TrimSpace(in.PublicHost)
+		next.Heartbeat.Enabled = in.HeartbeatEnabled
+		next.ServerProxy.Enabled = in.ServerProxyEnabled
+		next.ServerProxy.Public = strings.TrimSpace(in.ServerProxyPublic)
+		next.ServerProxy.Private = strings.TrimSpace(in.ServerProxyPrivate)
+		if strings.TrimSpace(in.ServerProxyRouting) != "" {
+			routing, err := config.DecodeRoutingText(in.ServerProxyRouting)
+			if err != nil {
+				return err
+			}
+			next.ServerProxy.Routing = routing
 		}
-	}
-	if in.AcceptBacklog != nil {
-		next.Session.AcceptBacklog = *in.AcceptBacklog
-	}
-	if in.LogRotateMaxSizeMB != nil {
-		next.LogRotation.MaxSizeMB = *in.LogRotateMaxSizeMB
-	}
-	if in.LogRotateMaxBackups != nil {
-		next.LogRotation.MaxBackups = *in.LogRotateMaxBackups
-	}
-	if in.LogRotateMaxAgeDays != nil {
-		next.LogRotation.MaxAgeDays = *in.LogRotateMaxAgeDays
-	}
-
-	if err := next.Validate(); err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
-		return
-	}
-	if err := s.opts.Settings.Apply(next); err != nil {
+		if level := strings.ToLower(strings.TrimSpace(in.LogLevel)); level != "" {
+			next.LogLevel = level
+		}
+		for _, field := range []struct {
+			name   string
+			raw    string
+			target *config.Duration
+		}{
+			{"heartbeat_interval", in.HeartbeatInterval, &next.Heartbeat.Interval},
+			{"heartbeat_timeout", in.HeartbeatTimeout, &next.Heartbeat.Timeout},
+			{"traffic_flush_interval", in.TrafficFlushInterval, &next.TrafficFlushInterval},
+			{"keepalive_interval", in.KeepAliveInterval, &next.Session.KeepAliveInterval},
+			{"keepalive_timeout", in.KeepAliveTimeout, &next.Session.KeepAliveTimeout},
+			{"stream_open_timeout", in.StreamOpenTimeout, &next.Session.StreamOpenTimeout},
+		} {
+			value, err := parseFormDuration(field.name, field.raw, *field.target)
+			if err != nil {
+				return err
+			}
+			*field.target = value
+		}
+		if in.MaxStreamWindowKB != nil {
+			next.Session.MaxStreamWindow = max(0, *in.MaxStreamWindowKB) * 1024
+		}
+		if in.AcceptBacklog != nil {
+			next.Session.AcceptBacklog = *in.AcceptBacklog
+		}
+		if in.LogRotateMaxSizeMB != nil {
+			next.LogRotation.MaxSizeMB = *in.LogRotateMaxSizeMB
+		}
+		if in.LogRotateMaxBackups != nil {
+			next.LogRotation.MaxBackups = *in.LogRotateMaxBackups
+		}
+		if in.LogRotateMaxAgeDays != nil {
+			next.LogRotation.MaxAgeDays = *in.LogRotateMaxAgeDays
+		}
+		return next.Validate()
+	})
+	if err != nil {
 		logging.Error("admin: service config apply failed", "err", err)
 		apiFailKey(w, r, http.StatusBadRequest, msgSaveFailedDetail, err)
 		return

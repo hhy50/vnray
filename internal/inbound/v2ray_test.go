@@ -1,4 +1,4 @@
-package plugin_test
+package inbound_test
 
 // v2ray 插件的用户表接线：vmess/vless 用户经 UserStore 落库，经 SyncUser 跟随到对应
 // 协议的入站验证器。用外部测试包是因为 admin 反向 import plugin，作为第三方同时引用
@@ -16,6 +16,7 @@ import (
 
 	"github.com/hhy50/vnray/admin"
 	"github.com/hhy50/vnray/internal/config"
+	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
@@ -40,7 +41,7 @@ func testStore(t *testing.T) store.Store {
 
 // uuidAPI 是测试要用的 v2ray 插件能力面（生产装配里由 core 通过接口断言使用）。
 type uuidAPI interface {
-	UUIDRoutes() []plugin.UUIDRoute
+	UUIDRoutes() []inbound.UUIDRoute
 	AccountLimits(proto store.Protocol, account string) (up, down int64)
 }
 
@@ -50,7 +51,7 @@ func newTestPlugin(t *testing.T) (uuidAPI, *admin.Bindings) {
 	t.Helper()
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	mgr := plugin.NewManager(st, b, nil, nil)
+	mgr := newTestManager(st, b, nil, nil)
 	b.Watch(func(c admin.UserChange) {
 		p, err := mgr.Get("v2ray")
 		if err != nil {
@@ -119,7 +120,7 @@ func TestUUIDUsersLiveInUserTable(t *testing.T) {
 		t.Fatalf("初始应有 0 条路由，实际 %d", n)
 	}
 
-	if err := b.PutUser(store.UserBinding{
+	if err := b.PutUser(context.Background(), store.UserBinding{
 		Key: testUUID, Protocol: store.ProtocolVMess, Name: "alice-vmess",
 		Status: store.UserEnabled, Client: "edge-1",
 		Config: store.UserConfig{UpLimit: 2 << 20, DownLimit: 512 << 10},
@@ -136,7 +137,7 @@ func TestUUIDUsersLiveInUserTable(t *testing.T) {
 	}
 
 	// 删除后路由立刻消失。
-	if _, err := b.DeleteUser(store.ProtocolVMess, testUUID); err != nil {
+	if _, err := b.DeleteUser(context.Background(), store.ProtocolVMess, testUUID); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 	if n := len(p.UUIDRoutes()); n != 0 {
@@ -152,7 +153,7 @@ func TestUUIDUsersLiveInUserTable(t *testing.T) {
 func TestSameKeyCoexistsAcrossProtocols(t *testing.T) {
 	p, b := newTestPlugin(t)
 	for _, protocol := range []store.Protocol{store.ProtocolVMess, store.ProtocolVLESS} {
-		if err := b.PutUser(store.UserBinding{Key: testUUID, Protocol: protocol,
+		if err := b.PutUser(context.Background(), store.UserBinding{Key: testUUID, Protocol: protocol,
 			Name: "alice-" + string(protocol), Status: store.UserEnabled, Client: "edge-1"}); err != nil {
 			t.Fatalf("put %s user: %v", protocol, err)
 		}
@@ -160,7 +161,7 @@ func TestSameKeyCoexistsAcrossProtocols(t *testing.T) {
 	if routes := p.UUIDRoutes(); len(routes) != 2 {
 		t.Fatalf("routes = %+v, want vmess 与 vless 各一条", routes)
 	}
-	if _, err := b.DeleteUser(store.ProtocolVMess, testUUID); err != nil {
+	if _, err := b.DeleteUser(context.Background(), store.ProtocolVMess, testUUID); err != nil {
 		t.Fatalf("delete vmess user: %v", err)
 	}
 	routes := p.UUIDRoutes()
@@ -173,13 +174,13 @@ func TestSameKeyCoexistsAcrossProtocols(t *testing.T) {
 // 各协议同表但靠 protocol 严格区分。
 func TestNonUUIDProtocolsAreNotV2RayRoutes(t *testing.T) {
 	p, b := newTestPlugin(t)
-	if err := b.PutUser(store.UserBinding{
+	if err := b.PutUser(context.Background(), store.UserBinding{
 		Key: testUUID, Protocol: store.ProtocolVNV1, Name: "alice-vn-v1",
 		Status: store.UserEnabled, Client: "edge-1",
 	}); err != nil {
 		t.Fatalf("put user: %v", err)
 	}
-	if err := b.PutUser(store.UserBinding{
+	if err := b.PutUser(context.Background(), store.UserBinding{
 		Key: otherUUID, Protocol: store.ProtocolVMess, Name: "bob-vmess",
 		Status: store.UserEnabled, Client: "edge-2",
 	}); err != nil {
@@ -198,19 +199,19 @@ func TestNonUUIDProtocolsAreNotV2RayRoutes(t *testing.T) {
 func TestRouteChangeKeepsConfig(t *testing.T) {
 	p, b := newTestPlugin(t)
 	cfg := store.UserConfig{UpLimit: 1 << 20, DownLimit: 1 << 20}
-	if err := b.PutUser(store.UserBinding{
+	if err := b.PutUser(context.Background(), store.UserBinding{
 		Key: testUUID, Protocol: store.ProtocolVMess, Name: "alice-vmess",
 		Status: store.UserEnabled, Client: "edge-1", Config: cfg,
 	}); err != nil {
 		t.Fatalf("put user: %v", err)
 	}
 	// 管理台改绑：读回原行、只换 client、原样写回 config。
-	cur, ok := b.LookupUser(store.ProtocolVMess, testUUID)
+	cur, ok := b.LookupUser(context.Background(), store.ProtocolVMess, testUUID)
 	if !ok {
 		t.Fatal("lookup user failed")
 	}
 	cur.Client = "edge-9"
-	if err := b.PutUser(cur); err != nil {
+	if err := b.PutUser(context.Background(), cur); err != nil {
 		t.Fatalf("rebind: %v", err)
 	}
 	routes := p.UUIDRoutes()
@@ -222,31 +223,12 @@ func TestRouteChangeKeepsConfig(t *testing.T) {
 	}
 }
 
-// TestValidateUserKey 断言添加用户时的密钥格式校验：vmess/vless 用户的密钥是 uuid，
-// 须为合法 UUID（格式不对会出现"表里有、连不上"）；vn-v1 与 ss 只要求非空。
-func TestValidateUserKey(t *testing.T) {
-	if err := plugin.ValidateUserKey(store.ProtocolVNV1, "any-key"); err != nil {
-		t.Fatalf("vn-v1 key: %v", err)
-	}
-	if err := plugin.ValidateUserKey(store.ProtocolSS, "any-password"); err != nil {
-		t.Fatalf("ss key: %v", err)
-	}
-	for _, protocol := range []store.Protocol{store.ProtocolVMess, store.ProtocolVLESS} {
-		if err := plugin.ValidateUserKey(protocol, testUUID); err != nil {
-			t.Fatalf("%s valid uuid: %v", protocol, err)
-		}
-		if err := plugin.ValidateUserKey(protocol, "not-a-uuid"); err == nil {
-			t.Fatalf("%s should reject a malformed uuid", protocol)
-		}
-	}
-}
-
 // TestSetPortsWhileStopped 断言停用态改端口只落盘、不起监听：Status 反映待启用端口，
 // vn_plugin 里同步更新（下次启用与重启恢复都用它）。
 func TestSetPortsWhileStopped(t *testing.T) {
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	mgr := plugin.NewManager(st, b, nil, nil)
+	mgr := newTestManager(st, b, nil, nil)
 	p, err := mgr.Get("v2ray")
 	if err != nil {
 		t.Fatalf("get v2ray: %v", err)
@@ -292,7 +274,7 @@ func (f *fakeTLSStore) VLESSTLS() *config.VLESSTLS {
 	return &cp
 }
 
-func (f *fakeTLSStore) SetVLESSTLS(t config.VLESSTLS) error {
+func (f *fakeTLSStore) SetVLESSTLS(_ context.Context, t config.VLESSTLS) error {
 	f.cur = &t
 	return nil
 }
@@ -302,7 +284,7 @@ func (f *fakeTLSStore) SetVLESSTLS(t config.VLESSTLS) error {
 func TestVlessTLSRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
-	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	mgr := newTestManager(st, admin.NewBindings(st), nil, nil)
 	tlsStore := &fakeTLSStore{}
 	mgr.SetVLESSTLS(tlsStore)
 	p, err := mgr.Get("v2ray")
@@ -362,7 +344,7 @@ func TestVlessTLSRoundTrip(t *testing.T) {
 func TestVlessTLSDefaultsOn(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
-	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	mgr := newTestManager(st, admin.NewBindings(st), nil, nil)
 	tlsStore := &fakeTLSStore{}
 	mgr.SetVLESSTLS(tlsStore)
 	p, err := mgr.Get("v2ray")
@@ -391,7 +373,7 @@ func TestRestoreRenewsBrokenCert(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
 	tlsStore := &fakeTLSStore{}
-	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	mgr := newTestManager(st, admin.NewBindings(st), nil, nil)
 	mgr.SetVLESSTLS(tlsStore)
 	p, err := mgr.Get("v2ray")
 	if err != nil {
@@ -412,11 +394,11 @@ func TestRestoreRenewsBrokenCert(t *testing.T) {
 	}
 	broken.CertPEM = "broken"
 	broken.KeyPEM = "broken"
-	if err := tlsStore.SetVLESSTLS(*broken); err != nil {
+	if err := tlsStore.SetVLESSTLS(context.Background(), *broken); err != nil {
 		t.Fatalf("corrupt cert: %v", err)
 	}
 
-	restartedMgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	restartedMgr := newTestManager(st, admin.NewBindings(st), nil, nil)
 	restartedMgr.SetVLESSTLS(tlsStore)
 	restarted, err := restartedMgr.Get("v2ray")
 	if err != nil {
@@ -437,7 +419,7 @@ func TestRestoreRenewsBrokenCert(t *testing.T) {
 func TestRestoreKeepsPortsWhileDisabled(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
-	mgr := plugin.NewManager(st, admin.NewBindings(st), nil, nil)
+	mgr := newTestManager(st, admin.NewBindings(st), nil, nil)
 	p, err := mgr.Get("v2ray")
 	if err != nil {
 		t.Fatalf("get v2ray: %v", err)
@@ -448,7 +430,7 @@ func TestRestoreKeepsPortsWhileDisabled(t *testing.T) {
 	}
 
 	// 换一个 Manager 复用同一份存储，等价于进程重启。
-	restarted, err := plugin.NewManager(st, admin.NewBindings(st), nil, nil).Get("v2ray")
+	restarted, err := newTestManager(st, admin.NewBindings(st), nil, nil).Get("v2ray")
 	if err != nil {
 		t.Fatalf("get v2ray after restart: %v", err)
 	}
@@ -491,7 +473,7 @@ func vlessProbe(port int, raw [16]byte) ([]byte, error) {
 func TestDisabledUserIsRejectedByInbound(t *testing.T) {
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	mgr := plugin.NewManager(st, b, transport.NewSessionManager(), nil)
+	mgr := newTestManager(st, b, transport.NewSessionManager(), nil)
 	b.Watch(func(c admin.UserChange) {
 		p, err := mgr.Get("v2ray")
 		if err != nil {
@@ -523,7 +505,7 @@ func TestDisabledUserIsRejectedByInbound(t *testing.T) {
 	}
 	put := func(status store.UserStatus) {
 		t.Helper()
-		if err := b.PutUser(store.UserBinding{Key: testUUID, Protocol: store.ProtocolVLESS,
+		if err := b.PutUser(context.Background(), store.UserBinding{Key: testUUID, Protocol: store.ProtocolVLESS,
 			Name: "alice-vless", Status: status, Client: "edge-1"}); err != nil {
 			t.Fatalf("put user: %v", err)
 		}
@@ -546,7 +528,7 @@ func TestDisabledUserIsRejectedByInbound(t *testing.T) {
 func TestEnableSurvivesRequestContext(t *testing.T) {
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	mgr := plugin.NewManager(st, b, nil, nil)
+	mgr := newTestManager(st, b, nil, nil)
 	p, err := mgr.Get("v2ray")
 	if err != nil {
 		t.Fatalf("get v2ray: %v", err)

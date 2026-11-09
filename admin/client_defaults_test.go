@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/hhy50/vnray/internal/store"
 	"net/http"
 	"reflect"
 	"testing"
@@ -12,7 +14,7 @@ import (
 
 func TestGlobalClientSeparateLayers(t *testing.T) {
 	s := newTestAdminService(t)
-	b := NewBindings(s.opts.Store)
+	b := NewBindings(s.opts.Store.(store.Store))
 	s.opts.Bindings = b
 	global := config.GlobalClientSettings{
 		CustomHosts: []config.CustomHost{{Domain: "VPN.route.", IP: "192.168.60.1"}, {Domain: "global.route", IP: "192.168.60.2"}},
@@ -20,21 +22,21 @@ func TestGlobalClientSeparateLayers(t *testing.T) {
 	}
 	b.SetGlobalClientConfig(global)
 	global.CustomHosts[0].IP = "127.0.0.99"
-	if got := b.PushConfig("never-connected"); len(got.ClientConfig.CustomHosts) != 0 || len(got.GlobalConfig.CustomHosts) != 2 || got.GlobalConfig.CustomHosts[0].IP != "192.168.60.1" {
+	if got := b.PushConfig(context.Background(), "never-connected"); len(got.ClientConfig.CustomHosts) != 0 || len(got.GlobalConfig.CustomHosts) != 2 || got.GlobalConfig.CustomHosts[0].IP != "192.168.60.1" {
 		t.Fatalf("global config for new client: %+v", got)
 	}
 	raw := `{"custom_hosts":[{"domain":"vpn.route","ip":"10.0.0.1"}],"ip_maps":[{"from":"186.12.12.*","to":"10.0.0.*"}]}`
-	if err := b.SetClient(ClientBinding{ClientKey: "edge", ServerConfig: raw}); err != nil {
+	if err := b.SetClient(context.Background(), ClientBinding{ClientKey: "edge", ServerConfig: raw}); err != nil {
 		t.Fatal(err)
 	}
-	local := b.ClientPushConfig("edge")
-	got := b.PushConfig("edge")
+	local := b.ClientPushConfig(context.Background(), "edge")
+	got := b.PushConfig(context.Background(), "edge")
 	if !reflect.DeepEqual(got.ClientConfig, local) || len(got.GlobalConfig.CustomHosts) != 2 || got.GlobalConfig.CustomHosts[0].IP != "192.168.60.1" || len(got.GlobalConfig.IPMaps) != 1 {
 		t.Fatalf("server mixed independent layers: %+v", got)
 	}
 	got.GlobalConfig.CustomHosts[1].IP = "127.0.0.99"
 	got.GlobalConfig.IPMaps[0].To = "127.0.0.*"
-	if next := b.PushConfig("edge"); next.GlobalConfig.CustomHosts[1].IP != "192.168.60.2" || next.GlobalConfig.IPMaps[0].To != "192.168.*.*" {
+	if next := b.PushConfig(context.Background(), "edge"); next.GlobalConfig.CustomHosts[1].IP != "192.168.60.2" || next.GlobalConfig.IPMaps[0].To != "192.168.*.*" {
 		t.Fatalf("snapshot leaked: %+v", next)
 	}
 	w, r := apiContext(http.MethodGet, "/admin/ops/api/clients/edge", nil, map[string]string{"name": "edge"})
@@ -52,14 +54,14 @@ func TestGlobalClientSeparateLayers(t *testing.T) {
 		t.Fatalf("detail exposes inherited values: %s", w.Body.String())
 	}
 	b.SetGlobalClientConfig(config.GlobalClientSettings{})
-	if got := b.PushConfig("edge"); !reflect.DeepEqual(got.ClientConfig, local) || len(got.GlobalConfig.CustomHosts) != 0 || len(got.GlobalConfig.IPMaps) != 0 {
+	if got := b.PushConfig(context.Background(), "edge"); !reflect.DeepEqual(got.ClientConfig, local) || len(got.GlobalConfig.CustomHosts) != 0 || len(got.GlobalConfig.IPMaps) != 0 {
 		t.Fatalf("clear globals: %+v, want %+v", got, local)
 	}
 	b.SetGlobalClientConfig(global)
-	if err := b.SetClient(ClientBinding{ClientKey: "edge"}); err != nil {
+	if err := b.SetClient(context.Background(), ClientBinding{ClientKey: "edge"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.PushConfig("edge"); len(got.ClientConfig.IPMaps) != 0 || len(got.ClientConfig.CustomHosts) != 0 || len(got.GlobalConfig.IPMaps) != 1 || got.GlobalConfig.CustomHosts[0].IP != global.CustomHosts[0].IP {
+	if got := b.PushConfig(context.Background(), "edge"); len(got.ClientConfig.IPMaps) != 0 || len(got.ClientConfig.CustomHosts) != 0 || len(got.GlobalConfig.IPMaps) != 1 || got.GlobalConfig.CustomHosts[0].IP != global.CustomHosts[0].IP {
 		t.Fatalf("clear local did not restore globals: %+v", got)
 	}
 }
@@ -115,19 +117,19 @@ func TestNormalizeGlobalClient(t *testing.T) {
 // 全局层为空而不是被独立层顶替或触发空指针。
 func TestPushConfigWithoutGlobal(t *testing.T) {
 	s := newTestAdminService(t)
-	b := NewBindings(s.opts.Store)
-	if err := b.SetClient(ClientBinding{ClientKey: "edge",
+	b := NewBindings(s.opts.Store.(store.Store))
+	if err := b.SetClient(context.Background(), ClientBinding{ClientKey: "edge",
 		ServerConfig: `{"custom_hosts":[{"domain":"local.route","ip":"10.0.0.1"}]}`}); err != nil {
 		t.Fatal(err)
 	}
-	got := b.PushConfig("edge")
+	got := b.PushConfig(context.Background(), "edge")
 	if len(got.GlobalConfig.CustomHosts) != 0 || len(got.GlobalConfig.IPMaps) != 0 {
 		t.Fatalf("global layer must stay empty: %+v", got.GlobalConfig)
 	}
 	if len(got.ClientConfig.CustomHosts) != 1 || got.ClientConfig.CustomHosts[0].Domain != "local.route" {
 		t.Fatalf("independent layer = %+v", got.ClientConfig)
 	}
-	if un := b.PushConfig("never-connected"); len(un.ClientConfig.CustomHosts) != 0 || len(un.GlobalConfig.IPMaps) != 0 {
+	if un := b.PushConfig(context.Background(), "never-connected"); len(un.ClientConfig.CustomHosts) != 0 || len(un.GlobalConfig.IPMaps) != 0 {
 		t.Fatalf("unknown client = %+v", un)
 	}
 }

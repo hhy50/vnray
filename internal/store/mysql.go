@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 
 	"gorm.io/driver/mysql"
@@ -10,7 +9,7 @@ import (
 )
 
 // openMySQL 打开 MySQL 绑定表；dsn 必填，形如 user:pass@tcp(host:port)/dbname。
-func openMySQL(ctx context.Context, dsn string) (Store, error) {
+func openMySQL(dsn string) (*sqlStore, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("store: mysql requires forward.storage.dsn")
 	}
@@ -22,5 +21,5 @@ func openMySQL(ctx context.Context, dsn string) (Store, error) {
 		sqlDB.SetMaxOpenConns(4)
 		sqlDB.SetMaxIdleConns(2)
 	}
-	return newSQLStore(ctx, db)
+	return &sqlStore{db: db}, nil
 }

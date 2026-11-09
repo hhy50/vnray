@@ -12,17 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/plugin"
-	"github.com/hhy50/vnray/internal/portmap"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
-	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
-	"gorm.io/gorm"
 )
 
 // shutdownTimeout 是 Web 管理端优雅退出的最长等待。
@@ -32,9 +30,9 @@ const shutdownTimeout = 5 * time.Second
 type AdminOptions struct {
 	Version string
 	// Bindings 是 uuid → 客户端名 的转发绑定表；nil 表示不提供转发配置。
-	Bindings *Bindings
+	Bindings UserBindings
 	// Plugins 是入站插件管理器；nil 表示管理页不展示插件管理。
-	Plugins *plugin.Manager
+	Plugins PluginRegistry
 	// Listen 是数据面监听地址（host:port）：插件端口的默认建议值由它推导（+1）。
 	Listen string
 	// PublicHost 是分享链接里对外暴露的主机；空表示退回管理台请求的 Host。
@@ -42,13 +40,12 @@ type AdminOptions struct {
 	// Username/Password 是管理台登录账号与口令（启动时 bcrypt 哈希进内存，见 newAuthService）。
 	Username string
 	Password string
-	// DB 是业务 SQL 存储的 GORM 连接（sqlite/mysql），管理台从这里读写业务表；
-	// nil 视为装配失败。
-	DB *gorm.DB
 	// Store 是持久层：管理台从这里读流量表。
-	Store store.Store
+	Store TrafficReader
+	// Mappings 是端口映射的控制面写口。
+	Mappings MappingSettings
 	// PortMaps 是端口映射监听管理器。
-	PortMaps *portmap.Manager
+	PortMaps MappingStatus
 	// LogPath 是服务端日志文件路径。
 	LogPath string
 	// Settings 是运行时服务配置的读写口。
@@ -59,13 +56,20 @@ type AdminOptions struct {
 
 // AdminService 是 Web 管理面服务：会话认证 + Vue SPA + 业务 API。
 type AdminService struct {
-	streamStop chan struct{}
-	stopOnce   sync.Once
-	clients    *transport.SessionManager
-	opts       AdminOptions
-	started    time.Time
-	srv        *http.Server
-	auth       *AuthService
+	streamStop  chan struct{}
+	stopOnce    sync.Once
+	requests    atomic.Int64
+	stopping    atomic.Bool
+	requestOnce sync.Once
+	requestDone chan struct{}
+	serveDone   chan struct{}
+	authDone    <-chan struct{}
+	cancel      context.CancelFunc
+	clients     *transport.SessionManager
+	opts        AdminOptions
+	started     time.Time
+	srv         *http.Server
+	auth        *AuthService
 	// addr 为实际监听地址，Start 之后可用。
 	addr string
 }
@@ -80,9 +84,6 @@ type opsRoute struct {
 
 // NewAdminService 创建管理面服务：内存凭证播种与路由装配。
 func NewAdminService(addr string, clients *transport.SessionManager, opts AdminOptions) (*AdminService, error) {
-	if opts.DB == nil {
-		return nil, fmt.Errorf("admin: requires gorm db")
-	}
 	s := &AdminService{
 		streamStop: make(chan struct{}),
 		clients:    clients,
@@ -119,10 +120,26 @@ func NewAdminService(addr string, clients *transport.SessionManager, opts AdminO
 
 	s.srv = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           s.trackRequests(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return s, nil
+}
+
+func (s *AdminService) trackRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requests.Add(1)
+		defer func() {
+			if s.requests.Add(-1) == 0 && s.stopping.Load() {
+				s.requestOnce.Do(func() { close(s.requestDone) })
+			}
+		}()
+		if s.stopping.Load() {
+			http.Error(w, "admin service is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // wrapOps 给 /admin/ops 下的路由套上全局中间件：auth 注入 → 会话加载 → 登录校验 → CSRF。
@@ -192,17 +209,29 @@ func (s *AdminService) opsRoutes() []opsRoute {
 // Name 返回服务名。
 func (s *AdminService) Name() string { return "AdminService" }
 
-// Start 启动 HTTP 服务并立即返回；ctx 只用于打开监听。
+// Start 启动 HTTP 服务并立即返回；后台任务由 Drain 取消并等待。
 func (s *AdminService) Start(ctx context.Context) error {
+	if s.stopping.Load() || s.serveDone != nil {
+		return errors.New("admin: service already started or stopped")
+	}
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
 	if err != nil {
 		return fmt.Errorf("webadmin listen %s: %w", s.srv.Addr, err)
 	}
 	s.addr = ln.Addr().String()
+	// HTTP 请求在优雅退出期间仍可完成，强制关闭时才统一取消。
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.cancel = cancel
+	s.srv.BaseContext = func(net.Listener) context.Context { return runCtx }
+	done := make(chan struct{})
+	s.serveDone = done
 	logging.Info("admin: web admin started", "addr", s.addr, "ui", uiPath)
-	s.auth.Start(ctx)
+	if s.auth != nil {
+		s.authDone = s.auth.start(runCtx)
+	}
 	routine.Go("admin.service.serve", func() {
+		defer close(done)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.Error("admin: web admin stopped", "err", err)
 		}
@@ -212,13 +241,73 @@ func (s *AdminService) Start(ctx context.Context) error {
 
 // Drain 实现 extension.Drainer：优雅关闭管理端。
 func (s *AdminService) Drain(ctx context.Context) error {
-	s.stopOnce.Do(func() { close(s.streamStop) })
+	s.stopOnce.Do(func() {
+		s.requestDone = make(chan struct{})
+		s.stopping.Store(true)
+		if s.requests.Load() == 0 {
+			s.requestOnce.Do(func() { close(s.requestDone) })
+		}
+		if s.streamStop != nil {
+			close(s.streamStop)
+		}
+	})
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, shutdownTimeout)
 		defer cancel()
 	}
-	return s.srv.Shutdown(ctx)
+	var err error
+	if s.srv != nil {
+		err = s.srv.Shutdown(ctx)
+		if err != nil {
+			err = errors.Join(err, s.srv.Close())
+		}
+	}
+	cancel := s.cancel
+	if cancel != nil {
+		cancel()
+	}
+	// Close 只关闭连接；独立收尾期限用于等待取消后的 handler 真正返回。
+	waitCtx, waitCancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer waitCancel()
+	return errors.Join(err, s.WaitDrained(waitCtx))
+}
+
+// WaitDrained 等待管理端请求与后台任务退出，供释放共享依赖前复核。
+func (s *AdminService) WaitDrained(ctx context.Context) error {
+	stopping := s.stopping.Load()
+	requests, serving := s.requests.Load(), s.serveDone != nil
+	var requestDone <-chan struct{}
+	if stopping {
+		requestDone = s.requestDone
+	}
+	waits := []struct {
+		name string
+		done <-chan struct{}
+	}{
+		{"requests", requestDone},
+		{"serve", s.serveDone},
+		{"auth cleanup", s.authDone},
+	}
+	if !stopping && (requests != 0 || serving) {
+		return errors.New("admin: drain has not started")
+	}
+	for _, wait := range waits {
+		if wait.done == nil {
+			continue
+		}
+		select {
+		case <-wait.done:
+			continue
+		default:
+		}
+		select {
+		case <-wait.done:
+		case <-ctx.Done():
+			return fmt.Errorf("admin: wait for %s: %w", wait.name, ctx.Err())
+		}
+	}
+	return nil
 }
 
 // Addr 返回实际监听地址；未启动时返回配置地址。
@@ -365,11 +454,11 @@ func (s *AdminService) pluginsList() []plugin.Status {
 }
 
 // bindings 返回转发绑定快照。
-func (s *AdminService) bindings() []Binding {
+func (s *AdminService) bindings(ctx context.Context) []Binding {
 	if s.opts.Bindings == nil {
 		return nil
 	}
-	return s.opts.Bindings.Snapshot()
+	return s.opts.Bindings.Snapshot(ctx)
 }
 
 // serverPort 返回数据面监听端口。
@@ -383,16 +472,6 @@ func (s *AdminService) serverPort() int {
 		return 0
 	}
 	return port
-}
-
-// applyClientConcurrency 把 client 级并发上限热更到在线会话。
-func (s *AdminService) applyClientConcurrency(name string, max int) {
-	for _, e := range s.clients.ClientSessions() {
-		if e.Info().Name == name {
-			e.SetClientConcurrency(max)
-			return
-		}
-	}
 }
 
 // parseIPMaps 校验并归一化 IP 段映射行。
@@ -460,28 +539,20 @@ func parseLogLevel(raw string) (string, error) {
 }
 
 // pushConfig 把服务端下发的全量配置推送给在线客户端。
-func (s *AdminService) pushConfig(name string) bool {
+func (s *AdminService) pushConfig(ctx context.Context, name string) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbTimeout)
+	defer cancel()
 	for _, e := range s.clients.ClientSessions() {
 		if e.Info().Name != name {
 			continue
 		}
-		if err := s.opts.Bindings.PushClientConfig(e); err != nil {
+		if err := s.opts.Bindings.PushClientConfig(ctx, e); err != nil {
 			logging.Warn("admin: push config failed", "client", name, "err", err)
 			return false
 		}
 		return true
 	}
 	return false
-}
-
-// syncPortMaps 热更新端口映射监听器。
-func (s *AdminService) syncPortMaps() {
-	if s.opts.PortMaps == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
-	defer cancel()
-	s.opts.PortMaps.Sync(ctx)
 }
 
 // ClientInfo 是管理台展示的客户端视图。
@@ -492,9 +563,4 @@ type ClientInfo struct {
 	Client        protocol.ClientInfo `json:"client"`
 	LastHeartbeat time.Time           `json:"last_heartbeat"`
 	LastRTTMs     float64             `json:"last_rtt_ms"`
-}
-
-// DB 返回 GORM 连接，供测试用。
-func (s *AdminService) DB() *gorm.DB {
-	return s.opts.DB
 }

@@ -9,7 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/hhy50/vnray/internal/protocol"
 )
@@ -24,9 +24,12 @@ type ipMapRule struct {
 
 // IPMaps 是 IPv4 段映射表，并发安全；nil 指针表示未启用。
 type IPMaps struct {
-	mu          sync.RWMutex
-	rules       []ipMapRule
-	globalRules []ipMapRule
+	tables atomic.Pointer[ipMapTables]
+}
+
+type ipMapTables struct {
+	local  []ipMapRule
+	global []ipMapRule
 }
 
 // NewIPMaps 创建一张空表。
@@ -40,10 +43,7 @@ func (m *IPMaps) Update(entries []protocol.IPMap) {
 
 // UpdateLayers 同时替换两层规则；独立规则未命中才查询全局规则。
 func (m *IPMaps) UpdateLayers(local, global []protocol.IPMap) {
-	localRules, globalRules := compileIPMaps(local), compileIPMaps(global)
-	m.mu.Lock()
-	m.rules, m.globalRules = localRules, globalRules
-	m.mu.Unlock()
+	m.tables.Store(&ipMapTables{local: compileIPMaps(local), global: compileIPMaps(global)})
 }
 
 func compileIPMaps(entries []protocol.IPMap) []ipMapRule {
@@ -68,12 +68,14 @@ func (m *IPMaps) Rewrite(ip string) (string, bool) {
 	if src == nil {
 		return "", false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if rewritten, ok := rewriteIP(m.rules, src); ok {
+	tables := m.tables.Load()
+	if tables == nil {
+		return "", false
+	}
+	if rewritten, ok := rewriteIP(tables.local, src); ok {
 		return rewritten, true
 	}
-	return rewriteIP(m.globalRules, src)
+	return rewriteIP(tables.global, src)
 }
 
 func rewriteIP(rules []ipMapRule, src net.IP) (string, bool) {

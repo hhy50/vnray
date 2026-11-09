@@ -139,7 +139,7 @@ func TestPortMapsEchoTLSMaterial(t *testing.T) {
 
 	const certPEM = "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
 	const keyPEM = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
-	err := s.opts.Store.SetPortMapping(context.Background(), store.PortMapping{
+	err := s.opts.Store.(store.Store).SetPortMapping(context.Background(), store.PortMapping{
 		Client:     "ns:grp:cli",
 		RemotePort: 8443,
 		LocalHost:  "127.0.0.1",
@@ -177,6 +177,37 @@ func TestPortMapsEchoTLSMaterial(t *testing.T) {
 	}
 	if row.CertPEM != certPEM || row.KeyPEM != keyPEM {
 		t.Fatalf("echoed material = %q / %q", row.CertPEM, row.KeyPEM)
+	}
+}
+
+func TestPortMapsTraffic(t *testing.T) {
+	s := newTestAdminService(t)
+	ctx := context.Background()
+	for _, port := range []int{7000, 7001} {
+		if err := s.opts.Store.(store.Store).SetPortMapping(ctx, store.PortMapping{Client: "ns:grp:cli",
+			RemotePort: port, LocalHost: "127.0.0.1", LocalPort: 80}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.opts.Store.(store.Store).ListPortMappings(ctx)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("mappings = %v, err = %v", rows, err)
+	}
+	if err := s.opts.Store.(store.Store).AddPortMappingTraffic(ctx, rows[0].ID, 1024, 2048); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, s.wrapOps(s.buildOpsMux()), s.auth, http.MethodGet, "/admin/ops/api/portmaps")
+	var got struct {
+		Data struct {
+			Rows []apiPortMapDTO `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("portmaps response = %s, err = %v", rec.Body.String(), err)
+	}
+	if len(got.Data.Rows) != 2 || got.Data.Rows[0].UpBytes != 1024 || got.Data.Rows[0].DownBytes != 2048 ||
+		got.Data.Rows[1].UpBytes != 0 || got.Data.Rows[1].DownBytes != 0 {
+		t.Fatalf("port mapping traffic = %+v", got.Data.Rows)
 	}
 }
 

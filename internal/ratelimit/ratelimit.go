@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/concurrency"
-	"github.com/hhy50/vnray/internal/store"
-	"github.com/hhy50/vnray/internal/transport"
+	"github.com/hhy50/vnray/internal/stats"
 )
 
-// Identity 返回隔离不同协议用户的运行态身份键。
-func Identity(p store.Protocol, key string) string { return string(p) + ":" + key }
+// Identity 返回隔离不同协议用户的运行态身份键。协议只作为命名空间参与拼接，
+// 这里按底层类型约束而非具体类型取参，避免限速器反向依赖 store 的领域类型。
+func Identity[P ~string](protocol P, key string) string { return string(protocol) + ":" + key }
 
 // Bucket 是容量为一秒速率、支持取消和动态调速的共享令牌桶。
 type Bucket struct {
@@ -26,7 +26,7 @@ type Bucket struct {
 
 // NewBucket 创建令牌桶；非正速率表示不限速。
 func NewBucket(bytesPerSec int64) *Bucket {
-	b := &Bucket{last: time.Now(), changed: make(chan struct{})}
+	b := &Bucket{last: time.Now()}
 	b.rate.Store(max(bytesPerSec, 0))
 	b.tokens = float64(b.rate.Load())
 	return b
@@ -50,8 +50,10 @@ func (b *Bucket) SetRate(bytesPerSec int64) {
 	b.refill(time.Now())
 	b.tokens = math.Min(b.tokens, float64(bytesPerSec))
 	b.rate.Store(bytesPerSec)
-	close(b.changed)
-	b.changed = make(chan struct{})
+	if b.changed != nil {
+		close(b.changed)
+		b.changed = nil
+	}
 }
 
 // Rate 返回字节/秒速率；0 表示不限速。
@@ -91,6 +93,9 @@ func (b *Bucket) Wait(ctx context.Context, n int) error {
 			continue
 		}
 		delay := max(time.Nanosecond, time.Duration((take-b.tokens)/rate*float64(time.Second)))
+		if b.changed == nil {
+			b.changed = make(chan struct{})
+		}
 		changed := b.changed
 		b.mu.Unlock()
 		if timer == nil {
@@ -113,36 +118,39 @@ func (b *Bucket) Wait(ctx context.Context, n int) error {
 type Pair struct {
 	Up    *Bucket
 	Down  *Bucket
-	Stats *transport.PumpStats
+	Stats *stats.PumpStats
 }
 
 // Registry 保存用户配置的运行态投影，令牌和统计不落库。
 type Registry struct {
-	mu      sync.RWMutex
-	entries map[string]Pair
-	gates   map[string]*concurrency.Gate
+	entries sync.Map
+}
+
+type registryEntry struct {
+	pair Pair
+	gate *concurrency.Gate
 }
 
 // NewRegistry 创建空的限速注册表。
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]Pair), gates: make(map[string]*concurrency.Gate)}
+	return &Registry{}
+}
+
+func (r *Registry) entry(identity string) *registryEntry {
+	if value, ok := r.entries.Load(identity); ok {
+		return value.(*registryEntry)
+	}
+	next := &registryEntry{
+		pair: Pair{Up: NewBucket(0), Down: NewBucket(0), Stats: &stats.PumpStats{}},
+		gate: concurrency.NewGate(),
+	}
+	value, _ := r.entries.LoadOrStore(identity, next)
+	return value.(*registryEntry)
 }
 
 // Pair 返回共享运行态；查表仅在建立隧道时执行，不进入逐块转发热路径。
 func (r *Registry) Pair(identity string) Pair {
-	r.mu.RLock()
-	e, ok := r.entries[identity]
-	r.mu.RUnlock()
-	if ok {
-		return e
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e, ok = r.entries[identity]; !ok {
-		e = Pair{Up: NewBucket(0), Down: NewBucket(0), Stats: &transport.PumpStats{}}
-		r.entries[identity] = e
-	}
-	return e
+	return r.entry(identity).pair
 }
 
 // Limits 返回上下行限速，单位为字节/秒。
@@ -166,19 +174,7 @@ func (r *Registry) Apply(identity string, upBps, downBps int64) {
 
 // Gate 返回身份对应的并发闸；不存在时创建一张不限流的闸。
 func (r *Registry) Gate(identity string) *concurrency.Gate {
-	r.mu.RLock()
-	g, ok := r.gates[identity]
-	r.mu.RUnlock()
-	if ok {
-		return g
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if g, ok = r.gates[identity]; !ok {
-		g = concurrency.NewGate()
-		r.gates[identity] = g
-	}
-	return g
+	return r.entry(identity).gate
 }
 
 // Concurrency 设置身份的并发上限；非正数表示不限。
@@ -193,8 +189,5 @@ func (r *Registry) Current(identity string) int {
 
 // Forget 移除注册表中的身份，不改变既有隧道的生命周期。
 func (r *Registry) Forget(identity string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.entries, identity)
-	delete(r.gates, identity)
+	r.entries.Delete(identity)
 }

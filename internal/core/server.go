@@ -2,13 +2,20 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"github.com/hhy50/vnray/admin"
+	"github.com/hhy50/vnray/internal/access"
 	"github.com/hhy50/vnray/internal/config"
+	"github.com/hhy50/vnray/internal/extension"
+	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/portmap"
 	"github.com/hhy50/vnray/internal/ratelimit"
+	"github.com/hhy50/vnray/internal/sqliteweb"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
@@ -19,37 +26,37 @@ import (
 type serverApp struct {
 	instance     *Instance
 	bindingStore store.Store
+	admin        *admin.AdminService
 }
 
 // Run 按序启动全部服务，阻塞到 app ctx 取消（SIGINT/SIGTERM）后逆序收尾，最后释放存储。
 func (app *serverApp) Run() error {
 	err := app.instance.Run()
-	if cerr := app.bindingStore.Close(); cerr != nil {
-		logging.Warnf("close binding store: %v", cerr)
+	if app.admin != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		waitErr := app.admin.WaitDrained(ctx)
+		cancel()
+		if waitErr != nil {
+			return errors.Join(err, waitErr)
+		}
 	}
-	return err
+	return errors.Join(err, app.bindingStore.Close())
 }
 
 // newServerApp 组装服务端运行时：Instance 承载服务编排，store 等 Run 结束时才关闭。
-func newServerApp(appctx context.Context, instance *Instance, st store.Store) *serverApp {
+func newServerApp(instance *Instance, st store.Store) *serverApp {
 	return &serverApp{instance: instance, bindingStore: st}
-}
-
-// newBindingStore 按配置构造绑定表持久层（sqlite/mysql）；internal/config 不依赖
-// 数据面包，驱动翻译放在 config，这里只透传。
-func newBindingStore(ctx context.Context, cfg *config.Server) (store.Store, error) {
-	return store.Open(ctx, cfg.Storage.ResolvedDriver(), cfg.Storage.DSN)
 }
 
 // newBindings 打开用户绑定表（user_key → 客户端名，持久层由 storage 配置决定）；
 // 管理面与用户注册表共用同一份。
-func newBindings(st store.Store) *admin.Bindings {
-	return admin.NewBindings(st)
+func newBindings(st store.Store) *access.Bindings {
+	return access.NewBindings(st)
 }
 
-// newAdminService 管理面服务；admin.enabled 为 false 时返回 nil（newInstance 跳过）。
+// newAdminService 管理面服务；admin.enabled 为 false 时返回 nil（装配时跳过）。
 // 管理库打不开视为装配失败：管理台是运维入口，带病启动不如显式报错。
-func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *admin.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings, rules admin.RuleSettings) (*admin.AdminService, error) {
+func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *access.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings, rules admin.RuleSettings) (*admin.AdminService, error) {
 	if !cfg.Admin.Enabled {
 		return nil, nil
 	}
@@ -61,8 +68,8 @@ func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bin
 		Listen:   cfg.Server.Listen,
 		Username: cfg.Admin.ResolvedUsername(),
 		Password: cfg.Admin.Password,
-		DB:       bindings.GORM(),
 		Store:    st,
+		Mappings: portmap.NewControl(st, pm),
 		LogPath:  logFilePath(cfg),
 		Settings: settings,
 		Rules:    rules,
@@ -97,28 +104,30 @@ func logFilePath(cfg *config.Server) string {
 }
 
 // newUserRegistry 把绑定表暴露为用户注册表：数据面只认接口，实现由装配层给定。
-func newUserRegistry(userBindings *admin.Bindings) transport.UserRegistry {
+func newUserRegistry(userBindings *access.Bindings) transport.UserRegistry {
 	return userBindings
 }
 
 // initServerApp 手写组装服务端进程：绑定表存储 → 绑定表 → 会话管理器 →
 // 数据面服务（+ 管理面，可选）→ Instance；字段间依赖关系一目了然，
 func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, error) {
-	if cfg.Diagnostics.PprofListen != "" {
-		startPprof(appctx, cfg.Diagnostics.PprofListen)
-	}
-	sessions := transport.NewSessionManager()
 	st, err := newBindingStore(appctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	assembled := false
+	defer func() {
+		if !assembled {
+			_ = st.Close()
+		}
+	}()
+	sessions := transport.NewSessionManager()
 	// 运行时服务配置（管理台可在线改）先于组件构造解析：会话参数与心跳在此定基线。
 	settings := loadServiceSettings(appctx, st, cfg)
 	// 用户出站规则同样先解析：数据面按规则名判定，管理台经同一实例读写。
 	rules := loadRuleSet(appctx, st)
 	bindings := newBindings(st)
 	if err := bindings.ReloadAuthKeys(appctx); err != nil {
-		_ = st.Close()
 		return nil, err
 	}
 	limits := ratelimit.NewRegistry()
@@ -130,18 +139,32 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	}
 	// 本机出口登记随开关：启用登记、停用移除（保留流量）。
 	{
-		ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+		ctx, cancel := context.WithTimeout(appctx, applyTimeout)
 		syncLocalClient(ctx, st, bindings, settings.ServerProxy.Enabled)
 		cancel()
 	}
-	plugins := plugin.NewManager(st, bindings, exits, limits)
-	plugins.SetSeedEnabled(cfg.Plugin.Enabled)
+	userInbound := inbound.NewVNRayUserPlugin(st, inbound.VNRayUserDependencies{
+		Events: sessions, Users: newUserRegistry(bindings), UserConfig: bindings,
+		Clients: sessions, SessionConfig: sessionConfigFromSettings(settings.Session),
+	})
+	v2ray := inbound.NewV2RayPlugin(st, bindings, exits, limits)
+	v2ray.SetRules(rules)
+	ss := inbound.NewSSPlugin(st, bindings, exits, limits)
+	ss.SetRules(rules)
+	plugins := plugin.NewRegistry(appctx,
+		v2ray,
+		ss,
+		sqliteweb.New(st),
+		userInbound,
+	)
 	plugins.SetTraffic(meter)
 	// 用户表是唯一写口：限速推给注册表，凭据路由推给各入站插件（按类型过滤）。
-	bindings.Watch(func(c admin.UserChange) {
-		propagateUserChange(c, limits, plugins)
+	bindings.Watch(func(c access.UserChange) {
+		propagateUserChange(c, limits, plugins, meter)
 	})
-	seedLimits(bindings, limits)
+	if err := seedLimits(appctx, st, limits, meter); err != nil {
+		return nil, err
+	}
 	svc := NewConnectorServiceWith(cfg, sessions, newUserRegistry(bindings), limits,
 		tcp.WithSessionConfig(sessionConfigFromSettings(settings.Session)))
 	svc.ApplyHeartbeat(heartbeatIntervalOf(settings.Heartbeat), settings.Heartbeat.Timeout.Std())
@@ -150,39 +173,69 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	svc.SetTraffic(meter)
 	svc.SetRules(rules)
 	// 端口映射：规则读自 port_mappings 表，管理台改表后热更新监听与限速。
-	portmaps := portmap.NewManager(sessions, st, meter, limits)
+	portmaps := portmap.NewManager(appctx, sessions, st, meter, limits)
 	meter.SetFlushInterval(settings.TrafficFlushInterval.Std())
 	applyStartupLogging(cfg, settings)
 	runtimeCfg := newServiceConfig(st, svc, meter, exits, bindings, settings)
+	runtimeCfg.setSessionConfigApplier(plugins)
 	// vless 的 TLS 参数存在服务端配置表里，插件经这一个写口读写。
 	plugins.SetVLESSTLS(runtimeCfg)
 	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg, rules)
 	if err != nil {
 		return nil, err
 	}
-	// 流量增量随进程生命周期落库：ctx 结束时会补最后一次。
-	meter.Run(appctx, st)
-	instance := newInstance(appctx, svc, webAdmin, plugins, portmaps)
-	return newServerApp(appctx, instance, st), nil
+	services := []extension.Service{traffic.NewService(meter, st), svc, plugins, portmaps}
+	if cfg.Diagnostics.PprofListen != "" {
+		services = append(services, newPprofService(cfg.Diagnostics.PprofListen))
+	}
+	// 管理面最后启动、最先停止，退出时不再接受新的配置写入。
+	if webAdmin != nil {
+		services = append(services, webAdmin)
+	}
+	instance := newInstance(appctx, services...)
+	assembled = true
+	app := newServerApp(instance, st)
+	app.admin = webAdmin
+	return app, nil
 }
 
-// propagateUserChange 把一条用户变更分发给运行时消费者：限速注册表（各类用户都限速）
-// 与全部实现了 UserSyncer 的插件（各自按类型过滤）。
-func propagateUserChange(c admin.UserChange, limits *ratelimit.Registry, plugins *plugin.Manager) {
+// propagateUserChange 把一条用户变更分发给运行时消费者：限速注册表与流量记账器
+// （各类用户都限速、都计数）以及全部实现了 UserSyncer 的插件（各自按类型过滤）。
+func propagateUserChange(c access.UserChange, limits *ratelimit.Registry, plugins *plugin.Manager, meter *traffic.Meter) {
 	identity := ratelimit.Identity(c.Protocol, c.Key)
 	if c.Deleted {
 		limits.Forget(identity)
+		if meter != nil {
+			meter.ForgetUser(c.Protocol, c.Key)
+		}
 	} else {
+		if meter != nil {
+			meter.RestoreUser(c.Protocol, c.Key)
+		}
 		limits.Apply(identity, c.Config.UpLimit, c.Config.DownLimit)
 		limits.Concurrency(identity, c.Config.Concurrency)
 	}
 	plugins.SyncUser(c.Protocol, c.Key, c.Client, c.Status, c.Deleted)
 }
 
-// seedLimits 把用户表里的限速与并发配置全量灌进限速注册表（启动时的一次性投影）。
-func seedLimits(b *admin.Bindings, limits *ratelimit.Registry) {
-	for _, u := range b.Snapshot() {
-		limits.Apply(ratelimit.Identity(u.Protocol, u.UserKey), u.Config.UpLimit, u.Config.DownLimit)
-		limits.Concurrency(ratelimit.Identity(u.Protocol, u.UserKey), u.Config.Concurrency)
+type userSeedStore interface {
+	ListUsers(context.Context) ([]store.UserBinding, error)
+}
+
+// seedLimits 同步初始化用户限速与记账登记；读库失败不能启动缺少投影的服务。
+func seedLimits(ctx context.Context, st userSeedStore, limits *ratelimit.Registry, meter *traffic.Meter) error {
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
+	defer cancel()
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("load user runtime state: %w", err)
 	}
+	for _, u := range users {
+		if meter != nil {
+			meter.RestoreUser(u.Protocol, u.Key)
+		}
+		limits.Apply(ratelimit.Identity(u.Protocol, u.Key), u.Config.UpLimit, u.Config.DownLimit)
+		limits.Concurrency(ratelimit.Identity(u.Protocol, u.Key), u.Config.Concurrency)
+	}
+	return nil
 }

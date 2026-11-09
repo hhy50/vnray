@@ -13,6 +13,7 @@ import (
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
+	"github.com/hhy50/vnray/internal/stats"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
@@ -36,13 +37,29 @@ type UserAccess struct {
 // 已停用的用户返回 ok=true 但 Active=false，让调用方能给出"已停用"而不是"未注册"的应答
 // （由 admin.Bindings 实现）。user_key 既是认证凭据也是选路依据。
 type UserRegistry interface {
-	UserFor(key string) (access UserAccess, ok bool)
+	UserFor(ctx context.Context, key string) (access UserAccess, ok bool)
+}
+
+// ClientRuntime 是握手与配置下发要用的客户端运行参数。三者同源同表，合并成一次读取，
+// 免得握手路径为每项各查一次库。
+type ClientRuntime struct {
+	// LogLevel 是服务端下发的日志级别，空串视为 info。
+	LogLevel string
+	// Concurrency 是该客户端的并发上限，0 表示不限。
+	Concurrency int
+	// Push 是随应答下发的分层配置快照。
+	Push protocol.PushConfig
 }
 
 // OpenTunnel 在会话上开一条隧道流：发 Tunnel 帧（目标在帧头）并等出口侧的 TunnelResult，
 // 成功后返回裸字节流，由调用方双向搬运并负责关闭。若配置了对本客户端的并发上限，
 // 超限时排队等待空位（会话关闭即中断）。
 func (s *Session) OpenTunnel(dest dispatch.Destination, req protocol.TunnelRequest) (net.Conn, error) {
+	return s.OpenTunnelContext(context.Background(), dest, req)
+}
+
+// OpenTunnelContext 在请求取消时终止并发排队及隧道握手。
+func (s *Session) OpenTunnelContext(ctx context.Context, dest dispatch.Destination, req protocol.TunnelRequest) (net.Conn, error) {
 	if !dest.IsValid() {
 		return nil, fmt.Errorf("transport: invalid destination %s", dest)
 	}
@@ -50,13 +67,18 @@ func (s *Session) OpenTunnel(dest dispatch.Destination, req protocol.TunnelReque
 	if err != nil {
 		return nil, err
 	}
-	return s.openRelayStream(frame)
+	return s.openRelayStream(ctx, frame)
 }
 
 // OpenPortMap 在会话上开一条端口映射流：发 PortMap 帧（目标为客户端侧的本地拨号
 // 地址），客户端本地直连、不经其 dispatcher（映射规则由服务端运维下发，不走客户端
 // 的 ACL 与路由）。应答复用 TunnelResult，成功后返回裸字节流。并发上限同 OpenTunnel。
 func (s *Session) OpenPortMap(dest dispatch.Destination) (net.Conn, error) {
+	return s.OpenPortMapContext(context.Background(), dest)
+}
+
+// OpenPortMapContext 在请求取消时终止端口映射排队及握手。
+func (s *Session) OpenPortMapContext(ctx context.Context, dest dispatch.Destination) (net.Conn, error) {
 	if !dest.IsValid() {
 		return nil, fmt.Errorf("transport: invalid destination %s", dest)
 	}
@@ -64,14 +86,36 @@ func (s *Session) OpenPortMap(dest dispatch.Destination) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.openRelayStream(frame)
+	return s.openRelayStream(ctx, frame)
 }
 
 // openRelayStream 是 OpenTunnel / OpenPortMap 的共用骨架：先占并发位（客户端级），
 // 再开流、发请求帧、等 TunnelResult，建立后清掉握手期 deadline 并返回裸字节流，
 // 由调用方负责关闭（关闭时归还并发位）。
-func (s *Session) openRelayStream(frame *protocol.Frame) (net.Conn, error) {
-	if err := s.gate.Acquire(s.CloseSignal()); err != nil {
+func (s *Session) openRelayStream(ctx context.Context, frame *protocol.Frame) (net.Conn, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	finished := make(chan struct{})
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	var pending atomic.Pointer[tcp.Stream]
+	routine.Go("transport.tunnel.cancel", func() {
+		defer watcher.Done()
+		select {
+		case <-ctx.Done():
+		case <-s.CloseSignal():
+			cancel()
+		case <-finished:
+			return
+		}
+		if stream := pending.Load(); stream != nil {
+			abortConnection(*stream)
+		}
+	})
+	var finishOnce sync.Once
+	finish := func() { finishOnce.Do(func() { close(finished); watcher.Wait() }) }
+	defer finish()
+	if err := s.gate.AcquireContext(ctx); err != nil {
 		return nil, fmt.Errorf("transport: client concurrency limit: %w", err)
 	}
 	ok := false
@@ -81,27 +125,37 @@ func (s *Session) openRelayStream(frame *protocol.Frame) (net.Conn, error) {
 		}
 	}()
 
-	stream, err := s.session.OpenStream()
+	opened, err := tcp.OpenStreamContext(ctx, s.session)
 	if err != nil {
 		return nil, fmt.Errorf("transport: open tunnel stream: %w", err)
 	}
-	if err := stream.SetDeadline(time.Now().Add(TunnelTimeout)); err != nil {
-		_ = stream.Close()
+	if err := opened.SetDeadline(time.Now().Add(TunnelTimeout)); err != nil {
+		abortConnection(opened)
 		return nil, fmt.Errorf("transport: set tunnel deadline: %w", err)
 	}
-
+	stream := opened
+	pending.Store(&stream)
+	if err := ctx.Err(); err != nil {
+		abortConnection(stream)
+		return nil, err
+	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
-		_ = stream.Close()
+		abortConnection(stream)
 		return nil, fmt.Errorf("transport: write tunnel frame: %w", err)
 	}
 
 	if err := awaitTunnelResult(stream); err != nil {
-		_ = stream.Close()
+		abortConnection(stream)
+		return nil, err
+	}
+	finish()
+	if err := ctx.Err(); err != nil {
+		abortConnection(stream)
 		return nil, err
 	}
 	// 隧道建立后清掉 deadline：长连接不能被握手期的超时打断。
 	if err := stream.SetDeadline(time.Time{}); err != nil {
-		_ = stream.Close()
+		abortConnection(stream)
 		return nil, fmt.Errorf("transport: clear tunnel deadline: %w", err)
 	}
 	ok = true
@@ -109,7 +163,7 @@ func (s *Session) openRelayStream(frame *protocol.Frame) (net.Conn, error) {
 	return &gateStream{Stream: stream, release: s.gate.Release}, nil
 }
 
-// gateStream 包装隧道流：Close 时归还客户端级并发位（幂等）。
+// gateStream 的 CloseWrite 只发 FIN，Close 才结束整个隧道并归还并发位。
 type gateStream struct {
 	tcp.Stream
 	once    sync.Once
@@ -117,10 +171,17 @@ type gateStream struct {
 }
 
 func (g *gateStream) Close() error {
+	_ = g.Stream.SetDeadline(time.Now())
 	err := g.Stream.Close()
 	g.once.Do(g.release)
 	return err
 }
+
+// CloseWrite 结束上行，保留下行与并发位。
+func (g *gateStream) CloseWrite() error { return g.Stream.Close() }
+
+// Abort 中断两个方向并归还并发位。
+func (g *gateStream) Abort() { _ = g.Close() }
 
 // awaitTunnelResult 读流上的 TunnelResult 应答并判定成败；失败时返回可读错误。
 func awaitTunnelResult(stream tcp.Stream) error {
@@ -151,44 +212,9 @@ type Limiter interface {
 	Wait(ctx context.Context, n int) error
 }
 
-// PumpStats 汇集双向搬运的字节统计：四个计数都是原子的，可跨协程读写。
-// Up* 对应 a→b 方向（调用方约定 a 是用户侧），Down* 对应 b→a。
-type PumpStats struct {
-	UpRead    atomic.Int64 // 从 a（用户侧）读到的字节
-	UpWrite   atomic.Int64 // 写到 b（客户端侧）的字节
-	DownRead  atomic.Int64 // 从 b（客户端侧）读到的字节
-	DownWrite atomic.Int64 // 写到 a（用户侧）的字节
-}
-
-// 四个 nil 安全的取址方法：Stats 为 nil（未启用统计）时管线拿到空指针、直接跳过计数。
-
-func (s *PumpStats) upRead() *atomic.Int64 {
-	if s == nil {
-		return nil
-	}
-	return &s.UpRead
-}
-
-func (s *PumpStats) upWrite() *atomic.Int64 {
-	if s == nil {
-		return nil
-	}
-	return &s.UpWrite
-}
-
-func (s *PumpStats) downRead() *atomic.Int64 {
-	if s == nil {
-		return nil
-	}
-	return &s.DownRead
-}
-
-func (s *PumpStats) downWrite() *atomic.Int64 {
-	if s == nil {
-		return nil
-	}
-	return &s.DownWrite
-}
+// PumpStats 是泵的字节统计；类型定义在叶子包 stats，因为限速注册表也要持有它，
+// 而 ratelimit 反向依赖 transport 会把依赖方向带偏。
+type PumpStats = stats.PumpStats
 
 // ProxyOptions 是双向泵的可选参数：两个方向的限速器与字节统计。
 // 限速按用户要求挂在各方向的**读端**：上行限用户侧 reader（用户发多快），
@@ -196,10 +222,12 @@ func (s *PumpStats) downWrite() *atomic.Int64 {
 // Stats 与 ClientStats 是同一份字节的两个视角：前者记到用户头上，后者记到
 // 出口客户端头上，方向约定一致（Up = a→b，Down = b→a）。
 type ProxyOptions struct {
-	UpLimit     Limiter    // a→b 方向（用户上传）
-	DownLimit   Limiter    // b→a 方向（用户下载）
-	Stats       *PumpStats // 用户维度字节统计（可选）
-	ClientStats *PumpStats // 客户端维度字节统计（可选）
+	// Context 为 nil 时不绑定外部生命周期。
+	Context     context.Context
+	UpLimit     Limiter
+	DownLimit   Limiter
+	Stats       *PumpStats
+	ClientStats *PumpStats
 }
 
 // 隧道转发量与并发数：管理台图表的采样数据源，atomic 免锁、热路径只付一次加法。
@@ -239,9 +267,9 @@ type pipeline struct {
 	src       io.Reader
 	dst       io.Writer
 	limiter   Limiter
-	readCnt   *atomic.Int64 // 可为 nil
-	writeCnt  *atomic.Int64 // 可为 nil
-	clientCnt *atomic.Int64 // 可为 nil
+	readCnt   *atomic.Int64
+	writeCnt  *atomic.Int64
+	clientCnt *atomic.Int64
 	globalCnt *atomic.Int64
 	// teardown 是这一方向干净结束（源读到 EOF）后的收尾；abort 是出错后的收尾。
 	teardown func()
@@ -292,18 +320,34 @@ func (p *pipeline) run(ctx context.Context) {
 	}
 }
 
-// aborter 由出口端（b）可选实现：异常收尾时用它区分"干净半关闭"（Close 保留读方向）
-// 与"立刻全收尾"（Abort 一并中断读方向），供本机出口这类非 yamux 出口使用。
+// aborter 在异常收尾时中断两个方向，与正常 EOF 的半关闭分开。
 type aborter interface{ Abort() }
+
+func abortConnection(conn io.Closer) {
+	if ab, ok := conn.(aborter); ok {
+		ab.Abort()
+		return
+	}
+	if c, ok := conn.(interface{ SetDeadline(time.Time) error }); ok {
+		_ = c.SetDeadline(time.Now())
+	}
+	_ = conn.Close()
+}
+
+func closeWrite(conn io.Closer) {
+	if c, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = c.CloseWrite()
+		return
+	}
+	_ = conn.Close()
+}
 
 // ProxyBidirectional 双向搬运 a、b 之间的字节（调用方约定 **a 是用户侧、b 是客户端侧**）：
 // up 管线读 a 写 b（用户上传，限 a 的 reader），down 管线读 b 写 a（用户下载，限 b 的
 // reader）。方向分离，**不把任一方向 EOF 升级成整条断开**：
-//   - up 干净读尽（用户请求方向结束）→ Close b（隧道流）；yamux 的 Close 即半关闭：
-//     发 FIN 通知客户端，读方向保留，下载继续。
-//   - down 干净读尽（真实连接结束）→ Close a（用户侧）；VMess 连接的带内终结块
-//     随 Close 一并发出（见 vmess.Conn），用户据此收到响应结束信号。
-//   - 任一方向出错才走 abrupt：两端一起 Close。
+//   - up 干净读尽 → 半关闭 b 的写方向，保留下行和客户端并发位。
+//   - down 干净读尽 → 半关闭 a 的写方向；VMess 由 Close 发出带内终结块。
+//   - 任一方向出错或请求取消 → 中断两端；两个方向退出后最终关闭并归还资源。
 //
 // 两个方向都退出才返回；期间维护隧道并发与流量总计数。opts 可选限速与统计。
 func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptions) {
@@ -314,37 +358,39 @@ func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptio
 	tunnelActive.Add(1)
 	defer tunnelActive.Add(-1)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := o.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	var abrupt sync.Once
 	abruptClose := func() {
 		abrupt.Do(func() {
 			cancel()
-			_ = a.Close()
-			// b 可选实现 Abort：本机出口需要在此中断读方向，否则长连接目标会让下行泵永久阻塞。
-			if ab, ok := b.(aborter); ok {
-				ab.Abort()
-			} else {
-				_ = b.Close()
-			}
+			abortConnection(a)
+			abortConnection(b)
 		})
 	}
+	// 请求取消即中断两端；AfterFunc 只在真取消时才起协程，不必为每条隧道常驻一个观察者。
+	stopCancelWatch := context.AfterFunc(ctx, abruptClose)
+	defer stopCancelWatch()
 
 	up := &pipeline{
 		name: name + ".up", src: a, dst: b,
-		limiter: o.UpLimit, readCnt: o.Stats.upRead(), writeCnt: o.Stats.upWrite(),
-		clientCnt: o.ClientStats.upWrite(),
+		limiter: o.UpLimit, readCnt: o.Stats.UpReadRef(), writeCnt: o.Stats.UpWriteRef(),
+		clientCnt: o.ClientStats.UpWriteRef(),
 		globalCnt: &tunnelTraffic,
-		teardown:  func() { _ = b.Close() },
+		teardown:  func() { closeWrite(b) },
 		abort:     abruptClose,
 	}
 	down := &pipeline{
 		name: name + ".down", src: b, dst: a,
-		limiter: o.DownLimit, readCnt: o.Stats.downRead(), writeCnt: o.Stats.downWrite(),
-		clientCnt: o.ClientStats.downWrite(),
+		limiter: o.DownLimit, readCnt: o.Stats.DownReadRef(), writeCnt: o.Stats.DownWriteRef(),
+		clientCnt: o.ClientStats.DownWriteRef(),
 		globalCnt: &tunnelTraffic,
-		teardown:  func() { _ = a.Close() },
+		teardown:  func() { closeWrite(a) },
 		abort:     abruptClose,
 	}
 	var wg sync.WaitGroup

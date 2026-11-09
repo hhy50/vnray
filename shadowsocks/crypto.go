@@ -8,11 +8,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
+
+// DefaultMethod 是未指定时使用的加密方法。
+const DefaultMethod = "aes-256-gcm"
 
 // Method 是一种 AEAD 加密方法：主密钥长度与盐长度。
 type Method struct {
@@ -180,7 +182,6 @@ func (r *chunkReader) nextChunk() error {
 
 // chunkWriter 加密分块载荷：Write 的数据按块上限切片逐块加密写出。
 type chunkWriter struct {
-	mu    sync.Mutex
 	w     io.Writer
 	aead  cipher.AEAD
 	nonce *nonceGen
@@ -191,8 +192,6 @@ func newChunkWriter(w io.Writer, aead cipher.AEAD) *chunkWriter {
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	written := 0
 	for len(p) > 0 {
 		n := min(len(p), maxChunkPayload)

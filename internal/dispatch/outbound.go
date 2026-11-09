@@ -108,18 +108,6 @@ func (d *DirectOutbound) processTCP(ctx context.Context, link *Link, dest Destin
 	}
 	tcpConn, isTCP := conn.(*net.TCPConn)
 
-	// 会话取消时同时解除网络读写和管道读取。
-	done := make(chan struct{})
-	defer close(done)
-	routine.Go("core.direct.watchCancel", func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-			link.Reader.Interrupt()
-		case <-done:
-		}
-	})
-
 	var once sync.Once
 	teardown := func() {
 		once.Do(func() {
@@ -129,23 +117,35 @@ func (d *DirectOutbound) processTCP(ctx context.Context, link *Link, dest Destin
 		})
 	}
 
+	// 取消必须同时解除网络 I/O 和管道背压。
+	ctx, cancel := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	routine.Go("core.direct.watchCancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		teardown()
+	})
+	defer func() { cancel(); watcher.Wait() }()
+
 	// 上行泵：管道 → 目标；读到入站 FIN 时对目标 CloseWrite（发 TCP FIN），
 	// 让源站收到请求 EOF 后开始返回响应，下行方向保留。
-	// panic 在本地转换为 error 送入 upErr：若交给 routine 统一 recover，
-	// 结果将永远不会送达，Process 会在 <-upErr 处永久阻塞。
-	upErr := make(chan error, 1)
+	var upstream sync.WaitGroup
+	var upErr error
+	upstream.Add(1)
 	routine.Go("core.direct.upstream", func() {
+		defer upstream.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				upErr <- fmt.Errorf("core: upstream pump panicked: %v", r)
+				upErr = fmt.Errorf("core: upstream pump panicked: %v", r)
+				teardown()
 			}
 		}()
-		_, err := io.Copy(conn, link.Reader)
+		_, upErr = io.Copy(conn, link.Reader)
 		if isTCP {
 			// 上行 FIN：源站据此认为请求发完，开始返回响应
 			_ = tcpConn.CloseWrite()
 		}
-		upErr <- err
 	})
 
 	// 下行泵：目标 → 管道；目标 EOF（Connection: close 响应读完）后优雅关闭写端，
@@ -155,8 +155,9 @@ func (d *DirectOutbound) processTCP(ctx context.Context, link *Link, dest Destin
 	_ = conn.Close()
 	link.Reader.Interrupt()
 
-	if uerr := <-upErr; uerr != nil && downErr == nil {
-		downErr = uerr
+	upstream.Wait()
+	if upErr != nil && downErr == nil {
+		downErr = upErr
 	}
 	teardown()
 	return downErr
@@ -186,17 +187,6 @@ func (d *DirectOutbound) processUDP(ctx context.Context, link *Link, dest Destin
 		return fmt.Errorf("direct: listen udp: %w", err)
 	}
 
-	done := make(chan struct{})
-	defer close(done)
-	routine.Go("core.direct.udp.watchCancel", func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-			link.Reader.Interrupt()
-		case <-done:
-		}
-	})
-
 	var once sync.Once
 	teardown := func() {
 		once.Do(func() {
@@ -207,61 +197,67 @@ func (d *DirectOutbound) processUDP(ctx context.Context, link *Link, dest Destin
 	}
 	defer teardown()
 
-	upErr := make(chan error, 1)
-	routine.Go("core.direct.udp.up", func() {
+	ctx, cancel := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	routine.Go("core.direct.udp.watchCancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		teardown()
+	})
+	defer func() { cancel(); watcher.Wait() }()
+
+	var pumps sync.WaitGroup
+	var firstError sync.Once
+	var fail error
+	run := func(name string, pump func() error) {
+		pumps.Add(1)
+		routine.Go(name, func() {
+			defer pumps.Done()
+			defer teardown()
+			defer func() {
+				if r := recover(); r != nil {
+					firstError.Do(func() { fail = fmt.Errorf("%s: pump panicked: %v", name, r) })
+				}
+			}()
+			if err := pump(); err != nil {
+				firstError.Do(func() { fail = err })
+			}
+		})
+	}
+	run("core.direct.udp.up", func() error {
 		dc := protocol.NewDatagramConn(&linkRW{r: link.Reader, w: link.Writer})
 		for {
 			packet, rerr := dc.ReadPacket()
-			if len(packet) > 0 {
+			if len(packet) > 0 || rerr == nil {
 				if _, err := conn.WriteToUDP(packet, addr); err != nil {
-					upErr <- err
-					return
+					return err
 				}
 			}
 			if rerr != nil {
-				upErr <- nil
-				return
+				return nil
 			}
 		}
 	})
 
-	downErr := make(chan error, 1)
-	routine.Go("core.direct.udp.down", func() {
+	run("core.direct.udp.down", func() error {
 		dc := protocol.NewDatagramConn(&linkRW{r: link.Reader, w: link.Writer})
 		buf := make([]byte, protocol.MaxDatagram)
 		for {
 			n, _, rerr := conn.ReadFromUDP(buf)
-			if n > 0 {
+			if n > 0 || rerr == nil {
 				if werr := dc.WritePacket(buf[:n]); werr != nil {
-					downErr <- werr
-					return
+					return werr
 				}
 			}
 			if rerr != nil {
-				downErr <- nil
-				return
+				return nil
 			}
 		}
 	})
 
-	// 任一向结束后关 socket + 中断 link，促使另一向（若还挂在读上）尽快退出；
-	// 两向都退出才算整体结束（UDP 无半关闭，不能只等一向）。
-	pending := 2
-	var fail error
-	for pending > 0 {
-		var err error
-		select {
-		case err = <-upErr:
-		case err = <-downErr:
-		}
-		pending--
-		_ = conn.Close()
-		link.Reader.Interrupt()
-		link.Writer.Interrupt()
-		if err != nil && fail == nil {
-			fail = err
-		}
-	}
+	// 任一方向退出都中断另一方向，全部退出后再读取错误。
+	pumps.Wait()
 	return fail
 }
 

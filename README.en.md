@@ -39,12 +39,17 @@ Architecturally, this may look like installing a V2Ray server inside the client 
 
 ## Core capabilities
 
+- **Configuration reports** — Immediately after the secure handshake and every 5 minutes, clients report their current configuration and receive the full server configuration. The client Auth frame has been retired.
+- **vnray-user inbound** — Native users connect to a separate plugin port configured and enabled in the admin console; internal clients keep using the main port.
 - **Client-initiated tunnels** — The server does not need inbound access to the private network, which works well with NAT and outbound-only networks.
 - **VLESS / VMess access** — Connect with standard V2Ray clients; the two inbound protocols can be configured with separate ports in the admin console.
 - **Shadowsocks access** — Provides an AEAD TCP inbound; the default cipher is `aes-256-gcm`.
 - **Port mapping** — Expose a TCP service reachable by the client on a public port, such as SSH, a database, or an internal web service.
+  Each mapping tracks cumulative upload (visitor → local service) and download (local service → visitor), also included in client totals. Counts cover forwarded payload only, excluding TLS, tunnel, and encryption overhead. Totals are persisted at the traffic flush interval (10 seconds by default); refresh the mapping list to view them. Editing, disabling, or restarting preserves persisted totals; deleting a mapping removes its totals. An unexpected exit may lose pending increments.
 - **Per-client egress selection** — Connect multiple clients to one server and bind different users to different clients.
 - **Routing and host mapping** — Configure direct or reject rules, and map custom domains to specific IP addresses on the client side.
+- **User egress rules** — The server enforces account rules for vn-v1, VMess, VLESS, and Shadowsocks, with accounts identified by protocol and credential. Rejected destinations never open an exit tunnel. Direct destinations use the bound exit while bypassing its local routing. Mux TCP checks each sub-connection target; mux UDP checks every datagram target. Rule definitions stay on the server.
+- **Mux UDP / XUDP** — Supports per-datagram destinations and response source addresses, with up to 64 target/routing combinations per UDP sub-connection. GlobalID does not restore UDP exits across connections; reconnecting may change the NAT source port.
 - **Bandwidth and concurrency controls** — Limit upload/download bandwidth and concurrent connections per user.
 - **Admin console** — View client online status, latency, traffic, and configuration; manage users, plugins, keys, and port mappings online.
 - **Persistent storage** — Supports SQLite and MySQL; the example configuration uses SQLite.
@@ -71,6 +76,8 @@ The steps below use the example configuration included in the repository. For a 
 
 Alternatively, download prebuilt binaries from the [GitHub Releases page](https://github.com/hhy50/vnray/releases).
 
+For OpenWrt, [`openwrt/`](openwrt/README.md) provides a client package and LuCI settings with startup management and system logging. Build multi-architecture `.ipk` packages for opkg, or use the matching OpenWrt SDK for apk-based firmware.
+
 ### 1. Prepare the binaries
 
 Go `1.26+` is required. The server embeds the Vue admin console, so build the frontend assets before the first Go build:
@@ -81,6 +88,10 @@ npm install
 npm run build
 cd ../..
 ```
+
+Client command handling, configuration assembly, and reconnect logic live in `cmd/client`; the communication runtime lives in `internal/client`. The server entry point is in `cmd/server`, with assembly and service logic in `internal/core`.
+
+`core.initServerApp` explicitly constructs plugins, and `PluginManager` coordinates their state and lifecycle. User bindings, credential caches, and client configuration pushes live in `internal/access`; `admin` provides HTTP management and compatibility aliases for the original binding API. Failed startup rolls back created services. Shutdown stops management writes and new connections, waits for relays, flushes final traffic increments, then closes the database. See [ADR 0051](docs/adr/0051-server-lifecycle-and-control-boundaries.md).
 
 Then build the server and client from the repository root:
 
@@ -115,17 +126,21 @@ Start the server:
 
 ### 3. Start the client
 
-First sign in at `http://<server-address>:8080` and add a key on the **Authentication keys** page. Choose its scope, then copy the server-generated key. Custom passwords are no longer accepted. The example configurations contain no key, so this step is required before connecting a client.
+On its first database initialization, the server inserts the fixed initial key `2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=` with scope `*` (all clients). The client example uses the same key. Restarts do not duplicate it, overwrite edits, or restore a deleted key. Databases with existing server settings or keys do not receive this default.
+
+Database startup prepares the schema, then writes the initial key, service settings, default rules, plugin states, and initialization version in one transaction. Any failure rolls back the data and stops startup; the next startup can retry. Existing edits and deletions are preserved, and legacy markers and rule keys are migrated within the same transaction. MySQL schema statements are repeatable but cannot participate in the data transaction. Once initialized, changes to `plugin.enabled` do not seed new records; use the admin console.
+
+For additional keys, sign in at `http://<server-address>:8080`, choose a scope on the **Authentication keys** page, and generate a key to copy into the client configuration. The creation API does not accept manually supplied keys.
 
 Edit [`configs/client.yaml`](configs/client.yaml):
 
 ```yaml
 server:
   addr: <public-server-address>:9000
-  auth_key: <generated-key-copied-from-admin>
+  auth_key: 2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=
 ```
 
-Without the admin console, run `./vnserver keygen` and copy its output into both the server's `server.auth.key` and the client's `server.auth_key`. Keys encode 32 random bytes in standard Base64. A nonempty managed key table takes precedence over the configuration key. Clients are rejected when no valid key is available. Start the client on a machine that can reach the target service:
+The initial key also works without the admin console. A nonempty managed key table takes precedence over the configuration key. After clearing that table, run `./vnserver keygen` and copy its output into both the server's `server.auth.key` and the client's `server.auth_key` to use the configuration fallback. Keys encode 32 random bytes in standard Base64, and clients are rejected when no valid key is available. Start the client on a machine that can reach the target service:
 
 ```bash
 ./vnclient -c configs/client.yaml
@@ -139,7 +154,7 @@ The server indexes client keys in memory at startup. Handshake lookup and scope 
 
 The admin console's **Service configuration → Encrypted transport** switch controls communication after the handshake and defaults to enabled. Enabled connections use ChaCha20-Poly1305 AEAD between TCP and yamux for authentication, heartbeat, configuration and tunneled data. Disabled connections carry plaintext after the handshake, without confidentiality or integrity protection for business data. Both modes require auth_key proof and scope authorization. Clients follow the server automatically. Changes persist and apply to new connections; existing connections adopt the setting after reconnecting.
 
-Both peers contribute random challenges. HKDF-SHA256 and HMAC-SHA256 authenticate the selected mode, and Auth sends only the public key identifier, never the PSK. This PSK design has no forward secrecy, and holders of a shared key belong to the same trust domain. Transport v2 is incompatible with the previous AEAD v1 handshake: update both peers together; existing generated keys remain valid. Other entry points retain their own protocols: VLESS/VMess/SS, admin HTTP, and legacy `vn-v1` user connections. A plaintext user connection cannot authenticate as an internal client. See the [protocol](docs/PROTOCOL.md) and [ADR 0045](docs/adr/0045-negotiated-transport-encryption.md).
+Both peers contribute random challenges. HKDF-SHA256 and HMAC-SHA256 authenticate the selected mode, and the handshake sends only the public key identifier, never the PSK. Configuration reports carry no key. This PSK design has no forward secrecy, and holders of a shared key belong to the same trust domain. Transport v2 is incompatible with the previous AEAD v1 handshake: update both peers together; existing generated keys remain valid. VLESS/VMess/SS and admin HTTP retain their own protocols. Native `vn-v1` users now use the separate `vnray-user` port; the main port accepts only internal clients. See the [protocol](docs/PROTOCOL.md) and [ADR 0045](docs/adr/0045-negotiated-transport-encryption.md). The report protocol and separate user listener also require both peers to be updated together.
 
 ### 4. Open the admin console and create a user
 
@@ -166,10 +181,13 @@ Sign in with the configured admin account, then:
 | Purpose | Default port / configuration | Description |
 | --- | --- | --- |
 | Client tunnel | `9000`, `server.listen` | The port that clients use to connect proactively; it does not directly carry user protocol traffic |
+| vnray-user inbound | Set in the plugin page, e.g. `9001` | Separate native user port; disabled until configured |
 | Admin console | `8080`, `admin.listen` | Manage clients, users, plugins, and port mappings after signing in |
 | VMess inbound | Configured in the admin console; defaults to `11120` | For VMess client connections |
 | VLESS inbound | Configured in the admin console; defaults to `11121` | For VLESS client connections |
 | Shadowsocks inbound | Configured in the admin console | For Shadowsocks client connections |
+
+The `vnray-user` plugin starts disabled with no preset port. Configure and enable it under **Plugins**, then point native `vn-v1` users to that port. Existing user bindings, internal client addresses, and generated keys remain valid. Revoked keys are rejected on the next periodic report; disconnect sessions in the admin console for immediate revocation.
 
 ## Configuration files
 
@@ -205,5 +223,7 @@ The example configuration is intended for local verification and contains public
 - For production use, prefer VLESS with TLS and protect the certificates and private keys carefully.
 
 ## Project status
+
+Admin configuration changes are not serialized across requests. Concurrent saves may overwrite one another, and inbound configuration changes may affect or disconnect existing connections. Shared account, authentication, and connection tables use concurrent containers; individual table operations do not make an entire admin operation transactional.
 
 vnray is under active development. Protocols, configuration, and admin console APIs may change. Issues and improvement suggestions are welcome.

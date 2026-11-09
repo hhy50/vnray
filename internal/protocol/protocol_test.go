@@ -10,6 +10,18 @@ import (
 	"testing"
 )
 
+func TestClientAuthRetired(t *testing.T) {
+	if err := NewEncoder(io.Discard).WriteFrame(NewBufferedFrame(Auth, []byte(`{}`))); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("retired Auth encoder: %v", err)
+	}
+	header := make([]byte, headerLen)
+	copy(header, Magic[:])
+	header[3] = byte(Auth)
+	if _, err := NewDecoder(bytes.NewReader(header)).ReadFrame(); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("retired Auth decoder: %v", err)
+	}
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	addrPayload, err := Address{Host: "127.0.0.1", Port: 9001}.Bytes()
 	if err != nil {

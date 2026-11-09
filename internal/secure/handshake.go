@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -117,10 +118,11 @@ func handshake(ctx context.Context, raw net.Conn, exchange func() (*Conn, error)
 		_ = raw.Close()
 		return nil, err
 	}
-	stopped := make(chan struct{})
+	var watcher sync.WaitGroup
+	watcher.Add(1)
 	finished := make(chan struct{})
 	routine.Go("secure.handshake.cancel", func() {
-		defer close(stopped)
+		defer watcher.Done()
 		select {
 		case <-ctx.Done():
 			_ = raw.Close()
@@ -129,7 +131,7 @@ func handshake(ctx context.Context, raw net.Conn, exchange func() (*Conn, error)
 	})
 	conn, err := exchange()
 	close(finished)
-	<-stopped
+	watcher.Wait()
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}

@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
+	"sort"
 
 	"github.com/hhy50/vnray/internal/config"
-	"github.com/hhy50/vnray/internal/logging"
-	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
+	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
-	"github.com/hhy50/vnray/internal/transport"
-	"github.com/hhy50/vnray/vmess"
 )
 
 // Plugin 是一个可开关的入站插件：启停与参数持久化由实现负责，
@@ -22,13 +19,15 @@ type Plugin interface {
 	// Status 返回当前状态快照（管理台展示）。
 	Status() Status
 	// Restore 进程启动时恢复持久化的启停状态与参数。
-	Restore(ctx context.Context)
+	Restore(ctx context.Context) error
 	// Enable 以给定参数启用插件（持久化并立即生效）。
 	Enable(ctx context.Context, params map[string]string) error
 	// Disable 停用插件（持久化并立即生效）。
 	Disable(ctx context.Context) error
-	// Stop 运行中插件立即停止监听（进程收尾用，不改动持久化状态）。
+	// Stop 停止监听，保留存量连接与持久化状态。
 	Stop()
+	// Drain 终止存量工作并等待全部运行代次退出。
+	Drain(ctx context.Context) error
 }
 
 // PortKV 是插件的一个监听端口：协议名 + 端口号。
@@ -53,45 +52,67 @@ type TLSInfo struct {
 // 与启用对话框里的输入框（字段名 `<协议>_port`）。TLS 为该插件的 TLS 能力与当前参数，
 // nil 表示这个插件不支持 TLS。
 type Status struct {
-	Name    string            `json:"name"`
-	Enabled bool              `json:"enabled"`
-	Ports   []PortKV          `json:"ports,omitempty"`
-	Params  map[string]string `json:"params,omitempty"`
-	TLS     *TLSInfo          `json:"tls,omitempty"`
+	AcceptsUsers bool              `json:"accepts_users,omitempty"`
+	Name         string            `json:"name"`
+	Enabled      bool              `json:"enabled"`
+	Ports        []PortKV          `json:"ports,omitempty"`
+	Params       map[string]string `json:"params,omitempty"`
+	TLS          *TLSInfo          `json:"tls,omitempty"`
+	LastError    string            `json:"last_error,omitempty"`
 }
 
 // Manager 持有全部插件并作为服务接入生命周期：Start 恢复已启用插件，Drain 全部停止。
 // 插件表只在构造期写入、此后只读，无需加锁。
 type Manager struct {
-	store   store.Store
-	exits   transport.ExitResolver
-	limits  *ratelimit.Registry
-	traffic *traffic.Meter
 	plugins map[string]Plugin
-	// seedEnabled 是配置文件里的插件启用种子（仅首次：库中无记录时按内置默认参数启用）；
-	// 只在装配期写入、Start 读取，无需加锁。
-	seedEnabled []string
+	gate    *DrainGate
+	cancel  context.CancelFunc
 }
 
-// trafficAware 是接受流量记账器的插件能力：客户端维度的字节由各入站插件记。
-type trafficAware interface {
-	setTraffic(*traffic.Meter)
+// TrafficConsumer 接收入站流量记账器。
+type TrafficConsumer interface {
+	SetTraffic(*traffic.Meter)
+}
+
+// VLESSTLSConsumer 接收 TLS 参数的持久化依赖。
+type VLESSTLSConsumer interface {
+	SetVLESSTLSStore(VLESSTLSStore)
+}
+
+// SessionConfigConsumer 接收新会话参数的运行时更新。
+type SessionConfigConsumer interface {
+	ApplySessionConfig(*tcp.SessionConfig)
+}
+
+// DrainGateBinder 在注册时接入管理器的共享收尾状态门。
+type DrainGateBinder interface {
+	BindDrainGate(*DrainGate)
 }
 
 // SetTraffic 把记账器转交每个插件；须在 Start 之前调用。
 func (m *Manager) SetTraffic(t *traffic.Meter) {
-	m.traffic = t
 	for _, p := range m.plugins {
-		if tp, ok := p.(trafficAware); ok {
-			tp.setTraffic(t)
+		if tp, ok := p.(TrafficConsumer); ok {
+			tp.SetTraffic(t)
 		}
 	}
 }
 
 // SetVLESSTLS 注入 vless TLS 参数的读写口；须在 Start 之前调用。
 func (m *Manager) SetVLESSTLS(s VLESSTLSStore) {
-	if p, ok := m.plugins[pluginV2Ray].(*V2RayPlugin); ok {
-		p.tlsStore = s
+	for _, p := range m.plugins {
+		if consumer, ok := p.(VLESSTLSConsumer); ok {
+			consumer.SetVLESSTLSStore(s)
+		}
+	}
+}
+
+// ApplySessionConfig 更新用户入站的新会话参数（运行时配置热分发的一个落点）。
+func (m *Manager) ApplySessionConfig(cfg *tcp.SessionConfig) {
+	for _, p := range m.plugins {
+		if consumer, ok := p.(SessionConfigConsumer); ok {
+			consumer.ApplySessionConfig(cfg)
+		}
 	}
 }
 
@@ -100,10 +121,6 @@ func (m *Manager) SetVLESSTLS(s VLESSTLSStore) {
 type UserSyncer interface {
 	SyncUser(p store.Protocol, key, client string, status store.UserStatus, deleted bool)
 }
-
-var _ UserSyncer = (*V2RayPlugin)(nil)
-var _ TLSSetter = (*V2RayPlugin)(nil)
-var _ UserSyncer = (*SSPlugin)(nil)
 
 // MultiPortSetter 是支持运行中热切换多端口插件的各协议端口的能力（v2ray 实现它）：
 // 管理台的端口对话框经它一次改掉两个入站的端口。
@@ -133,24 +150,7 @@ type BasicAuthProvider interface {
 // 服务端配置表里，插件表只留端口。Get 返回 nil 表示从未配置过。
 type VLESSTLSStore interface {
 	VLESSTLS() *config.VLESSTLS
-	SetVLESSTLS(config.VLESSTLS) error
-}
-
-// ValidateUserKey 校验用户密钥格式：vmess/vless 用户的密钥是 uuid，须为合法 UUID；
-// ss 用户的密钥是连接密码，vn-v1 用户是共享密钥，都只要求非空（无用户名，密钥即身份）。
-// 添加用户时调用，避免"表里有、连不上"。
-func ValidateUserKey(p store.Protocol, key string) error {
-	switch {
-	case p.UsesUUID():
-		return vmess.ValidateUUID(key)
-	case p == store.ProtocolSS:
-		if key == "" {
-			return errors.New("plugin: ss password must not be empty")
-		}
-		return nil
-	default:
-		return nil
-	}
+	SetVLESSTLS(context.Context, config.VLESSTLS) error
 }
 
 // SyncUser 把一条用户变更推给全部实现了 UserSyncer 的插件（各插件自行按协议过滤），
@@ -163,19 +163,13 @@ func (m *Manager) SyncUser(p store.Protocol, key, client string, status store.Us
 	}
 }
 
-// NewManager 创建插件管理器：store 用于持久化插件启停状态与参数，
-// users 是用户的路由与配置入口（绑定表），exits 用于把流量路由到已接入的出口
-// （远程客户端会话或服务端本机出口），limits 用于按账号限速（可为 nil）。
-func NewManager(st store.Store, users UserStore, exits transport.ExitResolver, limits *ratelimit.Registry) *Manager {
-	m := &Manager{
-		store:   st,
-		exits:   exits,
-		limits:  limits,
-		plugins: make(map[string]Plugin),
+// NewRegistry 创建已由装配层构造的插件注册表。
+func NewRegistry(ctx context.Context, plugins ...Plugin) *Manager {
+	ctx, cancel := context.WithCancel(ctx)
+	m := &Manager{plugins: make(map[string]Plugin), gate: &DrainGate{ctx: ctx}, cancel: cancel}
+	for _, p := range plugins {
+		m.register(p)
 	}
-	m.register(newV2RayPlugin(st, users, exits, limits))
-	m.register(newSSPlugin(st, users, exits, limits))
-	m.register(newSQLiteWebPlugin(st))
 	return m
 }
 
@@ -184,91 +178,65 @@ func (m *Manager) register(p Plugin) {
 	if _, ok := m.plugins[p.Name()]; ok {
 		panic(fmt.Sprintf("plugin: duplicate plugin %q", p.Name()))
 	}
+	if aware, ok := p.(DrainGateBinder); ok {
+		aware.BindDrainGate(m.gate)
+	}
 	m.plugins[p.Name()] = p
 }
 
 // Name 返回服务名，用于启动日志与诊断。
 func (m *Manager) Name() string { return "PluginManager" }
 
-// Start 恢复持久化状态：已启用的插件立即开始监听；随后按配置种子启用尚未配置过的插件。
+// Start 恢复数据库中已启用的插件。
 func (m *Manager) Start(ctx context.Context) error {
-	for _, p := range m.plugins {
-		p.Restore(ctx)
+	if m.gate.IsDraining() {
+		return ErrDraining
 	}
-	return m.seed(ctx)
-}
-
-// SetSeedEnabled 设置配置文件的插件启用种子；须在 Start 之前调用。
-func (m *Manager) SetSeedEnabled(names []string) { m.seedEnabled = names }
-
-// seed 按配置种子启用插件：仅当该插件在库里没有任何记录时才用内置默认参数启用，
-// 已有记录（含管理台停用）一律以库为准。未知插件名视为配置错误，启动即失败。
-func (m *Manager) seed(ctx context.Context) error {
-	for _, name := range m.seedEnabled {
-		p, ok := m.plugins[name]
-		if !ok {
-			return fmt.Errorf("plugin: unknown plugin %q in config", name)
+	for _, name := range m.names() {
+		if err := m.plugins[name].Restore(ctx); err != nil {
+			return fmt.Errorf("restore plugin %s: %w", name, err)
 		}
-		if _, exists, err := m.store.GetPlugin(ctx, name); err != nil {
-			return fmt.Errorf("plugin: read %q state: %w", name, err)
-		} else if exists {
-			continue
-		}
-		params := defaultEnableParams(p)
-		if params == nil {
-			logging.Warn("plugin: skip config seed: no default port, configure it in the admin panel",
-				"plugin", name)
-			continue
-		}
-		if err := p.Enable(ctx, params); err != nil {
-			return fmt.Errorf("plugin: seed enable %q: %w", name, err)
-		}
-		logging.Info("plugin: enabled from config seed", "plugin", name)
 	}
 	return nil
-}
-
-// defaultEnableParams 取插件的内置默认启用参数（仅监听端口）：某槽位没有默认端口时
-// 返回 nil（如 ss 无内置默认端口，需在管理台配置端口后再启用）。字段名与管理台对话框
-// 一致：单端口用 port，多端口用 <协议>_port。
-func defaultEnableParams(p Plugin) map[string]string {
-	ports := p.Status().Ports
-	params := make(map[string]string)
-	for _, port := range ports {
-		if port.Port <= 0 {
-			return nil
-		}
-		key := string(port.Protocol) + "_port"
-		if len(ports) == 1 {
-			key = "port"
-		}
-		params[key] = strconv.Itoa(port.Port)
-	}
-	if len(params) == 0 {
-		return nil
-	}
-	return params
 }
 
 // Drain 停止全部运行中插件。
-func (m *Manager) Drain(context.Context) error {
-	for _, p := range m.plugins {
-		p.Stop()
+func (m *Manager) Drain(ctx context.Context) error {
+	m.gate.begin()
+	m.cancel()
+	var errs []error
+	for _, name := range m.names() {
+		if err := m.plugins[name].Drain(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("drain plugin %s: %w", name, err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-// List 返回全部插件的当前状态。
+func (m *Manager) names() []string {
+	names := make([]string, 0, len(m.plugins))
+	for name := range m.plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// List 按插件名称升序返回全部插件的当前状态。
 func (m *Manager) List() []Status {
 	out := make([]Status, 0, len(m.plugins))
 	for _, p := range m.plugins {
 		out = append(out, p.Status())
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
 // Get 按名字取插件；不存在时返回错误。
 func (m *Manager) Get(name string) (Plugin, error) {
+	if m.gate.IsDraining() {
+		return nil, ErrDraining
+	}
 	p, ok := m.plugins[name]
 	if !ok {
 		return nil, fmt.Errorf("plugin: unknown plugin %q", name)

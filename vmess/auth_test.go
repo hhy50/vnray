@@ -102,7 +102,7 @@ func TestSessionHistory(t *testing.T) {
 	copy(key[0:16], u0[:])
 	copy(key[16:32], bodyKey[:])
 	copy(key[32:48], bodyIV[:])
-	h.seen[key] = time.Now().Add(-4 * time.Minute)
+	h.seen.Store(key, time.Now().Add(-4*time.Minute))
 	if !h.Check(u0, bodyKey, bodyIV) {
 		t.Fatal("expired fingerprint should pass")
 	}

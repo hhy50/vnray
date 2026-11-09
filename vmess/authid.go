@@ -8,6 +8,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,31 +74,31 @@ func decodeAuthID(cmdKey []byte, id authID) (time.Time, error) {
 
 // replayFilter 阻断同一 AuthID 在重放窗口内的重复出现。
 type replayFilter struct {
-	mu     sync.Mutex
-	seen   map[authID]time.Time
-	lastGC time.Time
+	seen   sync.Map
+	lastGC atomic.Int64
 }
 
 func newReplayFilter() *replayFilter {
-	return &replayFilter{seen: make(map[authID]time.Time), lastGC: time.Now()}
+	f := &replayFilter{}
+	f.lastGC.Store(time.Now().UnixNano())
+	return f
 }
 
 // Check 记录并校验：窗口内重复出现返回 false。
 func (f *replayFilter) Check(id authID) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	key := id
 	now := time.Now()
-	if _, ok := f.seen[id]; ok {
+	if _, loaded := f.seen.LoadOrStore(key, now); loaded {
 		return false
 	}
-	f.seen[id] = now
-	if now.Sub(f.lastGC) > time.Minute {
-		for k, at := range f.seen {
-			if now.Sub(at) > replayWindowSecs*time.Second {
-				delete(f.seen, k)
+	last := f.lastGC.Load()
+	if now.UnixNano()-last > int64(time.Minute) && f.lastGC.CompareAndSwap(last, now.UnixNano()) {
+		f.seen.Range(func(key, value any) bool {
+			if now.Sub(value.(time.Time)) >= replayWindowSecs*time.Second {
+				f.seen.CompareAndDelete(key, value)
 			}
-		}
-		f.lastGC = now
+			return true
+		})
 	}
 	return true
 }
@@ -114,14 +115,13 @@ type user struct {
 
 // Validator 维护全部 VMess 账号并完成 AuthID → 账号 的认证（含时间窗与重放防护）。
 type Validator struct {
-	mu     sync.RWMutex
-	users  map[string]*user
+	users  sync.Map
 	replay *replayFilter
 }
 
 // NewValidator 创建空的账号验证器。
 func NewValidator() *Validator {
-	return &Validator{users: make(map[string]*user), replay: newReplayFilter()}
+	return &Validator{replay: newReplayFilter()}
 }
 
 // Add 注册一个账号；uuid 必须是标准 36 字符格式。
@@ -130,51 +130,49 @@ func (v *Validator) Add(uuid, client string) error {
 	if err != nil {
 		return err
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	var cmdKey [16]byte
 	copy(cmdKey[:], CmdKey(raw[:]))
 	block, err := aes.NewCipher(KDF16(cmdKey[:], KDFSaltConstAuthIDEncryptionKey))
 	if err != nil {
 		return err
 	}
-	v.users[uuid] = &user{uuid: uuid, raw: raw, cmdKey: cmdKey, authBlock: block, client: client}
+	v.users.Store(uuid, &user{uuid: uuid, raw: raw, cmdKey: cmdKey, authBlock: block, client: client})
 	return nil
 }
 
 // Remove 注销一个账号。
 func (v *Validator) Remove(uuid string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	delete(v.users, uuid)
+	v.users.Delete(uuid)
 }
 
 // Reset 清空全部账号；外部账号表整体重灌前的第一步。
 func (v *Validator) Reset() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.users = make(map[string]*user)
+	v.users.Clear()
 }
 
 // Match 认证 AuthID：逐账号尝试。AuthID 由各账号独立密钥加密，无法从密文反查
 // 归属，逐个解密不可避免（官方 AEAD 路径同构）；性能靠注册时预计算 AES 块——
 // 内循环只剩一次块解密 + CRC，不再有 KDF 链与 key schedule。
 func (v *Validator) Match(id authID) (*user, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
 	now := time.Now()
-	var plain [16]byte
-	for _, u := range v.users {
+	var matched *user
+	v.users.Range(func(_, value any) bool {
+		u := value.(*user)
+		var plain [16]byte
 		u.authBlock.Decrypt(plain[:], id[:])
-		if _, ok := authPlainTime(&plain, now); !ok {
-			continue
+		if _, ok := authPlainTime(&plain, now); ok {
+			matched = u
+			return false
 		}
-		if !v.replay.Check(id) {
-			return nil, errAuthIDReplay
-		}
-		return u, nil
+		return true
+	})
+	if matched == nil {
+		return nil, errAuthIDUserNotFound
 	}
-	return nil, errAuthIDUserNotFound
+	if !v.replay.Check(id) {
+		return nil, errAuthIDReplay
+	}
+	return matched, nil
 }
 
 // ValidateUUID 校验 UUID 字符串格式（管理端录入前的把关）。

@@ -4,9 +4,66 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPortMappingTrafficPersistence(t *testing.T) {
+	ctx := context.Background()
+	dsn := filepath.Join(t.TempDir(), "mapping.db")
+	st, err := Open(ctx, "sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	m := PortMapping{Client: "edge-1", RemotePort: 7000, LocalHost: "127.0.0.1", LocalPort: 80,
+		Enabled: true, Up: 999, Down: 999}
+	if err := st.SetPortMapping(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListPortMappings(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("mappings = %v, err = %v", rows, err)
+	}
+	m = rows[0]
+	if m.Up != 0 || m.Down != 0 {
+		t.Fatal("configuration create must not set traffic counters")
+	}
+	for _, delta := range [][2]int64{{100, 200}, {10, 20}, {0, 0}} {
+		if err := st.AddPortMappingTraffic(ctx, m.ID, delta[0], delta[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok, err := st.GetPortMapping(ctx, m.ID)
+	if err != nil || !ok || got.Up != 110 || got.Down != 220 || !got.UpdatedAt.Equal(m.UpdatedAt) {
+		t.Fatalf("traffic update changed config time or totals: %+v, ok=%v err=%v", got, ok, err)
+	}
+	m.Enabled = false
+	m.LocalPort = 8080
+	if err := st.SetPortMapping(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	for _, delta := range [][2]int64{{-1, 0}, {0, -1}} {
+		if err := st.AddPortMappingTraffic(ctx, m.ID, delta[0], delta[1]); err == nil {
+			t.Fatalf("negative delta accepted: %v", delta)
+		}
+	}
+	if err := st.AddPortMappingTraffic(ctx, 0, 1, 1); err == nil {
+		t.Fatal("zero mapping ID accepted")
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(ctx, "sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = st.GetPortMapping(ctx, m.ID)
+	if err != nil || !ok || got.Up != 110 || got.Down != 220 || got.Enabled || got.LocalPort != 8080 {
+		t.Fatalf("traffic/config not preserved after reopen: %+v, ok=%v err=%v", got, ok, err)
+	}
+}
 
 func TestPortMappingConformance(t *testing.T) {
 	st := sqliteStore(t)

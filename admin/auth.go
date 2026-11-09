@@ -33,12 +33,11 @@ type session struct {
 
 // sessionStore 是内存会话表；进程重启全部失效。
 type sessionStore struct {
-	mu    sync.RWMutex
-	items map[string]*session
+	items sync.Map
 }
 
 func newSessionStore() *sessionStore {
-	return &sessionStore{items: make(map[string]*session)}
+	return &sessionStore{}
 }
 
 // sessionTTL 是会话有效期：12 小时。
@@ -48,12 +47,11 @@ const sessionTTL = 12 * time.Hour
 const sessionCookieName = "vnray_admin_session"
 
 func (s *sessionStore) get(token string) (*session, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sess, ok := s.items[token]
+	value, ok := s.items.Load(token)
 	if !ok {
 		return nil, false
 	}
+	sess := value.(*session)
 	if time.Now().After(sess.ExpiresAt) {
 		return nil, false
 	}
@@ -61,15 +59,11 @@ func (s *sessionStore) get(token string) (*session, bool) {
 }
 
 func (s *sessionStore) set(token string, sess *session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.items[token] = sess
+	s.items.Store(token, sess)
 }
 
 func (s *sessionStore) delete(token string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.items, token)
+	s.items.Delete(token)
 }
 
 // cleanup 定期清过期会话；调用方用 routine.Go 启动。
@@ -81,14 +75,13 @@ func (s *sessionStore) cleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.Lock()
 			now := time.Now()
-			for k, v := range s.items {
-				if now.After(v.ExpiresAt) {
-					delete(s.items, k)
+			s.items.Range(func(key, value any) bool {
+				if now.After(value.(*session).ExpiresAt) {
+					s.items.CompareAndDelete(key, value)
 				}
-			}
-			s.mu.Unlock()
+				return true
+			})
 		}
 	}
 }
@@ -113,8 +106,7 @@ const (
 // loginLimiter 按 IP+用户名 记录登录失败：窗口内失败达到阈值后锁定。
 // 只存失败记录，量级很小；过期条目在读写时惰性清理。
 type loginLimiter struct {
-	mu    sync.Mutex
-	fails map[string]*loginFails
+	fails sync.Map
 }
 
 type loginFails struct {
@@ -124,20 +116,19 @@ type loginFails struct {
 }
 
 func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{fails: make(map[string]*loginFails)}
+	return &loginLimiter{}
 }
 
 // allowed 报告该 key 当前是否允许尝试登录；锁定中返回剩余等待时长。
 func (l *loginLimiter) allowed(key string) (bool, time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	f, ok := l.fails[key]
+	value, ok := l.fails.Load(key)
 	if !ok {
 		return true, 0
 	}
+	f := value.(*loginFails)
 	now := time.Now()
 	if now.After(f.lockedTo) && now.Sub(f.firstAt) > loginFailWindow {
-		delete(l.fails, key)
+		l.fails.CompareAndDelete(key, value)
 		return true, 0
 	}
 	if now.Before(f.lockedTo) {
@@ -148,25 +139,30 @@ func (l *loginLimiter) allowed(key string) (bool, time.Duration) {
 
 // fail 记录一次失败；窗口内累计达到阈值即锁定。
 func (l *loginLimiter) fail(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	now := time.Now()
-	f, ok := l.fails[key]
-	if !ok || now.Sub(f.firstAt) > loginFailWindow {
-		l.fails[key] = &loginFails{count: 1, firstAt: now}
-		return
-	}
-	f.count++
-	if f.count >= loginMaxFails {
-		f.lockedTo = now.Add(loginLockout)
+	for {
+		next := &loginFails{count: 1, firstAt: now}
+		previous, loaded := l.fails.LoadOrStore(key, next)
+		if !loaded {
+			return
+		}
+		current := previous.(*loginFails)
+		if now.Sub(current.firstAt) <= loginFailWindow {
+			*next = *current
+			next.count++
+			if next.count >= loginMaxFails {
+				next.lockedTo = now.Add(loginLockout)
+			}
+		}
+		if l.fails.CompareAndSwap(key, previous, next) {
+			return
+		}
 	}
 }
 
 // succeed 登录成功后清零该 key 的失败记录。
 func (l *loginLimiter) succeed(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.fails, key)
+	l.fails.Delete(key)
 }
 
 // --- 认证服务 ---
@@ -280,7 +276,16 @@ func (a *AuthService) SessionByToken(token string) (*session, bool) {
 
 // Start 启动后台清理协程。
 func (a *AuthService) Start(ctx context.Context) {
-	routine.Go("admin.session.cleanup", func() { a.sessions.cleanup(ctx) })
+	_ = a.start(ctx)
+}
+
+func (a *AuthService) start(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	routine.Go("admin.session.cleanup", func() {
+		defer close(done)
+		a.sessions.cleanup(ctx)
+	})
+	return done
 }
 
 // --- 辅助 ---

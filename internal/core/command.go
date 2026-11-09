@@ -15,7 +15,7 @@ import (
 )
 
 // version 由构建参数（-ldflags "-X .../internal/serverapp.version=x.y.z"）覆盖，
-// 默认 dev 用于本地 go run；与 internal/cli.version 各自独立。
+// 默认 dev 用于本地 go run；与 cmd/client 的 version 各自独立。
 var version = "dev"
 
 // registerConfigFlag 注册配置文件路径 flag；日志不提供命令行覆盖，统一在配置文件的 log 段设置。

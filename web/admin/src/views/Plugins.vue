@@ -160,7 +160,6 @@ onMounted(load)
               </el-tag>
             </template>
             <span v-else class="faint">{{ t('plugins.noPort') }}</span>
-            <el-tag v-if="!row.enabled" size="small" type="warning" effect="plain">{{ t('plugins.pending') }}</el-tag>
           </div>
         </template>
       </el-table-column>

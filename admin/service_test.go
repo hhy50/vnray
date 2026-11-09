@@ -5,6 +5,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -198,7 +199,7 @@ func TestClientConfigAPI(t *testing.T) {
 	if w := save(apiClientConfigIn{Config: `{"note":"ops"}`}, "edge-1"); w.Code != http.StatusOK {
 		t.Fatalf("save: status = %d, body %s", w.Code, w.Body.String())
 	}
-	cb, ok := bindings.LookupClient("edge-1")
+	cb, ok := bindings.LookupClient(context.Background(), "edge-1")
 	if !ok || cb.ServerConfig != `{"note":"ops"}` {
 		t.Fatalf("stored config = %+v, want the saved JSON in server_config", cb)
 	}
@@ -207,7 +208,7 @@ func TestClientConfigAPI(t *testing.T) {
 	if w := save(apiClientConfigIn{Config: ""}, "edge-1"); w.Code != http.StatusOK {
 		t.Fatalf("clear: status = %d", w.Code)
 	}
-	if cb, ok := bindings.LookupClient("edge-1"); !ok || cb.ServerConfig != "" {
+	if cb, ok := bindings.LookupClient(context.Background(), "edge-1"); !ok || cb.ServerConfig != "" {
 		t.Fatalf("cleared config = %+v, want an empty config", cb)
 	}
 }
@@ -225,12 +226,12 @@ func TestClientConfigLogLevel(t *testing.T) {
 		return w
 	}
 
-	bindings.SaveClientReportedConfig("edge-1", `{"name":"edge-1","os":"darwin"}`)
+	bindings.SaveClientReportedConfig(context.Background(), "edge-1", `{"name":"edge-1","os":"darwin"}`)
 
 	if w := save(apiClientConfigIn{Config: `{"note":"ops"}`, LogLevel: "debug"}); w.Code != http.StatusOK {
 		t.Fatalf("save: status = %d", w.Code)
 	}
-	cb, ok := bindings.LookupClient("edge-1")
+	cb, ok := bindings.LookupClient(context.Background(), "edge-1")
 	if !ok {
 		t.Fatal("client binding not stored")
 	}
@@ -247,7 +248,7 @@ func TestClientConfigLogLevel(t *testing.T) {
 	if w := save(apiClientConfigIn{Config: cb.ServerConfig, LogLevel: "info"}); w.Code != http.StatusOK {
 		t.Fatalf("reset: status = %d", w.Code)
 	}
-	cb, _ = bindings.LookupClient("edge-1")
+	cb, _ = bindings.LookupClient(context.Background(), "edge-1")
 	if cfg := store.ParseClientConfig(cb.ServerConfig); cfg.LogLevel != "" {
 		t.Fatalf("stored log_level = %q after resetting to info, want empty", cfg.LogLevel)
 	}

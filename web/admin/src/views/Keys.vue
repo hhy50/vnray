@@ -15,7 +15,8 @@ const loading = ref(false)
 
 const showAdd = ref(false)
 const saving = ref(false)
-const form = reactive({ key: '', scope: '*' })
+const form = reactive({ scope: '*' })
+const generatedKey = ref('')
 
 const scopeOptions = computed(() => [
   { value: '*', label: t('keys.scopeAll') },
@@ -36,26 +37,18 @@ async function load() {
 }
 
 function openAdd() {
-  form.key = generateKey()
+  generatedKey.value = ''
   form.scope = '*'
   showAdd.value = true
 }
 
-function generateKey(): string {
-  const b = new Uint8Array(24)
-  crypto.getRandomValues(b)
-  return Array.from(b, (x) => ('0' + x.toString(16)).slice(-2)).join('')
-}
-
 async function save() {
-  if (form.key.trim().length < 8) {
-    ElMessage.warning(t('keys.needLength'))
-    return
-  }
+  if (saving.value || generatedKey.value) return
   saving.value = true
   try {
-    await api.keySave({ key: form.key.trim(), scope: form.scope.trim() || '*' })
-    showAdd.value = false
+    const result = await api.keySave({ scope: form.scope.trim() || '*' })
+    generatedKey.value = result.key
+    form.scope = result.scope
     ElMessage.success(t('keys.saved'))
     await load()
   } catch (err) {
@@ -153,17 +146,18 @@ onMounted(load)
     </p>
   </el-card>
 
-  <el-dialog v-model="showAdd" :title="t('keys.dialogTitle')" width="min(560px, 94vw)" :close-on-click-modal="false">
+  <el-dialog v-model="showAdd" :title="t('keys.dialogTitle')" width="min(560px, 94vw)" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
     <el-form label-position="top">
-      <el-form-item :label="t('keys.keyLabel')">
+      <el-form-item v-if="generatedKey" :label="t('keys.keyLabel')">
         <div class="key-row">
-          <el-input v-model="form.key" class="mono" />
-          <el-button @click="form.key = generateKey()">{{ t('keys.regenerate') }}</el-button>
+          <el-input :model-value="generatedKey" readonly class="mono" />
+          <el-button :icon="CopyDocument" @click="copy(generatedKey)">{{ t('common.copy') }}</el-button>
         </div>
       </el-form-item>
       <el-form-item :label="t('keys.scopeLabel')">
         <el-select
           v-model="form.scope"
+          :disabled="saving || !!generatedKey"
           filterable
           allow-create
           default-first-option
@@ -173,14 +167,15 @@ onMounted(load)
           <el-option v-for="o in scopeOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </el-form-item>
+      <p class="hint-inline">{{ t('keys.generatedHint') }}</p>
       <p class="hint-inline">
         {{ t('keys.scopeHintBefore') }}<span class="mono">*</span>{{ t('keys.scopeHintAll') }}<span class="mono">team:*</span>{{ t('keys.scopeHintNs') }}
         <span class="mono">team:office:mac</span>{{ t('keys.scopeHintOne') }}
       </p>
     </el-form>
     <template #footer>
-      <el-button @click="showAdd = false">{{ t('common.cancel') }}</el-button>
-      <el-button type="primary" :loading="saving" @click="save">{{ t('common.add') }}</el-button>
+      <el-button :disabled="saving" @click="showAdd = false">{{ t(generatedKey ? 'common.close' : 'common.cancel') }}</el-button>
+      <el-button v-if="!generatedKey" type="primary" :loading="saving" @click="save">{{ t('keys.generate') }}</el-button>
     </template>
   </el-dialog>
 </template>

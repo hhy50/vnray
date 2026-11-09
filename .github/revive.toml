@@ -1,0 +1,6 @@
+ignoreGeneratedHeader = true
+severity = "warning"
+confidence = 0.8
+
+[rule.exported]
+[rule.package-comments]

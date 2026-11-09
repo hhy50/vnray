@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"fmt"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"net"
 	"net/http"
@@ -101,7 +102,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	// ss 插件：启用 + 密码路由（ss 用户写进绑定表，与生产装配同一条路径）。
 	st := testStore(t)
 	bindings := admin.NewBindings(st)
-	plugins := plugin.NewManager(st, bindings, svc.Sessions(), nil)
+	plugins := plugin.NewRegistry(context.Background(), inbound.NewSSPlugin(st, bindings, svc.Sessions(), nil))
 	bindings.Watch(func(c admin.UserChange) {
 		plugins.SyncUser(c.Protocol, c.Key, c.Client, c.Status, c.Deleted)
 	})
@@ -122,7 +123,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 	if err := ss.Enable(context.Background(), map[string]string{"port": strconv.Itoa(freePort)}); err != nil {
 		t.Fatalf("enable ss: %v", err)
 	}
-	if err := bindings.PutUser(store.UserBinding{
+	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eSSPassword, Protocol: store.ProtocolSS, Name: "e2e-ss",
 		Status: store.UserEnabled, Client: "test-edge",
 	}); err != nil {
@@ -148,7 +149,7 @@ func TestSSPluginEndToEnd(t *testing.T) {
 		t.Fatalf("response = %q, want origin payload", string(got))
 	}
 	for _, method := range []string{"aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"} {
-		if err := bindings.PutUser(store.UserBinding{
+		if err := bindings.PutUser(context.Background(), store.UserBinding{
 			Key: method + "-password", Protocol: store.ProtocolSS, Name: method,
 			Status: store.UserEnabled, Client: "test-edge", Config: store.UserConfig{SSMethod: method},
 		}); err != nil {

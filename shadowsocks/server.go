@@ -5,6 +5,7 @@ package shadowsocks
 // 的载荷通道。Shadowsocks 没有带内结束块，连接关闭即双向结束。
 
 import (
+	"context"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
@@ -70,47 +72,45 @@ const saltReplayWindow = 10 * time.Minute
 
 // saltFilter 阻断同一会话盐在窗口内重复出现（AEAD 盐重放防护）。
 type saltFilter struct {
-	mu     sync.Mutex
-	seen   map[string]time.Time
-	lastGC time.Time
+	seen   sync.Map
+	lastGC atomic.Int64
 }
 
 func newSaltFilter() *saltFilter {
-	return &saltFilter{seen: make(map[string]time.Time), lastGC: time.Now()}
+	f := &saltFilter{}
+	f.lastGC.Store(time.Now().UnixNano())
+	return f
 }
 
 // Check 记录并校验：窗口内重复出现返回 false。
 func (f *saltFilter) Check(salt []byte) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	now := time.Now()
 	key := string(salt)
-	if _, ok := f.seen[key]; ok {
+	now := time.Now()
+	if _, loaded := f.seen.LoadOrStore(key, now); loaded {
 		return false
 	}
-	f.seen[key] = now
-	if now.Sub(f.lastGC) > time.Minute {
-		for k, at := range f.seen {
-			if now.Sub(at) > saltReplayWindow {
-				delete(f.seen, k)
+	last := f.lastGC.Load()
+	if now.UnixNano()-last > int64(time.Minute) && f.lastGC.CompareAndSwap(last, now.UnixNano()) {
+		f.seen.Range(func(key, value any) bool {
+			if now.Sub(value.(time.Time)) >= saltReplayWindow {
+				f.seen.CompareAndDelete(key, value)
 			}
-		}
-		f.lastGC = now
+			return true
+		})
 	}
 	return true
 }
 
 // Validator 维护全部 Shadowsocks 账号并完成逐账号试解认证。
 type Validator struct {
-	mu     sync.RWMutex
-	users  []*account
+	users  sync.Map
 	salts  *saltFilter
 	method Method
 }
 
 // NewValidator 创建指定加密方法的空账号验证器。
 func NewValidator(method Method) *Validator {
-	return &Validator{users: make([]*account, 0), salts: newSaltFilter(), method: method}
+	return &Validator{salts: newSaltFilter(), method: method}
 }
 
 // Add 注册一个账号；密码不得为空（Shadowsocks 无用户名，密码即身份）。
@@ -135,48 +135,43 @@ func (v *Validator) add(password, client string, method Method) error {
 	if client == "" {
 		return errors.New("shadowsocks: client must not be empty")
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	acc := &account{password: password, client: client, method: method,
 		masterKey: evpBytesToKey([]byte(password), method.KeyLen)}
-	for i, u := range v.users {
-		if u.password == password {
-			v.users[i] = acc
-			return nil
-		}
-	}
-	v.users = append(v.users, acc)
+	v.users.Store(password, acc)
 	return nil
 }
 
 // Remove 注销一个账号；不存在时为空操作。
 func (v *Validator) Remove(password string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for i, u := range v.users {
-		if u.password == password {
-			v.users = append(v.users[:i], v.users[i+1:]...)
-			return
-		}
-	}
+	v.users.Delete(password)
 }
 
 // Reset 清空全部账号；外部账号表整体重灌前的第一步。
 func (v *Validator) Reset() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.users = v.users[:0]
+	v.users.Clear()
+}
+
+// ReplaceUsers 替换账号表并保留盐重放记录。
+func (v *Validator) ReplaceUsers(prepared *Validator) {
+	if prepared == v {
+		return
+	}
+	users := prepared.snapshot()
+	v.users.Clear()
+	for _, account := range users {
+		v.users.Store(account.password, account)
+	}
 }
 
 // Method 返回 Add 使用的默认加密方法。
 func (v *Validator) Method() Method { return v.method }
 
-// snapshot 返回账号切片的副本，试解循环不必持锁。
 func (v *Validator) snapshot() []*account {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	out := make([]*account, len(v.users))
-	copy(out, v.users)
+	out := make([]*account, 0)
+	v.users.Range(func(_, value any) bool {
+		out = append(out, value.(*account))
+		return true
+	})
 	// 先试短盐，避免等待尚未发送的长盐字节而阻塞短盐账号的握手。
 	sort.SliceStable(out, func(i, j int) bool { return out[i].method.SaltLen < out[j].method.SaltLen })
 	return out
@@ -187,36 +182,60 @@ const handshakeTimeout = 15 * time.Second
 
 // Server 是 Shadowsocks 入站服务：持有账号验证器与连接处理器，驱动每条连接的一生。
 type Server struct {
-	ln        net.Listener
+	ln        atomic.Pointer[net.Listener]
 	validator *Validator
 	handler   Handler
-
-	mu     sync.Mutex
-	closed bool
+	state     atomic.Int32
+	active    sync.Map
+	wg        sync.WaitGroup
+	drainOnce sync.Once
+	drained   chan struct{}
 }
 
 // NewServer 创建 Shadowsocks 入站服务。
 func NewServer(validator *Validator, handler Handler) *Server {
-	return &Server{validator: validator, handler: handler}
+	return &Server{validator: validator, handler: handler, drained: make(chan struct{})}
 }
 
 // Serve 在给定监听器上接受连接并逐条处理；阻塞直到监听器关闭。
 func (s *Server) Serve(ln net.Listener) error {
-	s.mu.Lock()
-	s.ln = ln
-	s.mu.Unlock()
+	if !s.state.CompareAndSwap(0, 1) {
+		_ = ln.Close()
+		if s.state.Load() == 2 {
+			return nil
+		}
+		return fmt.Errorf("shadowsocks: already started")
+	}
+	// 接入循环退出后才等待处理器，避免 Wait 与首次 Add 并发。
+	defer func() {
+		routine.Go("shadowsocks.done", func() {
+			s.wg.Wait()
+			close(s.drained)
+		})
+	}()
+	defer func() { _ = ln.Close(); _ = s.Close() }()
+	s.ln.Store(&ln)
+	if s.state.Load() == 2 {
+		return nil
+	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
+			if s.state.Load() == 2 {
 				return nil
 			}
 			return fmt.Errorf("shadowsocks: accept: %w", err)
 		}
+		s.active.Store(conn, struct{}{})
+		if s.state.Load() == 2 {
+			s.active.Delete(conn)
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
 		routine.Go("shadowsocks.conn", func() {
+			defer s.wg.Done()
+			defer s.active.Delete(conn)
 			s.handle(conn)
 		})
 	}
@@ -224,14 +243,37 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Close 停止接受新连接；已在处理的连接由各自协程收尾。
 func (s *Server) Close() error {
-	s.mu.Lock()
-	s.closed = true
-	ln := s.ln
-	s.mu.Unlock()
-	if ln != nil {
-		return ln.Close()
+	previous := s.state.Swap(2)
+	if previous == 2 {
+		return nil
+	}
+	if previous == 0 {
+		close(s.drained)
+	}
+	if ln := s.ln.Load(); ln != nil {
+		return (*ln).Close()
 	}
 	return nil
+}
+
+// Done 在停止接入且全部握手与处理器退出后关闭，不主动终止连接。
+func (s *Server) Done() <-chan struct{} { return s.drained }
+
+// Drain 终止全部连接，并等待握手与处理器退出。
+func (s *Server) Drain(ctx context.Context) error {
+	s.drainOnce.Do(func() {
+		_ = s.Close()
+		s.active.Range(func(key, _ any) bool {
+			_ = key.(net.Conn).Close()
+			return true
+		})
+	})
+	select {
+	case <-s.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // handle 驱动一条 Shadowsocks 连接：读盐 → 逐账号试解认证 → 解析地址 →

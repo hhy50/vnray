@@ -2,8 +2,7 @@ package store
 
 import "time"
 
-// ServiceSettingsInitializedKey 是"默认值已落库"的标记键：表里存在这一行即表示初始化
-// 做过，重启不再重刷，避免覆盖用户改过的值。
+// ServiceSettingsInitializedKey 是旧版服务配置初始化标记；统一初始化时清理。
 const ServiceSettingsInitializedKey = "initialized"
 
 // serviceSettingsModel 是 vn_service_settings 表的一行：一段运行时配置。

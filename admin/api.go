@@ -5,14 +5,15 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hhy50/vnray/internal/access"
 	"github.com/hhy50/vnray/internal/logging"
-	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
@@ -106,7 +107,7 @@ type apiClientDTO struct {
 func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	platform := strings.TrimSpace(r.URL.Query().Get("platform"))
-	_, clientTraffic := s.trafficMaps()
+	_, clientTraffic := s.trafficMaps(r.Context())
 
 	rows := make([]apiClientDTO, 0, 16)
 	online := make(map[string]bool, 16)
@@ -145,7 +146,7 @@ func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 
 	// 已注册但此刻没接进来的客户端也要可见
 	if s.opts.Bindings != nil {
-		for _, cb := range s.opts.Bindings.ClientSnapshot() {
+		for _, cb := range s.opts.Bindings.ClientSnapshot(r.Context()) {
 			if online[cb.ClientKey] || platform != "" {
 				continue
 			}
@@ -222,7 +223,7 @@ func (s *AdminService) apiClientDetail(w http.ResponseWriter, r *http.Request) {
 		break
 	}
 	if s.opts.Bindings != nil {
-		if cb, ok := s.opts.Bindings.LookupClient(name); ok {
+		if cb, ok := s.opts.Bindings.LookupClient(r.Context(), name); ok {
 			out.HasStored = true
 			out.Local = cb.ClientType == store.ClientTypeLocal
 			out.UpdatedAt = cb.UpdatedAt.Format("2006-01-02 15:04:05")
@@ -234,7 +235,15 @@ func (s *AdminService) apiClientDetail(w http.ResponseWriter, r *http.Request) {
 			default:
 				out.ServerConfig, out.StoredRaw = cb.ServerConfig, true
 			}
-			out.LogLevel = store.ParseClientConfig(cb.ServerConfig).LogLevel
+			// 本客户端配置、日志级别与并发上限同出一行，解析一次即可，不必再各查一次库。
+			cc := store.ParseClientConfig(cb.ServerConfig)
+			out.LogLevel, out.Concurrency = cc.LogLevel, cc.Concurrency
+			if cc.CustomHosts != nil {
+				out.Hosts = cc.CustomHosts
+			}
+			if cc.IPMaps != nil {
+				out.IPMaps = cc.IPMaps
+			}
 			if out.ReportedJSON == "" && cb.Config != "" {
 				if jsonValid(cb.Config) {
 					out.ReportedJSON = prettyJSON(cb.Config)
@@ -243,14 +252,6 @@ func (s *AdminService) apiClientDetail(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		push := s.opts.Bindings.ClientPushConfig(name)
-		if push.CustomHosts != nil {
-			out.Hosts = push.CustomHosts
-		}
-		if push.IPMaps != nil {
-			out.IPMaps = push.IPMaps
-		}
-		out.Concurrency = s.opts.Bindings.ClientConcurrency(name)
 	}
 	apiOK(w, out)
 }
@@ -305,12 +306,7 @@ func (s *AdminService) apiClientConfigSave(w http.ResponseWriter, r *http.Reques
 		}
 		raw = string(merged)
 	}
-	cur, ok := s.opts.Bindings.LookupClient(name)
-	if !ok {
-		cur = ClientBinding{ClientKey: name, ClientType: store.ClientTypeProxy}
-	}
-	cur.ServerConfig = raw
-	if err := s.opts.Bindings.SetClient(cur); err != nil {
+	if err := s.opts.Bindings.SaveClientServerConfig(r.Context(), name, raw); err != nil {
 		logging.Error("admin: client config save failed", "client", name, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
 		return
@@ -334,6 +330,8 @@ type apiClientHostsIn struct {
 	IPMaps      []apiIPMapRow `json:"ip_maps"`
 	Concurrency int           `json:"concurrency"`
 }
+
+var errClientConfigInvalid = errors.New("existing client config is invalid")
 
 // apiClientHostsSave 保存自定义 Host、IP 段映射与并发上限。
 func (s *AdminService) apiClientHostsSave(w http.ResponseWriter, r *http.Request) {
@@ -377,49 +375,41 @@ func (s *AdminService) apiClientHostsSave(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cur, ok := s.opts.Bindings.LookupClient(name)
-	if !ok {
-		cur = ClientBinding{ClientKey: name, ClientType: store.ClientTypeProxy}
-	}
-	obj := map[string]any{}
-	if cur.ServerConfig != "" {
-		if !jsonUnmarshalObj(cur.ServerConfig, &obj) || obj == nil {
-			apiFailKey(w, r, http.StatusBadRequest, msgExistingConfigInvalid)
-			return
+	err = s.opts.Bindings.UpdateClientServerConfig(r.Context(), name, func(raw string) (string, error) {
+		obj := map[string]any{}
+		if raw != "" && (!jsonUnmarshalObj(raw, &obj) || obj == nil) {
+			return "", errClientConfigInvalid
 		}
-	}
-	if len(hosts) == 0 {
-		delete(obj, "custom_hosts")
-	} else {
-		obj["custom_hosts"] = hosts
-	}
-	if len(ipMaps) == 0 {
-		delete(obj, "ip_maps")
-	} else {
-		obj["ip_maps"] = ipMaps
-	}
-	if in.Concurrency == 0 {
-		delete(obj, "concurrency")
-	} else {
-		obj["concurrency"] = in.Concurrency
-	}
-	merged, err := jsonMarshalIndent(obj)
-	if err != nil {
-		apiFailKey(w, r, http.StatusBadRequest, msgServerConfigNotObject)
+		if len(hosts) == 0 {
+			delete(obj, "custom_hosts")
+		} else {
+			obj["custom_hosts"] = hosts
+		}
+		if len(ipMaps) == 0 {
+			delete(obj, "ip_maps")
+		} else {
+			obj["ip_maps"] = ipMaps
+		}
+		if in.Concurrency == 0 {
+			delete(obj, "concurrency")
+		} else {
+			obj["concurrency"] = in.Concurrency
+		}
+		merged, err := jsonMarshalIndent(obj)
+		return string(merged), err
+	})
+	if errors.Is(err, errClientConfigInvalid) {
+		apiFailKey(w, r, http.StatusBadRequest, msgExistingConfigInvalid)
 		return
 	}
-	cur.ServerConfig = string(merged)
-	if err := s.opts.Bindings.SetClient(cur); err != nil {
+	if err != nil {
 		logging.Error("admin: client custom config save failed", "client", name, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
 		return
 	}
 	logging.Info("admin: client custom config saved", "client", name,
 		"custom_hosts", len(hosts), "ip_maps", len(ipMaps), "concurrency", in.Concurrency, "actor", actorOf(r))
-	pushed := s.pushConfig(name)
-	if pushed {
-		s.applyClientConcurrency(name, in.Concurrency)
-	}
+	pushed := s.pushConfig(r.Context(), name)
 	apiOK(w, map[string]any{"name": name, "pushed": pushed})
 }
 
@@ -486,7 +476,7 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	protocolFilter := strings.TrimSpace(r.URL.Query().Get("protocol"))
 
-	bindings := s.bindings()
+	bindings := s.bindings(r.Context())
 	sort.SliceStable(bindings, func(i, j int) bool {
 		ti, tj := bindings[i].CreatedAt, bindings[j].CreatedAt
 		if !ti.Equal(tj) {
@@ -497,7 +487,7 @@ func (s *AdminService) apiUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		return bindings[i].UserKey < bindings[j].UserKey
 	})
-	userTraffic, _ := s.trafficMaps()
+	userTraffic, _ := s.trafficMaps(r.Context())
 	shareHost := s.shareHost(r)
 	vmessPort, vlessPort := s.v2rayPorts()
 	vlessTLS := s.vlessShareTLS()
@@ -577,6 +567,33 @@ type apiUserSaveIn struct {
 	Rule *string `json:"rule"`
 }
 
+// 用户保存的校验失败原因：在 UpdateUser 的回调里返回，回到 handler 再翻译成消息。
+var (
+	errSSMethodNotForProtocol = errors.New("ss_method only applies to ss")
+	errSSMethodUnsupported    = errors.New("unsupported ss method")
+)
+
+// unknownRuleError 表示提交的出站规则名不存在。
+type unknownRuleError struct{ name string }
+
+func (e unknownRuleError) Error() string { return "unknown rule " + e.name }
+
+// failUserSave 把 UpdateUser 的错误翻成对应的管理台消息。
+func (s *AdminService) failUserSave(w http.ResponseWriter, r *http.Request, err error, p store.Protocol, key string) {
+	var ruleErr unknownRuleError
+	switch {
+	case errors.Is(err, errSSMethodNotForProtocol):
+		apiFailKey(w, r, http.StatusBadRequest, msgSSMethodOnlyForSS)
+	case errors.Is(err, errSSMethodUnsupported):
+		apiFailKey(w, r, http.StatusBadRequest, msgSSMethodUnsupported)
+	case errors.As(err, &ruleErr):
+		apiFailKey(w, r, http.StatusBadRequest, msgRuleUnknown, ruleErr.name)
+	default:
+		logging.Error("admin: user binding save failed", "protocol", p, "user_key", key, "err", err)
+		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
+	}
+}
+
 // apiUserSave 登记或覆盖一条用户绑定。
 func (s *AdminService) apiUserSave(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Bindings == nil {
@@ -602,48 +619,44 @@ func (s *AdminService) apiUserSave(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgNameClientRequired)
 		return
 	}
-	if err := plugin.ValidateUserKey(p, key); err != nil {
+	if err := access.ValidateUserKey(p, key); err != nil {
 		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return
 	}
-	cur, ok := s.opts.Bindings.Lookup(p, key)
-	if !ok {
-		cur = Binding{UserKey: key, Protocol: p}
-	}
-	if in.SSMethod != nil {
-		if p != store.ProtocolSS {
-			apiFailKey(w, r, http.StatusBadRequest, msgSSMethodOnlyForSS)
-			return
+	// 读取、合并、写回在同一把写锁内完成：两个管理员分别改限速与规则不会互相覆盖。
+	saved, err := s.opts.Bindings.UpdateUser(r.Context(), p, key, func(cur *Binding) error {
+		if in.SSMethod != nil {
+			if p != store.ProtocolSS {
+				return errSSMethodNotForProtocol
+			}
+			method, err := shadowsocks.ParseMethod(strings.TrimSpace(*in.SSMethod))
+			if err != nil {
+				return errSSMethodUnsupported
+			}
+			cur.Config.SSMethod = method.Name
 		}
-		method, err := shadowsocks.ParseMethod(strings.TrimSpace(*in.SSMethod))
-		if err != nil {
-			apiFailKey(w, r, http.StatusBadRequest, msgSSMethodUnsupported)
-			return
+		cur.Name = name
+		cur.Client = client
+		cur.Status = store.UserEnabled
+		if in.Enabled != nil && !*in.Enabled {
+			cur.Status = store.UserDisabled
 		}
-		cur.Config.SSMethod = method.Name
-	}
-	cur.Name = name
-	cur.Client = client
-	cur.Status = store.UserEnabled
-	if in.Enabled != nil && !*in.Enabled {
-		cur.Status = store.UserDisabled
-	}
-	if in.Rule != nil {
-		userRule := strings.TrimSpace(*in.Rule)
-		if userRule != "" && s.opts.Rules != nil && !s.opts.Rules.Exists(userRule) {
-			apiFailKey(w, r, http.StatusBadRequest, msgRuleUnknown, userRule)
-			return
+		if in.Rule != nil {
+			userRule := strings.TrimSpace(*in.Rule)
+			if userRule != "" && s.opts.Rules != nil && !s.opts.Rules.Exists(userRule) {
+				return unknownRuleError{name: userRule}
+			}
+			cur.Config.Rule = userRule
 		}
-		cur.Config.Rule = userRule
-	}
-	if err := s.opts.Bindings.SetUser(cur); err != nil {
-		logging.Error("admin: user binding save failed", "protocol", p, "user_key", key, "err", err)
-		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
+		return nil
+	})
+	if err != nil {
+		s.failUserSave(w, r, err, p, key)
 		return
 	}
 	logging.Info("admin: user binding saved",
 		"protocol", p, "user_key", key, "name", name, "client", client,
-		"rule", cur.Config.Rule, "actor", actorOf(r))
+		"rule", saved.Config.Rule, "actor", actorOf(r))
 	apiOK(w, map[string]any{"protocol": p, "user_key": key})
 }
 
@@ -653,7 +666,7 @@ func (s *AdminService) apiUserDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	deleted, err := s.opts.Bindings.DeleteUser(p, key)
+	deleted, err := s.opts.Bindings.DeleteUser(r.Context(), p, key)
 	if err != nil {
 		logging.Error("admin: user binding delete failed", "protocol", p, "user_key", key, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgDeleteStoreFail)
@@ -662,6 +675,8 @@ func (s *AdminService) apiUserDelete(w http.ResponseWriter, r *http.Request) {
 	logging.Info("admin: user binding deleted", "protocol", p, "user_key", key, "existed", deleted, "actor", actorOf(r))
 	apiOK(w, map[string]any{"deleted": deleted})
 }
+
+var errUserNotRegistered = errors.New("user not registered")
 
 // apiUserStatus 启用/停用一条绑定。
 func (s *AdminService) apiUserStatus(w http.ResponseWriter, r *http.Request) {
@@ -678,13 +693,18 @@ func (s *AdminService) apiUserStatus(w http.ResponseWriter, r *http.Request) {
 	if raw == "true" || raw == "1" {
 		status = store.UserEnabled
 	}
-	cur, ok := s.opts.Bindings.Lookup(p, key)
-	if !ok {
+	_, err := s.opts.Bindings.UpdateUser(r.Context(), p, key, func(cur *Binding) error {
+		if cur.Name == "" {
+			return errUserNotRegistered
+		}
+		cur.Status = status
+		return nil
+	})
+	if errors.Is(err, errUserNotRegistered) {
 		apiFailKey(w, r, http.StatusNotFound, msgUserNotRegistered)
 		return
 	}
-	cur.Status = status
-	if err := s.opts.Bindings.SetUser(cur); err != nil {
+	if err != nil {
 		logging.Error("admin: user status update failed", "protocol", p, "user_key", key, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
 		return
@@ -730,20 +750,22 @@ func (s *AdminService) apiUserLimits(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgRuleUnknown, userRule)
 		return
 	}
-	cur, ok := s.opts.Bindings.Lookup(p, key)
-	if !ok {
+	_, err = s.opts.Bindings.UpdateUser(r.Context(), p, key, func(cur *Binding) error {
+		if cur.Name == "" {
+			return errUserNotRegistered
+		}
+		cur.Config.UpLimit = in.UpKB * 1024
+		cur.Config.DownLimit = in.DownKB * 1024
+		cur.Config.LogLevel = level
+		cur.Config.Concurrency = in.Concurrency
+		cur.Config.Rule = userRule
+		return nil
+	})
+	if errors.Is(err, errUserNotRegistered) {
 		apiFailKey(w, r, http.StatusNotFound, msgUserNotRegistered)
 		return
 	}
-	cur.Config = store.UserConfig{
-		SSMethod:    cur.Config.SSMethod,
-		UpLimit:     in.UpKB * 1024,
-		DownLimit:   in.DownKB * 1024,
-		LogLevel:    level,
-		Concurrency: in.Concurrency,
-		Rule:        userRule,
-	}
-	if err := s.opts.Bindings.SetUser(cur); err != nil {
+	if err != nil {
 		logging.Error("admin: user config save failed", "protocol", p, "user_key", key, "err", err)
 		apiFailKey(w, r, http.StatusInternalServerError, msgSaveStoreFailed)
 		return

@@ -1,0 +1,308 @@
+[
+  {
+    "file": "admin",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "admin/service.go",
+    "rule": "exported",
+    "failure": "type name will be used as admin.AdminOptions by other packages, and that stutters; consider calling this Options",
+    "count": 1
+  },
+  {
+    "file": "admin/service.go",
+    "rule": "exported",
+    "failure": "type name will be used as admin.AdminService by other packages, and that stutters; consider calling this Service",
+    "count": 1
+  },
+  {
+    "file": "cmd/client",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "cmd/server",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "cmd/userdaily",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "cmd/userprobe",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/acl",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/client",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/concurrency",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/config",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/config/client.go",
+    "rule": "exported",
+    "failure": "exported type Client should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/client.go",
+    "rule": "exported",
+    "failure": "exported type Outbound should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/client.go",
+    "rule": "exported",
+    "failure": "exported type Routing should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/client.go",
+    "rule": "exported",
+    "failure": "exported type Rule should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/config.go",
+    "rule": "exported",
+    "failure": "exported const DefaultLogLevel should have comment (or a comment on this block) or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/config.go",
+    "rule": "exported",
+    "failure": "exported type Log should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/config/server.go",
+    "rule": "exported",
+    "failure": "comment on exported method StorageConfig.ResolvedDriver should be of the form \"ResolvedDriver ...\"",
+    "count": 1
+  },
+  {
+    "file": "internal/config/service_settings.go",
+    "rule": "exported",
+    "failure": "comment on exported const DefaultLogRotateMaxSizeMB should be of the form \"DefaultLogRotateMaxSizeMB ...\"",
+    "count": 1
+  },
+  {
+    "file": "internal/config/service_settings.go",
+    "rule": "exported",
+    "failure": "exported const DefaultLogRotateMaxBackups should have comment (or a comment on this block) or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/core",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/dispatch",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/dispatch/outbound.go",
+    "rule": "exported",
+    "failure": "exported method DirectOutbound.Tag should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/dispatch/outbound.go",
+    "rule": "exported",
+    "failure": "exported method RejectOutbound.Process should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/dispatch/outbound.go",
+    "rule": "exported",
+    "failure": "exported method RejectOutbound.Tag should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/extension",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/logging",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/mux",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/pipe",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/plugin",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/plugin/runtime.go",
+    "rule": "exported",
+    "failure": "exported method HTTPInbound.Drain should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/plugin/runtime.go",
+    "rule": "exported",
+    "failure": "exported method HTTPInbound.Serve should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/portmap",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/protocol",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/protocol/protocol.go",
+    "rule": "exported",
+    "failure": "comment on exported const FlagUDP should be of the form \"FlagUDP ...\"",
+    "count": 1
+  },
+  {
+    "file": "internal/ratelimit",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/routine",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/routing",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/sqliteweb",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/store",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/store/client_bindings.go",
+    "rule": "exported",
+    "failure": "exported method ClientBinding.TableName should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/store/plugin.go",
+    "rule": "exported",
+    "failure": "exported method PluginState.TableName should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/store/port_mappings.go",
+    "rule": "exported",
+    "failure": "exported method PortMapping.TableName should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/store/user_bindings.go",
+    "rule": "exported",
+    "failure": "exported method UserBinding.TableName should have comment or be unexported",
+    "count": 1
+  },
+  {
+    "file": "internal/tcp",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/traffic",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/transport",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "internal/userclient",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "shadowsocks",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "vless",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  },
+  {
+    "file": "vmess",
+    "rule": "package-comments",
+    "failure": "should have a package comment",
+    "count": 1
+  }
+]

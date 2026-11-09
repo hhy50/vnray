@@ -6,7 +6,8 @@ package transport
 import (
 	"errors"
 	"fmt"
-	"sync/atomic"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
@@ -33,17 +34,11 @@ type sessionEntry struct {
 	id     uint64
 }
 
-// snapshot 是登记表的不可变视图：写时整体重建并 CAS 换指针，读侧完全无锁。
-// 会话开/关是低频事件，整表重建的代价可忽略。
-type snapshot struct {
-	sessions map[tcp.Session]*sessionEntry
-	byName   map[string]*sessionEntry
-	byID     map[uint64]*sessionEntry
-	nextID   uint64
-}
-
 // SessionManager 维护所有认证通过的会话登记（客户端 + 用户），并实现 tcp.EventListener：
 // Handshake 与流处理委托给注入的回调，登记/注销/索引由本管理器负责。
+//
+// 用户连接同样是会话，开/关随并发连接数持续发生，因此登记表用读写锁保护的普通 map，
+// 写路径 O(1)；只有管理台这类低频读才按需复制切片、付出 O(N)。
 type SessionManager struct {
 	// ClientReady 在会话登记后补发配置，覆盖认证应答与登记之间发生的更新。
 	ClientReady func(*Session) error
@@ -52,44 +47,21 @@ type SessionManager struct {
 	Auth    Authenticator
 	Streams StreamHandler
 
-	closed atomic.Bool
-	snap   atomic.Pointer[snapshot]
-}
-
-// emptySnapshot 返回一张空表。
-func emptySnapshot() *snapshot {
-	return &snapshot{
-		sessions: make(map[tcp.Session]*sessionEntry),
-		byName:   make(map[string]*sessionEntry),
-		byID:     make(map[uint64]*sessionEntry),
-	}
-}
-
-// cloneSnapshot 复制一份快照供 COW 修改。
-func cloneSnapshot(old *snapshot) *snapshot {
-	next := &snapshot{
-		sessions: make(map[tcp.Session]*sessionEntry, len(old.sessions)+1),
-		byName:   make(map[string]*sessionEntry, len(old.byName)+1),
-		byID:     make(map[uint64]*sessionEntry, len(old.byID)+1),
-		nextID:   old.nextID,
-	}
-	for k, v := range old.sessions {
-		next.sessions[k] = v
-	}
-	for k, v := range old.byName {
-		next.byName[k] = v
-	}
-	for k, v := range old.byID {
-		next.byID[k] = v
-	}
-	return next
+	mu       sync.RWMutex
+	closed   bool
+	nextID   uint64
+	sessions map[tcp.Session]*sessionEntry
+	byName   map[string]*sessionEntry
+	byID     map[uint64]*sessionEntry
 }
 
 // NewSessionManager 创建会话管理器；Auth 与 Streams 回调由数据面服务随后注入。
 func NewSessionManager() *SessionManager {
-	m := &SessionManager{}
-	m.snap.Store(emptySnapshot())
-	return m
+	return &SessionManager{
+		sessions: make(map[tcp.Session]*sessionEntry),
+		byName:   make(map[string]*sessionEntry),
+		byID:     make(map[uint64]*sessionEntry),
+	}
 }
 
 // clientOf 取出会话携带的客户端视图；只有客户端会话有。
@@ -108,37 +80,28 @@ func (m *SessionManager) Handshake(session tcp.Session) (tcp.SessionInfo, error)
 
 // OnSessionOpen 实现 tcp.EventListener：登记会话（补全 Since），客户端会话分配编号
 // 并建按名索引；管理器已关闭时返回 error，事件循环会据此拒绝该会话。
-// 并发握手用 CAS 重试串行化（冲突极罕见，重试即成功）。
 func (m *SessionManager) OnSessionOpen(info *tcp.SessionInfo) error {
-	if m.closed.Load() {
+	info.Since = time.Now()
+	entry := &sessionEntry{info: info, client: clientOf(info)}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
 		return fmt.Errorf("transport: session manager is closed")
 	}
-	// 并发握手用 CAS 重试串行化（冲突极罕见，重试即成功）。
-	var entry *sessionEntry
-	for {
-		old := m.snap.Load()
-		if m.closed.Load() {
-			return fmt.Errorf("transport: session manager is closed")
-		}
-		next := cloneSnapshot(old)
-		info.Since = time.Now()
-		entry = &sessionEntry{info: info, client: clientOf(info)}
-		next.sessions[info.Session] = entry
-		if info.Kind == tcp.KindClient {
-			next.nextID++
-			entry.id = next.nextID
-			next.byID[entry.id] = entry
-			if info.Name != "" {
-				if prev, ok := next.byName[info.Name]; ok && prev != entry {
-					logging.Warn("sessions: client name taken over", "name", info.Name, "remote", info.Remote)
-				}
-				next.byName[info.Name] = entry
+	m.sessions[info.Session] = entry
+	if info.Kind == tcp.KindClient {
+		m.nextID++
+		entry.id = m.nextID
+		m.byID[entry.id] = entry
+		if info.Name != "" {
+			if prev, ok := m.byName[info.Name]; ok && prev != entry {
+				logging.Warn("sessions: client name taken over", "name", info.Name, "remote", info.Remote)
 			}
-		}
-		if m.snap.CompareAndSwap(old, next) {
-			break
+			m.byName[info.Name] = entry
 		}
 	}
+	m.mu.Unlock()
 
 	switch info.Kind {
 	case tcp.KindClient:
@@ -155,6 +118,7 @@ func (m *SessionManager) OnSessionOpen(info *tcp.SessionInfo) error {
 		}
 		info.Log.Info("sessions: user session established", attrs...)
 	}
+	// 补发配置要走网络，不能压在登记表锁里。
 	if info.Kind == tcp.KindClient && entry.client != nil && m.ClientReady != nil {
 		if err := m.ClientReady(entry.client); err != nil {
 			info.Log.Warn("sessions: push client config failed", "err", err)
@@ -165,27 +129,21 @@ func (m *SessionManager) OnSessionOpen(info *tcp.SessionInfo) error {
 
 // OnSessionClose 实现 tcp.EventListener：注销会话并连同按名/按编号索引。
 func (m *SessionManager) OnSessionClose(info *tcp.SessionInfo) {
-	for {
-		old := m.snap.Load()
-		entry, ok := old.sessions[info.Session]
-		if !ok {
-			// 管理器关闭时批量清过表，此处无事可注销。
-			return
-		}
-		next := cloneSnapshot(old)
-		delete(next.sessions, info.Session)
+	m.mu.Lock()
+	entry, ok := m.sessions[info.Session]
+	if ok {
+		delete(m.sessions, info.Session)
 		if info.Kind == tcp.KindClient {
-			if info.Name != "" && next.byName[info.Name] == entry {
-				delete(next.byName, info.Name)
+			if info.Name != "" && m.byName[info.Name] == entry {
+				delete(m.byName, info.Name)
 			}
-			if entry.id != 0 && next.byID[entry.id] == entry {
-				delete(next.byID, entry.id)
+			if entry.id != 0 && m.byID[entry.id] == entry {
+				delete(m.byID, entry.id)
 			}
-		}
-		if m.snap.CompareAndSwap(old, next) {
-			break
 		}
 	}
+	m.mu.Unlock()
+	// 管理器关闭时已批量清表，此时只留一条关闭日志。
 	switch info.Kind {
 	case tcp.KindClient:
 		info.Log.Info("sessions: client session closed", "remote", info.Remote)
@@ -209,9 +167,10 @@ func (m *SessionManager) OnStreamClose(info *tcp.SessionInfo, stream tcp.Stream)
 
 // Snapshot 返回当前全部认证会话的快照（客户端 + 用户）。
 func (m *SessionManager) Snapshot() []*tcp.SessionInfo {
-	snap := m.snap.Load()
-	out := make([]*tcp.SessionInfo, 0, len(snap.sessions))
-	for _, entry := range snap.sessions {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*tcp.SessionInfo, 0, len(m.sessions))
+	for _, entry := range m.sessions {
 		out = append(out, entry.info)
 	}
 	return out
@@ -219,7 +178,9 @@ func (m *SessionManager) Snapshot() []*tcp.SessionInfo {
 
 // SessionByName 返回标识为 name 的在线客户端会话。
 func (m *SessionManager) SessionByName(name string) (*tcp.SessionInfo, bool) {
-	entry, ok := m.snap.Load().byName[name]
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok := m.byName[name]
 	if !ok {
 		return nil, false
 	}
@@ -228,28 +189,29 @@ func (m *SessionManager) SessionByName(name string) (*tcp.SessionInfo, bool) {
 
 // Clients 返回在线客户端会话的编号化快照（按编号升序，供管理台组装视图）。
 func (m *SessionManager) Clients() []ClientEntry {
-	snap := m.snap.Load()
-	out := make([]ClientEntry, 0, len(snap.byID))
-	for id := uint64(1); id <= snap.nextID; id++ {
-		entry, ok := snap.byID[id]
-		if !ok {
-			continue
-		}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ClientEntry, 0, len(m.byID))
+	for id, entry := range m.byID {
 		out = append(out, ClientEntry{ID: id, Info: entry.info, Client: entry.client})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
 // ClientCount 返回在线客户端会话数。
 func (m *SessionManager) ClientCount() int {
-	return len(m.snap.Load().byID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.byID)
 }
 
 // ClientSessions 返回在线客户端会话视图（心跳调度用）。
 func (m *SessionManager) ClientSessions() []*Session {
-	snap := m.snap.Load()
-	out := make([]*Session, 0, len(snap.byID))
-	for _, entry := range snap.byID {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Session, 0, len(m.byID))
+	for _, entry := range m.byID {
 		if entry.client != nil {
 			out = append(out, entry.client)
 		}
@@ -258,19 +220,24 @@ func (m *SessionManager) ClientSessions() []*Session {
 }
 
 // Close 关闭全部在册会话并拒绝后续登记（Drain 收尾用）；随后的事件注销为空操作。
+// 关闭动作放在锁外：会话关闭会等到对端看到关闭，不该让登记表跟着停摆。
 func (m *SessionManager) Close() {
-	m.closed.Store(true)
-	for {
-		old := m.snap.Load()
-		infos := make([]*tcp.SessionInfo, 0, len(old.sessions))
-		for _, entry := range old.sessions {
-			infos = append(infos, entry.info)
-		}
-		if m.snap.CompareAndSwap(old, emptySnapshot()) {
-			for _, info := range infos {
-				_ = info.Session.Close()
-			}
-			return
-		}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	infos := make([]*tcp.SessionInfo, 0, len(m.sessions))
+	for _, entry := range m.sessions {
+		infos = append(infos, entry.info)
+	}
+	m.sessions = make(map[tcp.Session]*sessionEntry)
+	m.byName = make(map[string]*sessionEntry)
+	m.byID = make(map[uint64]*sessionEntry)
+	m.mu.Unlock()
+
+	for _, info := range infos {
+		_ = info.Session.Close()
 	}
 }

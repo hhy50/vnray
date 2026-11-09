@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/protocol"
+	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
 func main() {
-	mode := flag.String("mode", "run", "bind | run")
-	server := flag.String("server", "127.0.0.1:9000", "服务端主端口地址")
+	mode := flag.String("mode", "run", "bind（离线登记，完成后启动或重启服务端）| run")
+	server := flag.String("server", "127.0.0.1:9001", "vnray-user 插件监听地址（需先在后台配置）")
 	key := flag.String("key", "probe-user-key", "user_key")
 	client := flag.String("client", "edge-1", "bind 模式：绑定的客户端名")
 	dsn := flag.String("dsn", "", "bind 模式：存储 DSN（mysql）")
@@ -41,7 +42,7 @@ func main() {
 	}
 }
 
-// bind 直接写持久存储注册一条用户绑定（绕过管理台 CSRF，仅供本地探针使用）。
+// bind 仅供离线探针登记；直接写库不会触发运行中服务的配置投影。
 func bind(driver, dsn, key, client string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -60,6 +61,7 @@ func bind(driver, dsn, key, client string) {
 		panic(fmt.Sprintf("verify binding failed: ok=%v err=%v", ok, err))
 	}
 	fmt.Printf("binding registered: protocol=%s key=%s client=%s\n", got.Protocol, got.Key, got.Client)
+	fmt.Println("Start or restart the server to load this binding into its runtime registries.")
 }
 
 // dialUser 完成用户认证握手，返回已认证的多路复用会话。
@@ -127,52 +129,56 @@ func run(addr, key, target string, workers int, duration, interval, timeout time
 	user := dialUser(addr, key)
 	defer func() { _ = user.Close() }()
 
+	ctx := context.Background()
+	if duration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, duration)
+		defer cancel()
+	}
 	var (
-		reqs    atomic.Int64
-		bytes   atomic.Int64
-		fail    atomic.Int64
-		wg      sync.WaitGroup
-		stop    = make(chan struct{})
-		doneAll = make(chan struct{})
+		reqs  atomic.Int64
+		bytes atomic.Int64
+		fail  atomic.Int64
+		wg    sync.WaitGroup
 	)
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go func(id int) {
+		routine.Go(fmt.Sprintf("userdaily.worker.%d", i), func() {
 			defer wg.Done()
 			for {
 				select {
-				case <-stop:
+				case <-ctx.Done():
 					return
 				default:
 				}
 				n, err := oneRequest(user, host, uint16(port), timeout)
 				if err != nil {
 					fail.Add(1)
-					fmt.Printf("worker %d: request failed: %v\n", id, err)
+					fmt.Printf("worker %d: request failed: %v\n", i, err)
 				} else {
 					reqs.Add(1)
 					bytes.Add(n)
 				}
 				select {
-				case <-stop:
+				case <-ctx.Done():
 					return
 				case <-time.After(interval):
 				}
 			}
-		}(i)
+		})
 	}
 
 	// 统计打印协程。
 	var statsWG sync.WaitGroup
 	statsWG.Add(1)
-	go func() {
+	routine.Go("userdaily.stats", func() {
 		defer statsWG.Done()
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		start := time.Now()
 		for {
 			select {
-			case <-stop:
+			case <-ctx.Done():
 				return
 			case <-t.C:
 				fmt.Printf("[%6.1fs] requests=%d bytes=%.1fMB fail=%d\n",
@@ -180,19 +186,11 @@ func run(addr, key, target string, workers int, duration, interval, timeout time
 					float64(bytes.Load())/1e6, fail.Load())
 			}
 		}
-	}()
+	})
 
-	if duration > 0 {
-		go func() {
-			time.Sleep(duration)
-			close(stop)
-		}()
-	}
-	<-stop
+	<-ctx.Done()
 	wg.Wait()
 	statsWG.Wait()
-	close(doneAll)
-	_ = doneAll
 	fmt.Printf("done: requests=%d bytes=%.1fMB fail=%d\n",
 		reqs.Load(), float64(bytes.Load())/1e6, fail.Load())
 }

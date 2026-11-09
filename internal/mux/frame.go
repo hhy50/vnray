@@ -23,7 +23,7 @@ const (
 	OptionError byte = 0x02
 )
 
-// New 帧里的网络类型；本项目只服务 TCP，UDP 子连接一律拒绝。
+// New 帧及带目标的 UDP Keep 帧使用的网络类型。
 const (
 	NetworkTCP byte = 0x01
 	NetworkUDP byte = 0x02
@@ -48,7 +48,7 @@ type Target struct {
 	Host string
 	Port int
 	// Network 是子连接的数据类型：空或 "tcp"（默认）表示字节流，取 "udp" 表示每个
-	// Keep 帧的 Data 是一个数据报。只在 StatusNew 时设置。
+	// Keep 帧的 Data 是一个数据报。
 	Network string
 }
 
@@ -60,10 +60,12 @@ type Frame struct {
 	SessionID uint16
 	Status    byte
 	Option    byte
-	// Network 仅 StatusNew 有效。
+	// Network 在 New 或带目标的 UDP Keep 帧中有效。
 	Network byte
-	// Target 仅 StatusNew 有效。
+	// Target 在 New 或带目标的 UDP Keep 帧中有效。
 	Target Target
+	// GlobalID 是 XUDP New 帧携带的会话标识。
+	GlobalID [8]byte
 	// Data 在 OptionData 置位时非空；长度为零的合法数据帧也存在（对端探测用）。
 	Data []byte
 }
@@ -95,7 +97,7 @@ func readFrame(r io.Reader) (*Frame, error) {
 	f.Status = meta[2]
 	f.Option = meta[3]
 
-	if f.Status == StatusNew {
+	if f.Status == StatusNew || (f.Status == StatusKeep && len(meta) > 4 && meta[4] == NetworkUDP) {
 		if len(meta) < 8 {
 			return nil, errors.New("mux: new frame metadata too short")
 		}
@@ -105,8 +107,12 @@ func readFrame(r io.Reader) (*Frame, error) {
 		if err != nil {
 			return nil, err
 		}
-		if 7+n != len(meta) {
-			return nil, errors.New("mux: trailing bytes after address in new frame")
+		tail := meta[7+n:]
+		if len(tail) != 0 {
+			if f.Status != StatusNew || f.Network != NetworkUDP || len(tail) != len(f.GlobalID) {
+				return nil, errors.New("mux: trailing bytes after address in frame")
+			}
+			copy(f.GlobalID[:], tail)
 		}
 		f.Target.Host = host
 	}
@@ -157,10 +163,38 @@ func readAddress(b []byte) (string, int, error) {
 // writeFrame 一次写出一个完整帧（元数据 + 可选数据段）。调用方持写锁时调用，
 // 保证多子连接并发写出时帧不会交错。
 func writeFrame(w io.Writer, id uint16, status, option byte, data []byte) error {
+	return writeFrameTarget(w, id, status, option, data, Target{})
+}
+
+func writeFrameTarget(w io.Writer, id uint16, status, option byte, data []byte, target Target) error {
+	if len(data) > maxSessionDatagram {
+		return errors.New("mux: datagram too long")
+	}
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint16(meta[0:2], id)
 	meta[2] = status
 	meta[3] = option
+	if target.Host != "" {
+		if target.Port <= 0 || target.Port > 65535 {
+			return errors.New("mux: invalid target port")
+		}
+		meta = append(meta, NetworkUDP, byte(target.Port>>8), byte(target.Port))
+		if ip := net.ParseIP(target.Host); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				meta = append(meta, addrTypeIPv4)
+				meta = append(meta, v4...)
+			} else {
+				meta = append(meta, addrTypeIPv6)
+				meta = append(meta, ip.To16()...)
+			}
+		} else {
+			if len(target.Host) > 255 {
+				return errors.New("mux: target domain too long")
+			}
+			meta = append(meta, addrTypeDomain, byte(len(target.Host)))
+			meta = append(meta, target.Host...)
+		}
+	}
 
 	buf := make([]byte, 2, 2+len(meta)+2+len(data))
 	binary.BigEndian.PutUint16(buf[0:2], uint16(len(meta)))
@@ -171,6 +205,9 @@ func writeFrame(w io.Writer, id uint16, status, option byte, data []byte) error 
 		buf = append(buf, dataLen[:]...)
 		buf = append(buf, data...)
 	}
-	_, err := w.Write(buf)
+	n, err := w.Write(buf)
+	if err == nil && n != len(buf) {
+		return io.ErrShortWrite
+	}
 	return err
 }

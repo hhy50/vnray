@@ -1,4 +1,4 @@
-package plugin
+package sqliteweb
 
 // sqlite-web 插件：在独立端口上提供绑定表 SQLite 库的 Web 管理页（浏览表结构、
 // 分页看数据、执行任意 SQL）。复用 store 暴露的同库连接池，不另开数据库连接；
@@ -14,38 +14,36 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/hhy50/vnray/internal/logging"
-	"github.com/hhy50/vnray/internal/routine"
+	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/store"
 )
 
-// pluginSQLiteWeb 是 sqlite-web 插件在 vn_plugin 表里的 name。
-const pluginSQLiteWeb = "sqlite-web"
+// pluginName 是 sqlite-web 插件在 vn_plugin 表里的 name。
+const pluginName = "sqlite-web"
 
-// DefaultSQLiteWebPort 是从未配置过端口时对外报告的默认监听端口：管理台的启用
+// DefaultPort 是从未配置过端口时对外报告的默认监听端口：管理台的启用
 // 对话框按 Status 里的端口回显，配置过之后这里报告的就是上次用的端口。
-const DefaultSQLiteWebPort = 9002
+const DefaultPort = 9002
 
-// defaultSQLiteWebHost 是未显式配置时的监听地址：可设 Basic Auth，未设口令时
+// defaultHost 是未显式配置时的监听地址：可设 Basic Auth，未设口令时
 // 任意来源都能执行任意 SQL。
-const defaultSQLiteWebHost = "0.0.0.0"
+const defaultHost = "0.0.0.0"
 
-//go:embed sqliteweb.html
+//go:embed webdb.html
 var sqliteWebHTML string
 
-// SQLiteWebPlugin 提供 Web 版 SQLite 管理界面。
-type SQLiteWebPlugin struct {
-	mu       sync.Mutex
+// WebDB 提供 Web 版 SQLite 管理界面。
+type WebDB struct {
+	runtime  plugin.Runtime
+	run      *plugin.InboundRun
 	store    store.Store
 	gormDB   *gorm.DB
 	sqlDB    *sql.DB
-	cancel   context.CancelFunc
 	server   *http.Server
 	host     string
 	port     int
@@ -53,34 +51,34 @@ type SQLiteWebPlugin struct {
 	running  bool
 }
 
-// newSQLiteWebPlugin 创建 sqlite-web 插件；数据库连接经 GORMSource 在启用时取得，
-// 内存存储等非 SQL 后端没有这个能力，启用时才报错。
-func newSQLiteWebPlugin(st store.Store) *SQLiteWebPlugin {
+// New 创建 SQLite 管理插件。
+func New(st store.Store) *WebDB {
 	var gormDB *gorm.DB
 	if gs, ok := st.(store.GORMSource); ok {
 		gormDB = gs.GORM()
 	}
-	return &SQLiteWebPlugin{store: st, gormDB: gormDB, host: defaultSQLiteWebHost}
+	return &WebDB{store: st, gormDB: gormDB, host: defaultHost, runtime: plugin.NewRuntime()}
 }
 
 // Name 返回插件名。
-func (p *SQLiteWebPlugin) Name() string { return pluginSQLiteWeb }
+func (p *WebDB) Name() string { return pluginName }
+
+// BindDrainGate 在注册时接入管理器的收尾状态门。
+func (p *WebDB) BindDrainGate(g *plugin.DrainGate) { p.runtime.BindDrainGate(g) }
 
 // SupportsBasicAuth 实现 BasicAuthProvider：管理台据此渲染口令输入框。
-func (p *SQLiteWebPlugin) SupportsBasicAuth() bool { return true }
+func (p *WebDB) SupportsBasicAuth() bool { return true }
 
 // Status 返回当前状态：监听端口（未配置过时报内置默认端口）与运行中的访问地址。
-func (p *SQLiteWebPlugin) Status() Status {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *WebDB) Status() plugin.Status {
 	port := p.port
 	if port <= 0 {
-		port = DefaultSQLiteWebPort
+		port = DefaultPort
 	}
-	st := Status{
-		Name:    pluginSQLiteWeb,
-		Enabled: p.running,
-		Ports:   []PortKV{{Protocol: store.Protocol(pluginSQLiteWeb), Port: port}},
+	st := plugin.Status{
+		Name:    pluginName,
+		Enabled: p.running, LastError: p.runtime.LastError(),
+		Ports: []plugin.PortKV{{Protocol: store.Protocol(pluginName), Port: port}},
 	}
 	if p.running {
 		st.Params = map[string]string{"url": fmt.Sprintf("http://%s/", net.JoinHostPort(p.host, strconv.Itoa(p.port)))}
@@ -93,33 +91,41 @@ func (p *SQLiteWebPlugin) Status() Status {
 	return st
 }
 
-// Restore 进程启动时从存储恢复启停状态与监听参数。
-func (p *SQLiteWebPlugin) Restore(ctx context.Context) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	cur, ok, _ := p.store.GetPlugin(ctx, pluginSQLiteWeb)
-	if port := cur.Config.Ports[store.Protocol(pluginSQLiteWeb)]; port > 0 {
+// Restore 恢复监听配置并把错误返回宿主。
+func (p *WebDB) Restore(ctx context.Context) error {
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
+	}
+	cur, ok, err := p.store.GetPlugin(ctx, pluginName)
+	if err != nil {
+		return p.runtime.Record(err)
+	}
+	if port := cur.Config.Ports[store.Protocol(pluginName)]; port > 0 {
 		p.port = port
 	}
 	if h := cur.Config.Host; h != "" {
 		p.host = h
 	}
 	p.authHash = cur.Config.Password
-	if !ok || cur.Status != store.PluginEnabled || p.port == 0 {
-		return
+	if !ok || cur.Status != store.PluginEnabled {
+		return nil
 	}
-	if err := p.startLocked(p.port); err != nil {
-		logging.Warn("sqlite-web: restore listener failed", "err", err)
+	if p.port <= 0 {
+		return p.runtime.Record(fmt.Errorf("plugin: invalid sqlite-web port %d", p.port))
 	}
+	return p.runtime.Record(p.configure(ctx, p.port, p.host, p.authHash, false))
 }
 
 // Enable 启用插件：校验并持久化端口、监听地址与访问口令，然后立即开始服务。
 // params 里 port 必填，host 可选（缺省沿用已存值或 0.0.0.0）；password 可选——
 // 空串沿用已存口令，"-" 清除口令，其余值按 bcrypt 哈希后保存。
-func (p *SQLiteWebPlugin) Enable(ctx context.Context, params map[string]string) error {
+func (p *WebDB) Enable(ctx context.Context, params map[string]string) error {
 	port, err := strconv.Atoi(params["port"])
 	if err != nil || port <= 0 || port >= 65536 {
 		return fmt.Errorf("plugin: invalid sqlite-web port %q", params["port"])
+	}
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
 	}
 	host := strings.TrimSpace(params["host"])
 	if host == "" {
@@ -128,8 +134,6 @@ func (p *SQLiteWebPlugin) Enable(ctx context.Context, params map[string]string) 
 	if err := validateListenHost(host); err != nil {
 		return err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	authHash := p.authHash
 	switch raw := params["password"]; {
 	case raw == "-":
@@ -141,101 +145,40 @@ func (p *SQLiteWebPlugin) Enable(ctx context.Context, params map[string]string) 
 		}
 		authHash = string(h)
 	}
-	if err := p.saveLocked(ctx, store.PluginEnabled, port, host, authHash); err != nil {
-		return err
-	}
-	p.authHash = authHash
-	if p.running && p.port == port && p.host == host {
-		return nil
-	}
-	p.stopLocked()
-	return p.startLocked(port)
+	return p.runtime.Record(p.configure(ctx, port, host, authHash, true))
 }
 
 // Disable 停用插件：停止服务并持久化状态。
-func (p *SQLiteWebPlugin) Disable(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if err := p.saveLocked(ctx, store.PluginDisabled, p.port, p.host, p.authHash); err != nil {
+func (p *WebDB) Disable(ctx context.Context) error {
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
+	}
+	if err := p.save(ctx, store.PluginDisabled, p.port, p.host, p.authHash); err != nil {
 		return err
 	}
-	p.stopLocked()
+	p.stop()
 	return nil
 }
 
-// SetPort 修改监听端口并持久化：停用时只改待启用端口；运行中则热切换——先用探针
-// 监听预检新端口可绑，通过后再切换，失败时回滚到旧端口。
-func (p *SQLiteWebPlugin) SetPort(ctx context.Context, port int) error {
-	if port <= 0 || port >= 65536 {
+// SetPort 在新监听及持久化均成功后替换运行态。
+func (p *WebDB) SetPort(ctx context.Context, port int) error {
+	if port <= 0 || port > 65535 {
 		return fmt.Errorf("plugin: invalid sqlite-web port %d", port)
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.running && p.port == port {
-		return nil
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
 	}
 	if !p.running {
-		if err := p.saveLocked(ctx, "", port, p.host, p.authHash); err != nil {
-			return err
+		if err := p.save(ctx, "", port, p.host, p.authHash); err != nil {
+			return p.runtime.Record(err)
 		}
 		p.port = port
-		return nil
+		return p.runtime.Record(nil)
 	}
-	old := p.port
-	probe, err := net.Listen("tcp", net.JoinHostPort(p.host, strconv.Itoa(port)))
-	if err != nil {
-		return fmt.Errorf("plugin: sqlite-web listen %s: %w", net.JoinHostPort(p.host, strconv.Itoa(port)), err)
-	}
-	_ = probe.Close()
-	p.stopLocked()
-	if err := p.startLocked(port); err != nil {
-		if rerr := p.startLocked(old); rerr != nil {
-			logging.Error("sqlite-web: rollback to previous port failed", "port", old, "err", rerr)
-		}
-		return err
-	}
-	if err := p.saveLocked(ctx, store.PluginEnabled, port, p.host, p.authHash); err != nil {
-		return err
-	}
-	logging.Info("sqlite-web: port updated", "port", port, "running", true)
-	return nil
+	return p.runtime.Record(p.configure(ctx, port, p.host, p.authHash, true))
 }
 
-// Stop 运行中插件立即停止服务（进程收尾用，不改动持久化状态）。
-func (p *SQLiteWebPlugin) Stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopLocked()
-}
-
-// saveLocked 把启停状态、端口、监听地址与口令哈希写进 vn_plugin；status 为空串表示
-// 沿用库中原值。调用方必须持锁。
-func (p *SQLiteWebPlugin) saveLocked(ctx context.Context, status store.PluginStatus, port int, host, authHash string) error {
-	cur, ok, _ := p.store.GetPlugin(ctx, pluginSQLiteWeb)
-	if !ok {
-		cur = store.PluginState{Name: pluginSQLiteWeb}
-	}
-	cur.Name = pluginSQLiteWeb
-	if status != "" {
-		cur.Status = status
-	}
-	if cur.Config.Ports == nil {
-		cur.Config.Ports = map[store.Protocol]int{}
-	}
-	cur.Config.Ports[store.Protocol(pluginSQLiteWeb)] = port
-	if host != "" && host != defaultSQLiteWebHost {
-		cur.Config.Host = host
-	} else {
-		cur.Config.Host = ""
-	}
-	cur.Config.Password = authHash
-	return p.store.SetPlugin(ctx, cur)
-}
-
-// startLocked 启动 HTTP 服务；调用方必须持锁。监听器的生命周期只由 Stop（Drain 收尾）
-// 显式管理，不随调用方 ctx 消亡——管理台的 Enable/SetPort 带的是 HTTP 请求 ctx，
-// 请求返回即取消，绑上去会把刚起的服务立刻关掉。
-func (p *SQLiteWebPlugin) startLocked(port int) error {
+func (p *WebDB) configure(ctx context.Context, port int, host, authHash string, persist bool) error {
 	if p.gormDB == nil {
 		return fmt.Errorf("plugin: sqlite-web requires a sql-backed store")
 	}
@@ -246,61 +189,92 @@ func (p *SQLiteWebPlugin) startLocked(port int) error {
 	if err != nil {
 		return fmt.Errorf("plugin: sqlite-web acquire db: %w", err)
 	}
-	addr := net.JoinHostPort(p.host, strconv.Itoa(port))
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("plugin: sqlite-web listen %s: %w", addr, err)
+	var ln net.Listener
+	if !p.running || p.port != port || p.host != host {
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("plugin: sqlite-web listen %s: %w", addr, err)
+		}
 	}
+	if persist {
+		if err := p.save(ctx, store.PluginEnabled, port, host, authHash); err != nil {
+			if ln != nil {
+				_ = ln.Close()
+			}
+			return err
+		}
+	}
+	if ln == nil {
+		p.authHash = authHash
+		return nil
+	}
+	p.stop()
+	p.host, p.port, p.authHash, p.sqlDB, p.running = host, port, authHash, db, true
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", p.serveHome)
 	mux.HandleFunc("GET /api/tables", p.serveTables)
 	mux.HandleFunc("GET /api/table", p.serveTableRows)
 	mux.HandleFunc("POST /api/exec", p.serveExec)
-	runCtx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	p.sqlDB = db
-	p.server = &http.Server{Handler: p.withBasicAuth(mux), ReadHeaderTimeout: 10 * time.Second}
-	p.port = port
-	p.running = true
-	logging.Info("sqlite-web: started", "url", "http://"+addr)
-
-	routine.Go("plugin.sqliteweb.watch", func() {
-		<-runCtx.Done()
-		_ = ln.Close()
-	})
-	routine.Go("plugin.sqliteweb.serve", func() {
-		if err := p.server.Serve(ln); err != nil && runCtx.Err() == nil {
-			logging.Warn("sqlite-web: stopped", "err", err)
+	server := &http.Server{Handler: p.withBasicAuth(mux), ReadHeaderTimeout: 10 * time.Second}
+	p.server = server
+	run, err := p.runtime.StartInbound("plugin.sqliteweb.serve", ln, func(ctx context.Context) plugin.Server {
+		server.BaseContext = func(net.Listener) context.Context { return ctx }
+		return plugin.NewHTTPInbound(server)
+	}, func(err error) {
+		if p.server == server {
+			p.running = false
+			p.runtime.Record(err)
 		}
 	})
-	return nil
+	p.run = run
+	if err != nil {
+		p.running = false
+	}
+	return err
 }
 
-// stopLocked 停止服务；server.Close 同步关掉监听与存量连接，保证 Disable 返回后端口
-// 确定不再受理。调用方必须持锁。
-func (p *SQLiteWebPlugin) stopLocked() {
-	if !p.running {
-		return
-	}
-	if p.cancel != nil {
-		p.cancel()
+// Drain 停止接入并等待 HTTP 请求退出。
+func (p *WebDB) Drain(ctx context.Context) error {
+	runs := p.runtime.BeginDrain()
+	p.running = false
+	err := plugin.DrainRuns(ctx, runs)
+	p.sqlDB = nil
+	return err
+}
+
+// Stop 停止接入，当前请求继续收尾。
+func (p *WebDB) Stop() {
+	p.stop()
+}
+
+func (p *WebDB) save(ctx context.Context, status store.PluginStatus, port int, host, authHash string) error {
+	return plugin.SaveState(ctx, p.store, pluginName, status, func(c *store.PluginConfig) {
+		c.Ports[store.Protocol(pluginName)] = port
+		// 默认监听地址不入库：留空即表示"用内置默认值"。
+		if host == defaultHost {
+			host = ""
+		}
+		c.Host = host
+		c.Password = authHash
+	})
+}
+
+func (p *WebDB) stop() {
+	if p.run != nil {
+		p.run.Stop()
 	}
 	if p.server != nil {
-		_ = p.server.Close()
+		p.server.SetKeepAlivesEnabled(false)
 	}
-	p.server = nil
-	p.sqlDB = nil
-	p.running = false
-	logging.Info("sqlite-web: stopped", "port", p.port)
+	p.server, p.running = nil, false
 }
 
 // withBasicAuth 对页面与 API 做 Basic Auth（用户名不限，只校验口令）；口令未设置时
 // 直接放行。哈希在请求时读取，运行中改口令立即生效，无需重启监听。
-func (p *SQLiteWebPlugin) withBasicAuth(next http.Handler) http.Handler {
+func (p *WebDB) withBasicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
 		hash := p.authHash
-		p.mu.Unlock()
 		if hash == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -322,13 +296,13 @@ func validateListenHost(host string) error {
 	return nil
 }
 
-func (p *SQLiteWebPlugin) serveHome(w http.ResponseWriter, _ *http.Request) {
+func (p *WebDB) serveHome(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(sqliteWebHTML))
 }
 
 // serveTables 返回全部表与视图：名字、建表语句与行数。
-func (p *SQLiteWebPlugin) serveTables(w http.ResponseWriter, r *http.Request) {
+func (p *WebDB) serveTables(w http.ResponseWriter, r *http.Request) {
 	db, fail := p.db(w)
 	if fail {
 		return
@@ -371,7 +345,7 @@ func (p *SQLiteWebPlugin) serveTables(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveTableRows 分页返回一张表的全部列数据。
-func (p *SQLiteWebPlugin) serveTableRows(w http.ResponseWriter, r *http.Request) {
+func (p *WebDB) serveTableRows(w http.ResponseWriter, r *http.Request) {
 	db, fail := p.db(w)
 	if fail {
 		return
@@ -402,7 +376,7 @@ func (p *SQLiteWebPlugin) serveTableRows(w http.ResponseWriter, r *http.Request)
 }
 
 // serveExec 执行任意 SQL：有结果集的语句返回行数据，其余返回影响行数。
-func (p *SQLiteWebPlugin) serveExec(w http.ResponseWriter, r *http.Request) {
+func (p *WebDB) serveExec(w http.ResponseWriter, r *http.Request) {
 	db, fail := p.db(w)
 	if fail {
 		return
@@ -461,10 +435,8 @@ func returnsRows(stmt string) bool {
 }
 
 // db 返回当前可用的数据库连接；插件已停用时响应 503。
-func (p *SQLiteWebPlugin) db(w http.ResponseWriter) (*sql.DB, bool) {
-	p.mu.Lock()
+func (p *WebDB) db(w http.ResponseWriter) (*sql.DB, bool) {
 	db := p.sqlDB
-	p.mu.Unlock()
 	if db == nil {
 		httpFail(w, http.StatusServiceUnavailable, "sqlite-web is stopping")
 		return nil, true
@@ -473,7 +445,7 @@ func (p *SQLiteWebPlugin) db(w http.ResponseWriter) (*sql.DB, bool) {
 }
 
 // countRows 统计一张表的行数；表名经引号转义后拼进语句。
-func (p *SQLiteWebPlugin) countRows(ctx context.Context, db *sql.DB, name string) (int64, error) {
+func (p *WebDB) countRows(ctx context.Context, db *sql.DB, name string) (int64, error) {
 	var n int64
 	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdent(name)).Scan(&n)
 	return n, err
@@ -546,4 +518,20 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func httpFail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// Name 是 sqlite-web 插件在 vn_plugin 表与配置里的名字。
+const Name = pluginName
+
+// InitialState 返回首次初始化写入的插件记录：默认端口与监听地址就地给出，
+// 由装配层与本包以外的插件记录合并。
+func InitialState() store.PluginState {
+	return store.PluginState{
+		Name:   pluginName,
+		Status: store.PluginEnabled,
+		Config: store.PluginConfig{
+			Ports: map[store.Protocol]int{store.Protocol(pluginName): DefaultPort},
+			Host:  defaultHost,
+		},
+	}
 }

@@ -1,19 +1,22 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/concurrency"
 	"github.com/hhy50/vnray/internal/protocol"
+	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
 // SessionEvents 是数据面对外上报的会话事件集合，由服务端侧的会话登记簿实现
-// （见 internal/admin.Sessions）。事件可能在多条会话的协程上并发触发，
+// （见 SessionManager）。事件可能在多条会话的协程上并发触发，
 // 实现方需自行保证并发安全；为 nil 时表示不上报。
 type SessionEvents interface {
 	// SessionConnected 在会话建立、开始受理请求前调用。
@@ -34,9 +37,11 @@ type UserMeta struct {
 
 // Session 是服务端持有的请求发起端，一个请求对应一条逻辑流。
 type Session struct {
-	session tcp.Session
-	remote  string
-	info    protocol.ClientInfo
+	session        tcp.Session
+	remote         string
+	info           atomic.Pointer[protocol.ClientInfo]
+	configGate     chan struct{}
+	configRevision uint64
 
 	// gate 是对设备（本客户端）同时开展的隧道流并发闸；max=0 表示不限。
 	gate *concurrency.Gate
@@ -55,12 +60,14 @@ const controlStreamTimeout = 5 * time.Second
 
 // NewSession 包装一条握手通过的会话；remote 为对端地址文本，info 为客户端上报的自信息。
 func NewSession(session tcp.Session, remote string, info protocol.ClientInfo) *Session {
-	return &Session{
-		session: session,
-		remote:  remote,
-		info:    info,
-		gate:    concurrency.NewGate(),
+	s := &Session{
+		session:    session,
+		remote:     remote,
+		gate:       concurrency.NewGate(),
+		configGate: make(chan struct{}, 1),
 	}
+	s.UpdateInfo(info)
+	return s
 }
 
 // SetClientConcurrency 设置路由到本客户端的隧道流并发上限；非正数表示不限。
@@ -79,8 +86,11 @@ func (s *Session) Close() error { return s.session.Close() }
 // RemoteAddr 返回对端地址文本。
 func (s *Session) RemoteAddr() string { return s.remote }
 
-// Info 返回客户端在认证时上报的配置与环境摘要。
-func (s *Session) Info() protocol.ClientInfo { return s.info }
+// Info 返回客户端最近上报的配置与环境摘要。
+func (s *Session) Info() protocol.ClientInfo { return *s.info.Load() }
+
+// UpdateInfo 原子替换客户端上报快照；调用后不得修改快照中的切片和指针。
+func (s *Session) UpdateInfo(info protocol.ClientInfo) { s.info.Store(&info) }
 
 // LastHeartbeat 返回最近一次心跳应答的本地时刻；从未测得时为 time.Time 零值。
 func (s *Session) LastHeartbeat() time.Time {
@@ -110,23 +120,108 @@ func (s *Session) RecordHeartbeat(rtt time.Duration) {
 func (s *Session) IsClosed() bool { return s.session.IsClosed() }
 
 // SendPushConfig 向该客户端推送全量配置快照：开一条一次性控制流发下发帧后关闭。
-func (s *Session) SendPushConfig(cfg protocol.PushConfig) error {
-	stream, err := s.session.OpenStream()
+func (s *Session) SendPushConfig(snapshot func() protocol.PushConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), controlStreamTimeout)
+	defer cancel()
+	return s.SendPushConfigContext(ctx, snapshot)
+}
+
+// SendPushConfigContext 在调用方期限内打开控制流并发送最新配置。
+func (s *Session) SendPushConfigContext(ctx context.Context, snapshot func() protocol.PushConfig) error {
+	if err := s.acquireConfig(ctx); err != nil {
+		return err
+	}
+	defer func() { <-s.configGate }()
+	cfg := s.nextConfig(snapshot)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stream, err := tcp.OpenStreamContext(ctx, s.session)
 	if err != nil {
 		return fmt.Errorf("open push config stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
-	if err := stream.SetDeadline(time.Now().Add(controlStreamTimeout)); err != nil {
+	deadline := time.Now().Add(controlStreamTimeout)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	if err := stream.SetDeadline(deadline); err != nil {
 		return fmt.Errorf("set push config deadline: %w", err)
 	}
+	finished := make(chan struct{})
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	routine.Go("transport.config.cancel", func() {
+		defer watcher.Done()
+		select {
+		case <-ctx.Done():
+			abortConnection(stream)
+		case <-s.CloseSignal():
+			abortConnection(stream)
+		case <-finished:
+		}
+	})
+	defer func() { close(finished); watcher.Wait() }()
 	frame, err := protocol.NewPushConfigFrame(cfg)
 	if err != nil {
 		return err
 	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("write push config frame: %w", err)
 	}
 	return nil
+}
+
+// SendConfigReportResult 与主动推送共用修订号，防止不同方向的控制流乱序覆盖配置。
+func (s *Session) SendConfigReportResult(stream tcp.Stream, snapshot func() protocol.PushConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), controlStreamTimeout)
+	defer cancel()
+	if err := s.acquireConfig(ctx); err != nil {
+		return err
+	}
+	defer func() { <-s.configGate }()
+	cfg := s.nextConfig(snapshot)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, _ := ctx.Deadline()
+	if err := stream.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("set config report deadline: %w", err)
+	}
+	frame, err := protocol.NewReplyFrame(protocol.ConfigReportResult, protocol.Reply{OK: true, Config: &cfg})
+	if err != nil {
+		return err
+	}
+	return protocol.NewEncoder(stream).WriteFrame(frame)
+}
+
+func (s *Session) acquireConfig(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-s.CloseSignal():
+		return io.ErrClosedPipe
+	default:
+	}
+	select {
+	case s.configGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.CloseSignal():
+		return io.ErrClosedPipe
+	}
+}
+
+func (s *Session) nextConfig(snapshot func() protocol.PushConfig) protocol.PushConfig {
+	cfg := snapshot()
+	s.configRevision++
+	cfg.Revision = s.configRevision
+	return cfg
 }
 
 // Wait 阻塞直到客户端会话结束。

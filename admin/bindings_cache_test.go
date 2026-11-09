@@ -20,11 +20,11 @@ func TestUserCacheTTLAndInvalidation(t *testing.T) {
 	b := NewBindings(st)
 	ctx := context.Background()
 
-	if err := b.SetUser(Binding{UserKey: "alice", Protocol: store.ProtocolVMess,
+	if err := b.SetUser(context.Background(), Binding{UserKey: "alice", Protocol: store.ProtocolVMess,
 		Name: "Alice", Status: store.UserEnabled, Client: "edge-1"}); err != nil {
 		t.Fatalf("set user: %v", err)
 	}
-	if _, ok := b.LookupUser(store.ProtocolVMess, "alice"); !ok {
+	if _, ok := b.LookupUser(context.Background(), store.ProtocolVMess, "alice"); !ok {
 		t.Fatal("lookup after set must hit")
 	}
 
@@ -34,29 +34,29 @@ func TestUserCacheTTLAndInvalidation(t *testing.T) {
 		Client: "edge-2", UpdatedAt: time.Now()}); err != nil {
 		t.Fatalf("direct store write: %v", err)
 	}
-	if u, ok := b.LookupUser(store.ProtocolVMess, "alice"); !ok || u.Client != "edge-1" {
+	if u, ok := b.LookupUser(context.Background(), store.ProtocolVMess, "alice"); !ok || u.Client != "edge-1" {
 		t.Fatalf("cached lookup = (%+v, %v), want stale edge-1", u, ok)
 	}
 
 	// 经 Bindings 覆盖：缓存必须即时失效，读到新值。
-	if err := b.SetUser(Binding{UserKey: "alice", Protocol: store.ProtocolVMess,
+	if err := b.SetUser(context.Background(), Binding{UserKey: "alice", Protocol: store.ProtocolVMess,
 		Name: "Alice", Status: store.UserEnabled, Client: "edge-9"}); err != nil {
 		t.Fatalf("overwrite user: %v", err)
 	}
-	if u, ok := b.LookupUser(store.ProtocolVMess, "alice"); !ok || u.Client != "edge-9" {
+	if u, ok := b.LookupUser(context.Background(), store.ProtocolVMess, "alice"); !ok || u.Client != "edge-9" {
 		t.Fatalf("lookup after overwrite = (%+v, %v), want edge-9", u, ok)
 	}
 
 	// 删除后：负结果也立即生效。
-	if deleted, err := b.DeleteUser(store.ProtocolVMess, "alice"); err != nil || !deleted {
+	if deleted, err := b.DeleteUser(context.Background(), store.ProtocolVMess, "alice"); err != nil || !deleted {
 		t.Fatalf("delete = (%v, %v), want (true, nil)", deleted, err)
 	}
-	if _, ok := b.LookupUser(store.ProtocolVMess, "alice"); ok {
+	if _, ok := b.LookupUser(context.Background(), store.ProtocolVMess, "alice"); ok {
 		t.Fatal("lookup after delete must miss")
 	}
 
 	// 未注册的 key 也会缓存负结果：再次查询不得再打库（无副作用可断言，至少语义一致）。
-	if _, ok := b.LookupUser(store.ProtocolVMess, "alice"); ok {
+	if _, ok := b.LookupUser(context.Background(), store.ProtocolVMess, "alice"); ok {
 		t.Fatal("negative lookup must stay negative")
 	}
 }

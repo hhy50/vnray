@@ -13,6 +13,8 @@ type PortMapping struct {
 	Config     PortConfig `gorm:"column:config;type:text"`
 	Enabled    bool       `gorm:"column:enabled;not null"`
 	Remark     string     `gorm:"column:remark;size:255"`
+	Up         int64      `gorm:"column:up_bytes;not null;default:0"`
+	Down       int64      `gorm:"column:down_bytes;not null;default:0"`
 	CreatedAt  time.Time  `gorm:"column:created_at"`
 	UpdatedAt  time.Time  `gorm:"column:updated_at"`
 }

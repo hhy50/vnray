@@ -28,7 +28,7 @@ func TestTransportEncryptionHotReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetAuthKey(keyText, "team:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), keyText, "team:*"); err != nil {
 		t.Fatal(err)
 	}
 	svc := newSecureTestServer(t, b, "")
@@ -41,7 +41,7 @@ func TestTransportEncryptionHotReload(t *testing.T) {
 	}
 	for i, encrypted := range []bool{true, false, true} {
 		settings.TransportEncryption = encrypted
-		if err := runtime.Apply(settings); err != nil {
+		if err := runtime.Apply(context.Background(), settings); err != nil {
 			t.Fatal(err)
 		}
 		cfg := config.DefaultServer()
@@ -98,7 +98,7 @@ func TestTransportEncryptionHotReload(t *testing.T) {
 		}
 		defer stream.Close()
 		_ = stream.SetDeadline(time.Now().Add(time.Second))
-		frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: fmt.Sprintf("%x", key.ID()), Info: protocol.ClientInfo{Name: fmt.Sprintf("team:g:retained%d", i)}})
+		frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: fmt.Sprintf("team:g:retained%d", i)}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func newSecureTestServer(t *testing.T, b *admin.Bindings, fallback string) *Conn
 func TestEncryptedScopedClient(t *testing.T) {
 	b := testBindings(t)
 	key, fallback := authkey.Generate(), authkey.Generate()
-	if err := b.SetAuthKey(key, "team:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), key, "team:*"); err != nil {
 		t.Fatal(err)
 	}
 	svc := newSecureTestServer(t, b, fallback)
@@ -167,7 +167,7 @@ func TestEncryptedScopedClient(t *testing.T) {
 			t.Fatalf("client %s allowed=%v: %v", tc.name, tc.allow, err)
 		}
 	}
-	if _, err := b.DeleteAuthKey(key); err != nil {
+	if _, err := b.DeleteAuthKey(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
 	if c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: key}}); err == nil {
@@ -204,12 +204,12 @@ func testUnprovenClientRejected(t *testing.T, encrypted bool) {
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(time.Second))
-	frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: key, Info: protocol.ClientInfo{Name: "team:g:edge"}})
+	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: "team:g:edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
-		t.Fatal(err)
+		return
 	}
 	replyFrame, err := protocol.NewDecoder(stream).ReadFrame()
 	if err == nil {
@@ -230,10 +230,10 @@ func testUnprovenClientRejected(t *testing.T, encrypted bool) {
 func TestTransportIdentityCannotSwitchKeys(t *testing.T) {
 	b := testBindings(t)
 	limited, privileged := authkey.Generate(), authkey.Generate()
-	if err := b.SetAuthKey(limited, "limited:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), limited, "limited:*"); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetAuthKey(privileged, "*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), privileged, "*"); err != nil {
 		t.Fatal(err)
 	}
 	svc := newSecureTestServer(t, b, "")
@@ -257,19 +257,22 @@ func TestTransportIdentityCannotSwitchKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(time.Second))
-	otherKey, err := authkey.Parse(privileged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	frame, err := protocol.NewAuthFrame(protocol.AuthRequest{Key: fmt.Sprintf("%x", otherKey.ID()), Info: protocol.ClientInfo{Name: "other:g:edge"}})
+	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: "other:g:edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := protocol.NewDecoder(stream).ReadFrame(); err == nil {
-		t.Fatal("different authentication key accepted")
+	if frame, err := protocol.NewDecoder(stream).ReadFrame(); err == nil {
+		payload, err := protocol.ReadPayload(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply, err := protocol.ParseReply(payload)
+		if err != nil || reply.OK {
+			t.Fatalf("different authentication key accepted: %v", err)
+		}
 	}
 	if svc.Sessions().ClientCount() != 0 {
 		t.Fatal("wrong identity registered")
@@ -290,7 +293,7 @@ func TestKeyLookupFailsClosed(t *testing.T) {
 	if _, err := svc.lookupTransportKey(context.Background(), key.ID()); err == nil {
 		t.Fatal("storage failure fell back to configuration")
 	}
-	if err := svc.verifyKey("team:g:edge", fallback); err == nil {
+	if err := svc.verifyKey(context.Background(), "team:g:edge", fallback); err == nil {
 		t.Fatal("authorization failed open")
 	}
 }

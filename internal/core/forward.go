@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,7 @@ import (
 )
 
 // forwardHub 把已认证用户会话上的 Forward 流桥接到其绑定客户端（远程会话或服务端本机出口）的隧道；
-// 它不自持监听（用户与客户端共用主端口），也没有独立生命周期——流关闭即结束。
+// 它不自持监听（用户由 vnray-user 插件接入），也没有独立生命周期——流关闭即结束。
 // 出口按名字由 ExitResolver 解析，因此它不依赖会话登记表的具体实现。
 type forwardHub struct {
 	exits transport.ExitResolver
@@ -35,7 +36,7 @@ type forwardHub struct {
 // 它在 OnStreamOpen 事件里被调用，阻塞该流的整个生命周期。
 // log 是该会话的日志器（级别取自用户配置）；userKey 是握手时出示的用户密钥：
 // 限速与统计都按它取桶（同一用户的所有隧道共享配额）；userRule 是该用户的出站规则名。
-func (h *forwardHub) handleUserStream(log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, stop <-chan struct{}) {
+func (h *forwardHub) handleUserStream(ctx context.Context, log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream) {
 	remote := stream.RemoteAddr().String()
 
 	dec := protocol.NewDecoder(stream)
@@ -54,7 +55,7 @@ func (h *forwardHub) handleUserStream(log *logging.Scoped, userKey, userRule, cl
 	case protocol.Ping:
 		replyHeartbeat(log, remote, enc, frame)
 	case protocol.Forward:
-		h.handleForward(log, userKey, userRule, clientName, stream, frame, stop)
+		h.handleForward(ctx, log, userKey, userRule, clientName, stream, frame)
 		return
 	default:
 		_ = frame.CloseBody()
@@ -79,18 +80,21 @@ func replyHeartbeat(log *logging.Scoped, remote string, enc *protocol.Encoder, p
 
 // handleForward 处理 Forward 帧：目标在载荷开头的地址块里，先按用户出站规则判定，
 // 再经绑定客户端开隧道，随后该流承载裸字节直至任一侧关闭。
-func (h *forwardHub) handleForward(log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, frame *protocol.Frame, stop <-chan struct{}) {
+func (h *forwardHub) handleForward(ctx context.Context, log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, frame *protocol.Frame) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	remote := stream.RemoteAddr().String()
 	// 用户级并发：占一个并发位再建隧道，超限排队；会话关闭即中断等待。
 	if h.limits != nil && userKey != "" {
-		if err := h.limits.Gate(ratelimit.Identity(store.ProtocolVNV1, userKey)).Acquire(stop); err != nil {
+		gate := h.limits.Gate(ratelimit.Identity(store.ProtocolVNV1, userKey))
+		if err := gate.AcquireContext(ctx); err != nil {
 			protocol.WriteReply(stream, protocol.ForwardResult,
 				protocol.Reply{OK: false, Reason: "user concurrency limit reached"})
 			log.Warn("forward: user concurrency limit",
 				"remote", remote, "client", clientName, "user_key", userKey, "err", err)
 			return
 		}
-		defer h.limits.Gate(ratelimit.Identity(store.ProtocolVNV1, userKey)).Release()
+		defer gate.Release()
 	}
 	addr, err := protocol.ReadAddress(frame.Body)
 	if err != nil {
@@ -145,7 +149,7 @@ func (h *forwardHub) handleForward(log *logging.Scoped, userKey, userRule, clien
 		return
 	}
 
-	tunnel, err := exit.OpenTunnel(dest, protocol.TunnelRequest{Origin: remote, Direct: direct})
+	tunnel, err := transport.OpenTunnel(ctx, exit, dest, protocol.TunnelRequest{Origin: remote, Direct: direct})
 	if err != nil {
 		protocol.WriteReply(stream, protocol.ForwardResult, protocol.Reply{OK: false, Reason: err.Error()})
 		log.Warn("forward: open tunnel failed",
@@ -155,13 +159,13 @@ func (h *forwardHub) handleForward(log *logging.Scoped, userKey, userRule, clien
 	defer func() { _ = tunnel.Close() }()
 
 	protocol.WriteReply(stream, protocol.ForwardResult, protocol.Reply{OK: true})
-	_ = stream.SetDeadline(time.Time{}) // 进入隧道：长连接不能带超时
+	_ = stream.SetDeadline(time.Time{})
 	log.Info("forward: tunnel established",
 		"remote", remote, "client", clientName, "user_key", userKey, "destination", dest.String())
 	// 用户限速与统计：上行限用户侧 reader（用户发多快），下行限客户端侧 reader
 	// （客户端送多快）；字节按 user_key 与 client 两个维度各记一份。后台改限速即时
 	// 生效（桶是活的，泵拿的是指针）。
-	var o transport.ProxyOptions
+	o := transport.ProxyOptions{Context: ctx}
 	if h.limits != nil && userKey != "" {
 		pair := h.limits.Pair(ratelimit.Identity(store.ProtocolVNV1, userKey))
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats

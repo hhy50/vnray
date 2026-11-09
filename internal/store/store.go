@@ -344,6 +344,10 @@ type Store interface {
 
 	// SetClient 新增或按 Key 覆盖一条客户端记录；覆盖时保留 ID 与 CreatedAt。
 	SetClient(ctx context.Context, b ClientBinding) error
+	// SetClientReportedConfig 只更新客户端上报列，缺少记录时创建 proxy 客户端。
+	SetClientReportedConfig(ctx context.Context, key, reported string) error
+	// SetClientServerConfig 只更新运维配置列，保留客户端上报快照。
+	SetClientServerConfig(ctx context.Context, key, settings string) error
 	// GetClient 按 Key 读取一条客户端记录；不存在时 ok 为 false。
 	GetClient(ctx context.Context, key string) (ClientBinding, bool, error)
 	// DeleteClient 删除一条客户端记录；不存在时返回 false。
@@ -367,8 +371,7 @@ type Store interface {
 	// ListPlugins 返回全部插件的状态，按 Name 升序。
 	ListPlugins(ctx context.Context) ([]PluginState, error)
 
-	// GetServiceSettings 读取全部运行时配置段：段名 → 原文（标量存原文，复合段存 JSON），
-	// 含 ServiceSettingsInitializedKey 这一行初始化标记。
+	// GetServiceSettings 读取全部运行时配置段：段名 → 原文（标量存原文，复合段存 JSON）。
 	GetServiceSettings(ctx context.Context) (map[string]string, error)
 	// SetServiceSettings 按段写入运行时配置：只动给定段，其它段保持原值；空值删除该段。
 	SetServiceSettings(ctx context.Context, values map[string]string) error
@@ -387,7 +390,7 @@ type Store interface {
 	// DeleteClientTraffic 删除一条客户端流量记录；不存在时返回 false。
 	DeleteClientTraffic(ctx context.Context, key string) (bool, error)
 
-	// SetPortMapping 新增或按 ID 覆盖一条端口映射规则；覆盖时保留 CreatedAt。
+	// SetPortMapping 新增或按 ID 覆盖一条端口映射规则；覆盖时保留 CreatedAt 与流量。
 	// remote_port 全表唯一：与本条之外的其他行冲突时报错，由调用方提示运维。
 	SetPortMapping(ctx context.Context, m PortMapping) error
 	// GetPortMapping 按 ID 读取一条端口映射规则；不存在时 ok 为 false。
@@ -396,7 +399,46 @@ type Store interface {
 	DeletePortMapping(ctx context.Context, id uint64) (bool, error)
 	// ListPortMappings 返回全部端口映射规则，按 remote_port 升序。
 	ListPortMappings(ctx context.Context) ([]PortMapping, error)
+	// AddPortMappingTraffic 累加映射流量；已删除的映射不再记账，不修改配置时间。
+	AddPortMappingTraffic(ctx context.Context, id uint64, up, down int64) error
+	// AddTrafficBatch 在一个事务里写完一轮流量增量：逐条累加的往返次数会随用户数线性
+	// 增长，SQLite 单连接下每轮落库就是成百上千次提交。
+	AddTrafficBatch(ctx context.Context, batch TrafficBatch) error
 
 	// Close 释放底层资源。
 	Close() error
+}
+
+// TrafficBatch 是一轮流量落库的全部增量，按维度分组。
+type TrafficBatch struct {
+	Users        []UserTrafficDelta
+	Clients      []ClientTrafficDelta
+	PortMappings []PortMappingTrafficDelta
+}
+
+// UserTrafficDelta 是一条用户流量增量（字节）。
+type UserTrafficDelta struct {
+	Protocol Protocol
+	Key      string
+	Up       int64
+	Down     int64
+}
+
+// ClientTrafficDelta 是一条客户端流量增量（字节）。
+type ClientTrafficDelta struct {
+	Key  string
+	Up   int64
+	Down int64
+}
+
+// PortMappingTrafficDelta 是一条端口映射流量增量（字节）。
+type PortMappingTrafficDelta struct {
+	ID   uint64
+	Up   int64
+	Down int64
+}
+
+// Empty 报告这批增量是否无事可写。
+func (b TrafficBatch) Empty() bool {
+	return len(b.Users) == 0 && len(b.Clients) == 0 && len(b.PortMappings) == 0
 }

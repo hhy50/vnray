@@ -1,4 +1,4 @@
-package admin
+package access
 
 import (
 	"context"
@@ -89,13 +89,13 @@ func TestAuthKeyIndexAvoidsStorageOnHitsAndMisses(t *testing.T) {
 		if err != nil || !configured || got != key {
 			t.Fatalf("key lookup: %v", err)
 		}
-		if configured, ok := b.MatchClientAuthKey("team:g:edge", value); !configured || !ok {
+		if configured, ok := b.MatchClientAuthKey(context.Background(), "team:g:edge", value); !configured || !ok {
 			t.Fatal("scope lookup failed")
 		}
 		if _, configured, err := b.LookupTransportKey(context.Background(), missing.ID()); !configured || !errors.Is(err, errTransportKeyNotRegistered) {
 			t.Fatal("missing key accepted")
 		}
-		if configured, ok := b.MatchClientAuthKey("other:g:edge", value); !configured || ok {
+		if configured, ok := b.MatchClientAuthKey(context.Background(), "other:g:edge", value); !configured || ok {
 			t.Fatal("wrong scope accepted")
 		}
 	}
@@ -109,31 +109,31 @@ func TestAuthKeyIndexWriteThrough(t *testing.T) {
 	b := NewBindings(s)
 	value := authkey.Generate()
 	key := mustParsedKey(t, value)
-	if err := b.SetAuthKey(value, "a:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), value, "a:*"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := b.MatchClientAuthKey("a:g:edge", value); !ok {
+	if _, ok := b.MatchClientAuthKey(context.Background(), "a:g:edge", value); !ok {
 		t.Fatal("insert not visible")
 	}
-	if err := b.SetAuthKey(value, "b:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), value, "b:*"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := b.MatchClientAuthKey("a:g:edge", value); ok {
+	if _, ok := b.MatchClientAuthKey(context.Background(), "a:g:edge", value); ok {
 		t.Fatal("old scope retained")
 	}
-	if _, ok := b.MatchClientAuthKey("b:g:edge", value); !ok {
+	if _, ok := b.MatchClientAuthKey(context.Background(), "b:g:edge", value); !ok {
 		t.Fatal("new scope not visible")
 	}
-	if deleted, err := b.DeleteAuthKey(value); err != nil || !deleted {
+	if deleted, err := b.DeleteAuthKey(context.Background(), value); err != nil || !deleted {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, configured, err := b.LookupTransportKey(context.Background(), key.ID()); err != nil || configured {
 		t.Fatal("last deletion did not restore empty-table state")
 	}
-	if configured, ok := b.MatchClientAuthKey("b:g:edge", value); configured || ok {
+	if configured, ok := b.MatchClientAuthKey(context.Background(), "b:g:edge", value); configured || ok {
 		t.Fatal("deleted key retained")
 	}
-	if deleted, err := b.DeleteAuthKey(value); err != nil || deleted {
+	if deleted, err := b.DeleteAuthKey(context.Background(), value); err != nil || deleted {
 		t.Fatalf("repeated delete: %v", err)
 	}
 	if s.lists.Load() != 1 {
@@ -149,10 +149,10 @@ func TestAuthKeyIndexLegacyRowsDisableFallback(t *testing.T) {
 	if _, configured, err := b.LookupTransportKey(context.Background(), missing.ID()); !configured || err == nil {
 		t.Fatal("legacy row permitted fallback")
 	}
-	if configured, ok := b.MatchClientAuthKey("team:g:edge", "old-password"); !configured || ok {
+	if configured, ok := b.MatchClientAuthKey(context.Background(), "team:g:edge", "old-password"); !configured || ok {
 		t.Fatal("legacy key accepted")
 	}
-	if _, err := b.DeleteAuthKey("old-password"); err != nil {
+	if _, err := b.DeleteAuthKey(context.Background(), "old-password"); err != nil {
 		t.Fatal(err)
 	}
 	if _, configured, err := b.LookupTransportKey(context.Background(), missing.ID()); configured || err != nil {
@@ -167,16 +167,16 @@ func TestAuthKeyIndexUncertainWritesFailClosed(t *testing.T) {
 			b := NewBindings(s)
 			value := authkey.Generate()
 			key := mustParsedKey(t, value)
-			if err := b.SetAuthKey(value, "a:*"); err != nil {
+			if err := b.SetAuthKey(context.Background(), value, "a:*"); err != nil {
 				t.Fatal(err)
 			}
 			s.writeErr = errors.New("commit response lost")
 			s.commitOnError = true
 			var err error
 			if operation == "set" {
-				err = b.SetAuthKey(value, "b:*")
+				err = b.SetAuthKey(context.Background(), value, "b:*")
 			} else {
-				_, err = b.DeleteAuthKey(value)
+				_, err = b.DeleteAuthKey(context.Background(), value)
 			}
 			if err == nil {
 				t.Fatal("write error lost")
@@ -185,14 +185,14 @@ func TestAuthKeyIndexUncertainWritesFailClosed(t *testing.T) {
 			if _, configured, err := b.LookupTransportKey(context.Background(), key.ID()); !configured || err == nil {
 				t.Fatal("uncertain write retained cached access")
 			}
-			if configured, ok := b.MatchClientAuthKey("a:g:edge", value); !configured || ok {
+			if configured, ok := b.MatchClientAuthKey(context.Background(), "a:g:edge", value); !configured || ok {
 				t.Fatal("reload failure allowed authentication")
 			}
 			s.listErr, s.writeErr = nil, nil
-			if _, ok := b.MatchClientAuthKey("a:g:edge", value); ok {
+			if _, ok := b.MatchClientAuthKey(context.Background(), "a:g:edge", value); ok {
 				t.Fatal("old permission restored after recovery")
 			}
-			if _, ok := b.MatchClientAuthKey("b:g:edge", value); ok != (operation == "set") {
+			if _, ok := b.MatchClientAuthKey(context.Background(), "b:g:edge", value); ok != (operation == "set") {
 				t.Fatal("committed change not recovered")
 			}
 		})
@@ -203,7 +203,7 @@ func TestAuthKeyIndexReloadAndRecovery(t *testing.T) {
 	s := newIndexedKeyStore()
 	b := NewBindings(s)
 	value := authkey.Generate()
-	if err := b.SetAuthKey(value, "a:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), value, "a:*"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetAuthKey(context.Background(), store.AuthKey{Key: value, Scope: "b:*"}); err != nil {
@@ -212,18 +212,18 @@ func TestAuthKeyIndexReloadAndRecovery(t *testing.T) {
 	if err := b.ReloadAuthKeys(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := b.MatchClientAuthKey("a:g:edge", value); ok {
+	if _, ok := b.MatchClientAuthKey(context.Background(), "a:g:edge", value); ok {
 		t.Fatal("reload retained old scope")
 	}
 	s.listErr = errors.New("database unavailable")
 	if err := b.ReloadAuthKeys(context.Background()); err == nil {
 		t.Fatal("reload failure hidden")
 	}
-	if configured, ok := b.MatchClientAuthKey("b:g:edge", value); !configured || ok {
+	if configured, ok := b.MatchClientAuthKey(context.Background(), "b:g:edge", value); !configured || ok {
 		t.Fatal("failed reload left stale access enabled")
 	}
 	s.listErr = nil
-	if _, ok := b.MatchClientAuthKey("b:g:edge", value); !ok {
+	if _, ok := b.MatchClientAuthKey(context.Background(), "b:g:edge", value); !ok {
 		t.Fatal("index did not recover")
 	}
 }
@@ -240,21 +240,21 @@ func TestAuthKeyIndexConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			for range 500 {
 				_, _, _ = b.LookupTransportKey(context.Background(), key.ID())
-				b.MatchClientAuthKey("team:g:edge", value)
+				b.MatchClientAuthKey(context.Background(), "team:g:edge", value)
 			}
 		}()
 	}
 	for range 100 {
-		if err := b.SetAuthKey(value, "team:*"); err != nil {
+		if err := b.SetAuthKey(context.Background(), value, "team:*"); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := b.MatchClientAuthKey("team:g:edge", value); !ok {
+		if _, ok := b.MatchClientAuthKey(context.Background(), "team:g:edge", value); !ok {
 			t.Fatal("completed insert not visible")
 		}
-		if _, err := b.DeleteAuthKey(value); err != nil {
+		if _, err := b.DeleteAuthKey(context.Background(), value); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := b.MatchClientAuthKey("team:g:edge", value); ok {
+		if _, ok := b.MatchClientAuthKey(context.Background(), "team:g:edge", value); ok {
 			t.Fatal("completed delete not visible")
 		}
 	}
@@ -282,7 +282,7 @@ func BenchmarkAuthKeyIndex(b *testing.B) {
 			b.ResetTimer()
 			for range b.N {
 				_, _, _ = bindings.LookupTransportKey(context.Background(), id)
-				bindings.MatchClientAuthKey("team:g:edge", value)
+				bindings.MatchClientAuthKey(context.Background(), "team:g:edge", value)
 			}
 			b.StopTimer()
 			if s.lists.Load() != 1 {

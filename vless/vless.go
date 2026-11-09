@@ -1,6 +1,7 @@
 package vless
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/identity"
@@ -50,13 +52,12 @@ type user struct {
 
 // Validator 维护 VLESS 账号：UUID 明文即凭据，认证是 O(1) 的字节比对。
 type Validator struct {
-	mu    sync.RWMutex
-	users map[[16]byte]*user
+	users sync.Map
 }
 
 // NewValidator 创建空的账号验证器。
 func NewValidator() *Validator {
-	return &Validator{users: make(map[[16]byte]*user)}
+	return &Validator{}
 }
 
 // Add 注册一个账号；uuid 必须是标准 36 字符格式（与 vmess 共用同一解析）。
@@ -65,9 +66,7 @@ func (v *Validator) Add(uuid, client string) error {
 	if err != nil {
 		return err
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.users[raw] = &user{uuid: uuid, client: client}
+	v.users.Store(raw, &user{uuid: uuid, client: client})
 	return nil
 }
 
@@ -77,49 +76,74 @@ func (v *Validator) Remove(uuid string) {
 	if err != nil {
 		return
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	delete(v.users, raw)
+	v.users.Delete(raw)
 }
 
 // get 按 UUID 字节取账号。
 func (v *Validator) get(raw [16]byte) (*user, bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	u, ok := v.users[raw]
-	return u, ok
+	value, ok := v.users.Load(raw)
+	if !ok {
+		return nil, false
+	}
+	return value.(*user), true
 }
 
 // Server 是 VLESS 入站服务：解析明文请求头、回响应头，把裸连接交给 Handler。
 type Server struct {
-	ln        net.Listener
+	ln        atomic.Pointer[net.Listener]
 	validator *Validator
 	handler   Handler
-
-	mu     sync.Mutex
-	closed bool
+	state     atomic.Int32
+	active    sync.Map
+	wg        sync.WaitGroup
+	drainOnce sync.Once
+	drained   chan struct{}
 }
 
 // NewServer 创建 VLESS 入站服务。
 func NewServer(validator *Validator, handler Handler) *Server {
-	return &Server{validator: validator, handler: handler}
+	return &Server{validator: validator, handler: handler, drained: make(chan struct{})}
 }
 
 // Serve 在给定监听器上接受连接并逐条处理；阻塞直到监听器关闭。
 func (s *Server) Serve(ln net.Listener) error {
-	s.ln = ln
+	if !s.state.CompareAndSwap(0, 1) {
+		_ = ln.Close()
+		if s.state.Load() == 2 {
+			return nil
+		}
+		return fmt.Errorf("vless: already started")
+	}
+	// 接入循环退出后才等待处理器，避免 Wait 与首次 Add 并发。
+	defer func() {
+		routine.Go("vless.done", func() {
+			s.wg.Wait()
+			close(s.drained)
+		})
+	}()
+	defer func() { _ = ln.Close(); _ = s.Close() }()
+	s.ln.Store(&ln)
+	if s.state.Load() == 2 {
+		return nil
+	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
+			if s.state.Load() == 2 {
 				return nil
 			}
 			return fmt.Errorf("vless: accept: %w", err)
 		}
+		s.active.Store(conn, struct{}{})
+		if s.state.Load() == 2 {
+			s.active.Delete(conn)
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
 		routine.Go("vless.conn", func() {
+			defer s.wg.Done()
+			defer s.active.Delete(conn)
 			s.handle(conn)
 		})
 	}
@@ -136,14 +160,37 @@ func (s *Server) ServeTLS(ln net.Listener, cfg *tls.Config) error {
 
 // Close 停止接受新连接；已在处理的连接由各自协程收尾。
 func (s *Server) Close() error {
-	s.mu.Lock()
-	s.closed = true
-	ln := s.ln
-	s.mu.Unlock()
-	if ln != nil {
-		return ln.Close()
+	previous := s.state.Swap(2)
+	if previous == 2 {
+		return nil
+	}
+	if previous == 0 {
+		close(s.drained)
+	}
+	if ln := s.ln.Load(); ln != nil {
+		return (*ln).Close()
 	}
 	return nil
+}
+
+// Done 在停止接入且全部握手与处理器退出后关闭，不主动终止连接。
+func (s *Server) Done() <-chan struct{} { return s.drained }
+
+// Drain 终止全部连接，并等待握手与处理器退出。
+func (s *Server) Drain(ctx context.Context) error {
+	s.drainOnce.Do(func() {
+		_ = s.Close()
+		s.active.Range(func(key, _ any) bool {
+			_ = key.(net.Conn).Close()
+			return true
+		})
+	})
+	select {
+	case <-s.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // headerWaitTimeout 是请求头的等待上限；VLESS 头是明文，恶意半开连接必须掐断。

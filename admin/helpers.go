@@ -56,7 +56,7 @@ func (s *AdminService) clientOptions(r *http.Request) []apiClientOption {
 		out = append(out, apiClientOption{Name: name, Label: msg(r, msgClientLabelOnline, name)})
 	}
 	if s.opts.Bindings != nil {
-		for _, cb := range s.opts.Bindings.ClientSnapshot() {
+		for _, cb := range s.opts.Bindings.ClientSnapshot(r.Context()) {
 			if seen[cb.ClientKey] {
 				continue
 			}
@@ -168,13 +168,13 @@ func tailFile(path string, maxBytes, limit int, filter string) (lines []string, 
 func userTrafficKey(p store.Protocol, key string) string { return string(p) + "\x00" + key }
 
 // trafficMaps 一次读出两张流量表；读失败只告警并返回空表，页面照常渲染。
-func (s *AdminService) trafficMaps() (map[string]store.UserTraffic, map[string]store.ClientTraffic) {
+func (s *AdminService) trafficMaps(ctx context.Context) (map[string]store.UserTraffic, map[string]store.ClientTraffic) {
 	users := make(map[string]store.UserTraffic)
 	clients := make(map[string]store.ClientTraffic)
 	if s.opts.Store == nil {
 		return users, clients
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	if rows, err := s.opts.Store.ListUserTraffic(ctx); err != nil {
 		logging.Warnf("admin: list user traffic: %v", err)

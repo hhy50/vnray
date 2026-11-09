@@ -40,6 +40,19 @@ func (w *Writer) writePacket(id uint16, datagram []byte) error {
 	return w.writeLocked(id, StatusKeep, OptionData, datagram)
 }
 
+func (w *Writer) writePacketFrom(id uint16, source Target, datagram []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return w.err
+	}
+	if err := writeFrameTarget(w.w, id, StatusKeep, OptionData, datagram, source); err != nil {
+		w.err = err
+		return err
+	}
+	return nil
+}
+
 // writeEnd 发送 End 帧；errFlag 置位时带 OptionError（对端据此异常收尾）。
 func (w *Writer) writeEnd(id uint16, errFlag bool) error {
 	w.mu.Lock()

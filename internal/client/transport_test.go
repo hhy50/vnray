@@ -69,14 +69,14 @@ func TestDialPlaintextDoesNotDiscloseAuthKey(t *testing.T) {
 			if bytes.Contains(payload, []byte(keyText)) || bytes.Contains(payload, key[:]) {
 				return fmt.Errorf("plaintext authentication disclosed the secret")
 			}
-			auth, err := protocol.ParseAuthRequest(payload)
+			auth, err := protocol.ParseConfigReportRequest(payload)
 			if err != nil {
 				return err
 			}
-			if frame.Type != protocol.Auth || auth.Key != fmt.Sprintf("%x", key.ID()) {
+			if frame.Type != protocol.ConfigReport || auth.Info.Name != "team:g:edge" {
 				return fmt.Errorf("authentication did not bind the public key identity")
 			}
-			protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: true})
+			protocol.WriteReply(stream, protocol.ConfigReportResult, protocol.Reply{OK: true})
 			select {
 			case <-release:
 			case <-ctx.Done():

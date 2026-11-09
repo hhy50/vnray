@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-// ClientInfo 是客户端随认证上报的自身配置与环境摘要（Auth 帧载荷的一部分）。
+// ClientInfo 是客户端上报的自身配置与环境摘要。
 type ClientInfo struct {
 	Name     string `json:"name,omitempty"`
 	Version  string `json:"version,omitempty"`
@@ -77,9 +77,8 @@ type ClientMatch struct {
 	Port          []int    `json:"port,omitempty"`
 }
 
-// AuthRequest 是 Auth 帧的载荷：已证明的公开密钥标识 + 客户端自报信息。
-type AuthRequest struct {
-	Key  string     `json:"key"`
+// ConfigReportRequest 是安全握手后的客户端配置上报。
+type ConfigReportRequest struct {
 	Info ClientInfo `json:"client"`
 }
 
@@ -117,8 +116,7 @@ type Reply struct {
 	Reason string `json:"reason,omitempty"`
 	// Client 仅用户认证成功时非空：绑定的客户端配置（在线为完整上报值，离线仅名字）。
 	Client *ClientInfo `json:"client,omitempty"`
-	// Config 仅客户端认证应答（AuthResult）里非空：服务端下发的全量配置快照，
-	// 客户端重连时随认证一并拿到，保证重启不丢配置。
+	// Config 是配置上报应答携带的服务端全量配置。
 	Config *PushConfig `json:"config,omitempty"`
 }
 
@@ -145,6 +143,7 @@ type ClientConfig struct {
 
 // PushConfig 分层下发完整快照，由客户端先匹配独立配置，未命中再匹配全局配置。
 type PushConfig struct {
+	Revision     uint64       `json:"revision,omitempty"`
 	ClientConfig ClientConfig `json:"client_config"`
 	GlobalConfig ClientConfig `json:"global_config"`
 }
@@ -158,9 +157,9 @@ func newJSONFrame(typ Type, v any) (*Frame, error) {
 	return NewBufferedFrame(typ, payload), nil
 }
 
-// NewAuthFrame 构造认证帧。
-func NewAuthFrame(req AuthRequest) (*Frame, error) {
-	return newJSONFrame(Auth, req)
+// NewConfigReportFrame 构造配置上报帧。
+func NewConfigReportFrame(req ConfigReportRequest) (*Frame, error) {
+	return newJSONFrame(ConfigReport, req)
 }
 
 // NewUserAuthFrame 构造用户认证帧。
@@ -222,10 +221,10 @@ func NewPortMapFrame(a Address) (*Frame, error) {
 	return NewBufferedFrame(PortMap, payload), nil
 }
 
-// NewReplyFrame 构造任一类结果帧（AuthResult / ForwardResult / TunnelResult）。
+// NewReplyFrame 构造认证、配置上报或转发的结果帧。
 func NewReplyFrame(typ Type, res Reply) (*Frame, error) {
 	switch typ {
-	case AuthResult, ForwardResult, TunnelResult:
+	case AuthResult, ForwardResult, TunnelResult, ConfigReportResult:
 	default:
 		return nil, fmt.Errorf("%w: %v is not a result frame type", ErrProtocol, typ)
 	}
@@ -254,10 +253,10 @@ func decodeJSON(payload []byte, v any, what string) error {
 	return nil
 }
 
-// ParseAuthRequest 解析认证帧载荷。
-func ParseAuthRequest(payload []byte) (AuthRequest, error) {
-	var req AuthRequest
-	return req, decodeJSON(payload, &req, "auth request")
+// ParseConfigReportRequest 解析配置上报载荷。
+func ParseConfigReportRequest(payload []byte) (ConfigReportRequest, error) {
+	var req ConfigReportRequest
+	return req, decodeJSON(payload, &req, "config report")
 }
 
 // ParseUserAuthRequest 解析用户认证帧载荷。

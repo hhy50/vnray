@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/hhy50/vnray/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,7 +14,7 @@ import (
 
 func TestAPIKeyGeneration(t *testing.T) {
 	s := newTestAdminService(t)
-	s.opts.Bindings = NewBindings(s.opts.Store)
+	s.opts.Bindings = NewBindings(s.opts.Store.(store.Store))
 	for _, tc := range []struct {
 		body   string
 		status int
@@ -48,7 +50,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 			t.Fatal("scope not preserved")
 		}
 	}
-	keys := s.opts.Bindings.AuthKeySnapshot()
+	keys := s.opts.Bindings.AuthKeySnapshot(context.Background())
 	if len(keys) != 2 || keys[0].Key == keys[1].Key {
 		t.Fatal("creation reused or accepted an external key")
 	}

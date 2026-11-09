@@ -3,6 +3,7 @@ package admin
 // serviceconfig.go 只有运行期服务配置的接口与解析工具：读写口在 api_ops.go。
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -16,7 +17,26 @@ type ServiceSettings interface {
 	// Current 返回当前生效的配置快照。
 	Current() config.ServiceSettings
 	// Apply 校验并落库新配置，成功后热分发到运行态。
-	Apply(config.ServiceSettings) error
+	Apply(context.Context, config.ServiceSettings) error
+}
+
+// ServiceSettingsUpdater 在当前配置上应用一段变更。
+type ServiceSettingsUpdater interface {
+	Update(context.Context, func(*config.ServiceSettings) error) error
+}
+
+func (s *AdminService) updateServiceSettings(ctx context.Context, update func(*config.ServiceSettings) error) error {
+	if updater, ok := s.opts.Settings.(ServiceSettingsUpdater); ok {
+		return updater.Update(ctx, update)
+	}
+	next := s.opts.Settings.Current()
+	if err := update(&next); err != nil {
+		return err
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	return s.opts.Settings.Apply(ctx, next)
 }
 
 // currentServiceSettings 返回当前生效的运行时配置；未注入 Settings（测试或未接装配）时

@@ -4,6 +4,8 @@ package core
 
 import (
 	"context"
+	"errors"
+	"github.com/hhy50/vnray/internal/inbound"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
+	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
 )
 
@@ -42,8 +45,12 @@ func newTestRuntimeWith(t *testing.T, st store.Store) (*admin.Bindings, *ratelim
 	t.Helper()
 	bindings := admin.NewBindings(st)
 	limits := ratelimit.NewRegistry()
-	plugins := plugin.NewManager(st, bindings, transport.NewSessionManager(), limits)
-	bindings.Watch(func(c admin.UserChange) { propagateUserChange(c, limits, plugins) })
+	plugins := plugin.NewRegistry(context.Background(),
+		inbound.NewV2RayPlugin(st, bindings, nil, limits),
+		inbound.NewSSPlugin(st, bindings, nil, limits),
+		inbound.NewVNRayUserPlugin(st, inbound.VNRayUserDependencies{Events: transport.NewSessionManager(), Users: bindings}),
+	)
+	bindings.Watch(func(c admin.UserChange) { propagateUserChange(c, limits, plugins, nil) })
 	return bindings, limits, plugins
 }
 
@@ -66,12 +73,15 @@ func TestSeedLimitsProjectsPersistedConfig(t *testing.T) {
 	}
 
 	// 模拟重启：全新 Bindings 从库载回，全新 Registry 是空的。
-	bindings, limits, _ := newTestRuntimeWith(t, st)
+	_, limits, _ := newTestRuntimeWith(t, st)
+	meter := traffic.NewMeter(limits)
 	if up, down := limits.Limits(ratelimit.Identity(store.ProtocolVMess, testUUID)); up != 0 || down != 0 {
 		t.Fatalf("registry should start empty, got (%d,%d)", up, down)
 	}
 
-	seedLimits(bindings, limits)
+	if err := seedLimits(context.Background(), st, limits, meter); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		name     string
@@ -86,6 +96,38 @@ func TestSeedLimitsProjectsPersistedConfig(t *testing.T) {
 		if up != tc.up || down != tc.down {
 			t.Errorf("%s: limits = (%d,%d), want (%d,%d)", tc.name, up, down, tc.up, tc.down)
 		}
+		if meter.UserStats(tc.p, tc.key) == nil {
+			t.Errorf("%s: persisted user was not registered for traffic", tc.name)
+		}
+	}
+}
+
+type failedUserSeed struct {
+	err   error
+	calls int
+}
+
+func (s *failedUserSeed) ListUsers(context.Context) ([]store.UserBinding, error) {
+	s.calls++
+	return []store.UserBinding{{Protocol: store.ProtocolVNV1, Key: testUser, Config: store.UserConfig{UpLimit: 1024}}}, s.err
+}
+
+func TestSeedLimitsFailsWithoutPublishingPartialUsers(t *testing.T) {
+	want := errors.New("user table unavailable")
+	st := &failedUserSeed{err: want}
+	limits := ratelimit.NewRegistry()
+	meter := traffic.NewMeter(limits)
+	if err := seedLimits(context.Background(), st, limits, meter); !errors.Is(err, want) {
+		t.Fatalf("seed error = %v, want %v", err, want)
+	}
+	if st.calls != 1 {
+		t.Fatalf("seed queried users %d times", st.calls)
+	}
+	if meter.UserStats(store.ProtocolVNV1, testUser) != nil {
+		t.Fatal("failed seed registered partial users")
+	}
+	if up, down := limits.Limits(ratelimit.Identity(store.ProtocolVNV1, testUser)); up != 0 || down != 0 {
+		t.Fatalf("failed seed published limits: %d/%d", up, down)
 	}
 }
 
@@ -101,7 +143,7 @@ func TestPropagateRoutesUUIDToValidator(t *testing.T) {
 	}
 
 	// 注册 vmess 用户 → 路由立刻可见，限速桶同步建好。
-	if err := bindings.SetUser(admin.Binding{
+	if err := bindings.SetUser(context.Background(), admin.Binding{
 		UserKey: testUUID, Protocol: store.ProtocolVMess, Name: "alice-vmess",
 		Status: store.UserEnabled, Client: testClient,
 		Config: store.UserConfig{UpLimit: 2048},
@@ -116,7 +158,7 @@ func TestPropagateRoutesUUIDToValidator(t *testing.T) {
 	}
 
 	// vn-v1 用户不进 v2ray 路由表（协议隔离）。
-	if err := bindings.SetUser(admin.Binding{
+	if err := bindings.SetUser(context.Background(), admin.Binding{
 		UserKey: testUser, Protocol: store.ProtocolVNV1, Name: "alice-vn-v1",
 		Status: store.UserEnabled, Client: testClient,
 	}); err != nil {
@@ -127,7 +169,7 @@ func TestPropagateRoutesUUIDToValidator(t *testing.T) {
 	}
 
 	// 删除 → 路由消失（桶的回收由 ratelimit 包的 Forget 测试覆盖，此处不重复断言）。
-	if _, err := bindings.DeleteUser(store.ProtocolVMess, testUUID); err != nil {
+	if _, err := bindings.DeleteUser(context.Background(), store.ProtocolVMess, testUUID); err != nil {
 		t.Fatalf("delete vmess user: %v", err)
 	}
 	if routes := uuidRoutesOf(p); len(routes) != 0 {
@@ -136,8 +178,8 @@ func TestPropagateRoutesUUIDToValidator(t *testing.T) {
 }
 
 // uuidRoutesOf 取插件的 uuid 路由视图；只经窄接口读，不依赖 plugin 内部类型。
-func uuidRoutesOf(p plugin.Plugin) []plugin.UUIDRoute {
-	if r, ok := p.(interface{ UUIDRoutes() []plugin.UUIDRoute }); ok {
+func uuidRoutesOf(p plugin.Plugin) []inbound.UUIDRoute {
+	if r, ok := p.(interface{ UUIDRoutes() []inbound.UUIDRoute }); ok {
 		return r.UUIDRoutes()
 	}
 	return nil

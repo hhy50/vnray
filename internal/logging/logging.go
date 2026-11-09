@@ -165,6 +165,9 @@ func log(level slog.Level, msg string, args ...any) {
 	logger.Load().Log(context.Background(), level, msg, args...)
 }
 
+// DebugEnabled 报告 debug 级日志当前是否会输出；调用方据此跳过昂贵的参数求值。
+func DebugEnabled() bool { return levelVar.Level() <= slog.LevelDebug }
+
 // Debugf 以 debug 级别记录一条格式化消息。
 func Debugf(format string, args ...any) { log(slog.LevelDebug, fmt.Sprintf(format, args...)) }
 

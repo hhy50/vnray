@@ -140,6 +140,8 @@ export interface PortMap {
   local_port: number
   limit_up_kb: number
   limit_down_kb: number
+  up_bytes: number
+  down_bytes: number
   tls_enabled: boolean
   tls_configured: boolean
   // 仅用于编辑弹窗回显，保存时原样回传；清空两项表示沿用原配置。

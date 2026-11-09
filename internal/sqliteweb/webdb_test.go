@@ -1,4 +1,4 @@
-package plugin
+package sqliteweb
 
 import (
 	"context"
@@ -7,11 +7,26 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
 	"time"
+
+	"github.com/hhy50/vnray/internal/store"
 )
+
+// seedTestStore 开一个临时 sqlite 库，测试结束自动关闭。
+func seedTestStore(t *testing.T) store.Store {
+	t.Helper()
+	st, err := store.Open(context.Background(), "sqlite", filepath.Join(t.TempDir(), "webdb.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // freePort 取一个当下空闲的回环端口，供测试监听用。
 func freePort(t *testing.T) int {
@@ -56,7 +71,7 @@ func postSQL(t *testing.T, url, stmt string) (int, map[string]any) {
 
 func TestSQLiteWebLifecycle(t *testing.T) {
 	st := seedTestStore(t)
-	p := newSQLiteWebPlugin(st)
+	p := New(st)
 	port := freePort(t)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	ctx := context.Background()
@@ -155,14 +170,14 @@ func TestSQLiteWebLifecycle(t *testing.T) {
 // TestSQLiteWebDefaultPort 验证未配置过端口时报告内置默认端口，种子启用参数也用它。
 func TestSQLiteWebDefaultPort(t *testing.T) {
 	st := seedTestStore(t)
-	p := newSQLiteWebPlugin(st)
+	p := New(st)
 	ports := p.Status().Ports
-	if len(ports) != 1 || ports[0].Port != DefaultSQLiteWebPort {
-		t.Fatalf("status ports = %v, want default %d", ports, DefaultSQLiteWebPort)
+	if len(ports) != 1 || ports[0].Port != DefaultPort {
+		t.Fatalf("status ports = %v, want default %d", ports, DefaultPort)
 	}
-	params := defaultEnableParams(p)
-	if params["port"] != strconv.Itoa(DefaultSQLiteWebPort) {
-		t.Fatalf("default enable params = %v, want port %d", params, DefaultSQLiteWebPort)
+	state := InitialState()
+	if state.Config.Ports[store.Protocol(pluginName)] != DefaultPort || state.Name != Name {
+		t.Fatalf("initial state = %+v", state)
 	}
 }
 
@@ -170,7 +185,7 @@ func TestSQLiteWebDefaultPort(t *testing.T) {
 // 否则前端 rows.map 直接抛 "Cannot read properties of null"。
 func TestSQLiteWebEmptyRows(t *testing.T) {
 	st := seedTestStore(t)
-	p := newSQLiteWebPlugin(st)
+	p := New(st)
 	port := freePort(t)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if err := p.Enable(context.Background(), map[string]string{"port": strconv.Itoa(port)}); err != nil {
@@ -221,7 +236,7 @@ func TestSQLiteWebBasicAuth(t *testing.T) {
 		return res.StatusCode
 	}
 
-	p := newSQLiteWebPlugin(st)
+	p := New(st)
 	if err := p.Enable(ctx, map[string]string{"port": strconv.Itoa(port), "password": "s3cret"}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -253,7 +268,7 @@ func TestSQLiteWebBasicAuth(t *testing.T) {
 	p.Stop()
 
 	// 重启后库里清除过的口令保持为空。
-	restored := newSQLiteWebPlugin(st)
+	restored := New(st)
 	restored.Restore(ctx)
 	if !restored.Status().Enabled {
 		t.Fatal("plugin should be running after Restore")
@@ -268,7 +283,7 @@ func TestSQLiteWebBasicAuth(t *testing.T) {
 		t.Fatalf("enable with new password: %v", err)
 	}
 	p.Stop()
-	restarted := newSQLiteWebPlugin(st)
+	restarted := New(st)
 	restarted.Restore(ctx)
 	defer restarted.Stop()
 	if code := get("admin", "new-pass"); code != http.StatusOK {
@@ -279,14 +294,14 @@ func TestSQLiteWebBasicAuth(t *testing.T) {
 func TestSQLiteWebRestore(t *testing.T) {
 	st := seedTestStore(t)
 	port := freePort(t)
-	p := newSQLiteWebPlugin(st)
+	p := New(st)
 	if err := p.Enable(context.Background(), map[string]string{"port": strconv.Itoa(port)}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	p.Stop()
 
 	// 新实例经 Restore 恢复已启用的状态并重新监听同一端口。
-	restored := newSQLiteWebPlugin(st)
+	restored := New(st)
 	restored.Restore(context.Background())
 	if !restored.Status().Enabled {
 		t.Fatal("plugin should be running after Restore")

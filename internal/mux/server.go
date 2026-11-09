@@ -1,10 +1,12 @@
 package mux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/routine"
@@ -12,7 +14,7 @@ import (
 
 // Handler 由装配方实现：为一条新子连接建立通往目标的通道并完成双向搬运，
 // 返回时该子连接结束（Conn.Close 随之发出 End 帧）。target 已通过基本校验
-// （主机非空、端口合法、网络为 TCP）。
+// （主机非空、端口合法、网络为 TCP 或 UDP）。
 type Handler interface {
 	Open(target Target, conn *Conn)
 }
@@ -31,23 +33,44 @@ func NewServer(handler Handler) *Server {
 // Serve 读帧并驱动子连接，阻塞到主连接结束；返回时全部子连接已收尾。
 // 对端正常关闭（EOF）返回 nil，协议错误返回错误供调用方记录。
 func (s *Server) Serve(conn net.Conn) error {
+	return s.ServeContext(context.Background(), conn)
+}
+
+// ServeContext 将父级取消传给主连接及全部子连接，并等待处理器退出。
+func (s *Server) ServeContext(ctx context.Context, conn net.Conn) error {
+	ctx, cancel := context.WithCancel(ctx)
 	w := NewWriter(conn)
-	mgr := NewSessionManager()
-	defer mgr.closeAll()
+	mgr := NewSessionManager(ctx)
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	routine.Go("mux.cancel", func() {
+		defer watcher.Done()
+		<-ctx.Done()
+		_ = conn.Close()
+		mgr.closeAll()
+	})
+	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		_ = conn.Close()
+		mgr.closeAll()
+		wg.Wait()
+		watcher.Wait()
+	}()
 
 	remote := conn.RemoteAddr().String()
 	logging.Debug("mux: session started", "remote", remote)
 	for {
 		f, err := readFrame(conn)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("mux: read frame: %w", err)
 		}
 		switch f.Status {
 		case StatusNew:
-			s.handleNew(mgr, w, f)
+			s.handleNew(mgr, w, f, &wg)
 		case StatusKeep:
 			s.handleKeep(mgr, w, f)
 		case StatusEnd:
@@ -63,7 +86,7 @@ func (s *Server) Serve(conn net.Conn) error {
 // handleNew 开子连接：校验目标后登记会话，由 Handler 协程建连与搬运。
 // New 帧附带的首数据随登记一起进入输入缓冲，Handler 开隧道的耗时不会丢数据。
 // 网络类型为 TCP 或 UDP；UDP 子连接按数据报语义搬运。
-func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
+func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame, wg *sync.WaitGroup) {
 	network := "tcp"
 	if f.Network == NetworkUDP {
 		network = "udp"
@@ -86,6 +109,8 @@ func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
 		_ = w.writeEnd(f.SessionID, true)
 		return
 	}
+	c.target = f.Target
+	c.target.Network = network
 	// New 帧附带的首数据（v2ray 客户端把应用的第一个报文放在这里）随登记一起
 	// 进输入缓冲：Handler 开隧道的耗时不会丢数据，也不需要它自己特殊处理首帧。
 	if f.HasData() {
@@ -96,7 +121,9 @@ func (s *Server) handleNew(mgr *SessionManager, w *Writer, f *Frame) {
 	}
 	target := f.Target
 	target.Network = network
+	wg.Add(1)
 	routine.Go("mux.session", func() {
+		defer wg.Done()
 		defer c.Close()
 		s.handler.Open(target, c)
 	})
@@ -111,6 +138,16 @@ func (s *Server) handleKeep(mgr *SessionManager, w *Writer, f *Frame) {
 		return
 	}
 	if !f.HasData() {
+		return
+	}
+	if f.Network == NetworkUDP {
+		if c.network != "udp" || f.Target.Host == "" || f.Target.Port == 0 {
+			_ = c.CloseWithError()
+			return
+		}
+		if err := c.feedPacket(f.Target, f.Data); err != nil {
+			logging.Debug("mux: dropping packet for finished sub-connection", "session", f.SessionID)
+		}
 		return
 	}
 	if err := c.feedInput(f.Data); err != nil {
@@ -129,6 +166,7 @@ func (s *Server) handleEnd(mgr *SessionManager, f *Frame) {
 	}
 	mgr.remove(f.SessionID)
 	if f.Option&OptionError != 0 {
+		c.cancel()
 		c.inW.Interrupt()
 		return
 	}

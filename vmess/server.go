@@ -4,12 +4,14 @@ package vmess
 // Handler 拿到的 Conn 已完成响应头发送，Read/Write 即解密/加密的载荷通道。
 
 import (
+	"context"
 	"crypto/cipher"
 	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hhy50/vnray/internal/identity"
@@ -58,35 +60,61 @@ type Handler func(id identity.Identity, target Target, network string, conn *Con
 
 // Server 是 VMess 入站服务：持有账号验证器与连接处理器，驱动每条连接的一生。
 type Server struct {
-	ln        net.Listener
+	ln        atomic.Pointer[net.Listener]
 	validator *Validator
 	handler   Handler
 	history   *sessionHistory
-
-	mu     sync.Mutex
-	closed bool
+	state     atomic.Int32
+	active    sync.Map
+	wg        sync.WaitGroup
+	drainOnce sync.Once
+	drained   chan struct{}
 }
 
 // NewServer 创建 VMess 入站服务。
 func NewServer(validator *Validator, handler Handler) *Server {
-	return &Server{validator: validator, handler: handler, history: newSessionHistory()}
+	return &Server{validator: validator, handler: handler, history: newSessionHistory(), drained: make(chan struct{})}
 }
 
 // Serve 在给定监听器上接受连接并逐条处理；阻塞直到监听器关闭。
 func (s *Server) Serve(ln net.Listener) error {
-	s.ln = ln
+	if !s.state.CompareAndSwap(0, 1) {
+		_ = ln.Close()
+		if s.state.Load() == 2 {
+			return nil
+		}
+		return fmt.Errorf("vmess: already started")
+	}
+	// 接入循环退出后才等待处理器，避免 Wait 与首次 Add 并发。
+	defer func() {
+		routine.Go("vmess.done", func() {
+			s.wg.Wait()
+			close(s.drained)
+		})
+	}()
+	defer func() { _ = ln.Close(); _ = s.Close() }()
+	s.ln.Store(&ln)
+	if s.state.Load() == 2 {
+		return nil
+	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
+			if s.state.Load() == 2 {
 				return nil
 			}
 			return fmt.Errorf("vmess: accept: %w", err)
 		}
+		s.active.Store(conn, struct{}{})
+		if s.state.Load() == 2 {
+			s.active.Delete(conn)
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
 		routine.Go("vmess.conn", func() {
+			defer s.wg.Done()
+			defer s.active.Delete(conn)
 			s.handle(conn)
 		})
 	}
@@ -94,14 +122,37 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Close 停止接受新连接；已在处理的连接由各自协程收尾。
 func (s *Server) Close() error {
-	s.mu.Lock()
-	s.closed = true
-	ln := s.ln
-	s.mu.Unlock()
-	if ln != nil {
-		return ln.Close()
+	previous := s.state.Swap(2)
+	if previous == 2 {
+		return nil
+	}
+	if previous == 0 {
+		close(s.drained)
+	}
+	if ln := s.ln.Load(); ln != nil {
+		return (*ln).Close()
 	}
 	return nil
+}
+
+// Done 在监听结束且全部握手和连接处理退出后关闭。
+func (s *Server) Done() <-chan struct{} { return s.drained }
+
+// Drain 终止全部连接，并等待握手与处理器退出。
+func (s *Server) Drain(ctx context.Context) error {
+	s.drainOnce.Do(func() {
+		_ = s.Close()
+		s.active.Range(func(key, _ any) bool {
+			_ = key.(net.Conn).Close()
+			return true
+		})
+	})
+	select {
+	case <-s.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // handleWaitTimeout 是 VMess 握手（头两段 AEAD 解码）的等待上限。

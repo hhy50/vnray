@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"net"
 	"net/http"
@@ -130,7 +131,7 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 	st := testStore(t)
 	bindings := admin.NewBindings(st)
 	limits := ratelimit.NewRegistry()
-	plugins := plugin.NewManager(st, bindings, svc.Sessions(), limits)
+	plugins := plugin.NewRegistry(context.Background(), inbound.NewV2RayPlugin(st, bindings, svc.Sessions(), limits))
 	// 与生产装配一致：用户表变更同时推给限速注册表（按 uuid 身份建桶）与 v2ray 验证器（路由）。
 	bindings.Watch(func(c admin.UserChange) {
 		if c.Deleted {
@@ -161,7 +162,7 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 
 	// setLimit 更新该 uuid 用户的限速配置（同时推限速桶与路由）；Client 固定为 test-edge。
 	setLimit := func(upBps, downBps int64) {
-		if err := bindings.PutUser(store.UserBinding{
+		if err := bindings.PutUser(context.Background(), store.UserBinding{
 			Key:      rateLimitUUID,
 			Protocol: store.ProtocolVMess,
 			Name:     "e2e-ratelimit",

@@ -6,6 +6,7 @@ package vmess
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,14 +18,15 @@ type sessionKey [48]byte
 
 // sessionHistory 记录近期受理过的请求指纹，TTL 内重复出现即判重放。
 type sessionHistory struct {
-	mu     sync.Mutex
-	seen   map[sessionKey]time.Time
-	lastGC time.Time
+	seen   sync.Map
+	lastGC atomic.Int64
 }
 
 // newSessionHistory 创建空的会话判重表。
 func newSessionHistory() *sessionHistory {
-	return &sessionHistory{seen: make(map[sessionKey]time.Time, 128), lastGC: time.Now()}
+	f := &sessionHistory{}
+	f.lastGC.Store(time.Now().UnixNano())
+	return f
 }
 
 // Check 登记并校验一条请求指纹：TTL 内重复出现返回 false；已过期条目视为
@@ -34,21 +36,27 @@ func (h *sessionHistory) Check(user [16]byte, bodyKey, bodyIV [16]byte) bool {
 	copy(key[0:16], user[:])
 	copy(key[16:32], bodyKey[:])
 	copy(key[32:48], bodyIV[:])
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	now := time.Now()
-	if at, ok := h.seen[key]; ok && now.Sub(at) < sessionHistoryTTL {
-		return false
-	}
-	h.seen[key] = now
-	if now.Sub(h.lastGC) > time.Minute {
-		for k, at := range h.seen {
-			if now.Sub(at) >= sessionHistoryTTL {
-				delete(h.seen, k)
-			}
+	for {
+		previous, loaded := h.seen.LoadOrStore(key, now)
+		if !loaded {
+			break
 		}
-		h.lastGC = now
+		if now.Sub(previous.(time.Time)) < sessionHistoryTTL {
+			return false
+		}
+		if h.seen.CompareAndSwap(key, previous, now) {
+			break
+		}
+	}
+	last := h.lastGC.Load()
+	if now.UnixNano()-last > int64(time.Minute) && h.lastGC.CompareAndSwap(last, now.UnixNano()) {
+		h.seen.Range(func(key, value any) bool {
+			if now.Sub(value.(time.Time)) >= sessionHistoryTTL {
+				h.seen.CompareAndDelete(key, value)
+			}
+			return true
+		})
 	}
 	return true
 }

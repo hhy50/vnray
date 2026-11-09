@@ -97,7 +97,9 @@ func (s *ConnectorService) pingClients() {
 		if !sess.BeginPing() {
 			continue
 		}
+		s.pingWG.Add(1)
 		routine.Go("core.session.ping", func() {
+			defer s.pingWG.Done()
 			defer sess.EndPing()
 			s.pingSession(sess)
 		})

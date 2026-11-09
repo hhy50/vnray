@@ -34,3 +34,26 @@ func TestConfigPushOrdering(t *testing.T) {
 		t.Fatalf("latest config lost: %v", applied)
 	}
 }
+
+func TestConfigReportAndPushOrdering(t *testing.T) {
+	var revisions []uint64
+	c := &Client{onConfig: func(cfg protocol.PushConfig) { revisions = append(revisions, cfg.Revision) }}
+	c.applyConfig(0, protocol.PushConfig{Revision: 1})
+	c.applyConfig(2, protocol.PushConfig{Revision: 3})
+	c.applyConfig(0, protocol.PushConfig{Revision: 2})
+	c.applyConfig(0, protocol.PushConfig{Revision: 4})
+	c.applyConfig(100, protocol.PushConfig{Revision: 3})
+	c.applyConfig(102, protocol.PushConfig{})
+	if fmt.Sprint(revisions) != "[1 3 4]" {
+		t.Fatalf("stale report or push applied: %v", revisions)
+	}
+	var wg sync.WaitGroup
+	for revision := uint64(5); revision <= 100; revision++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.applyConfig(0, protocol.PushConfig{Revision: revision}) }()
+	}
+	wg.Wait()
+	if revisions[len(revisions)-1] != 100 {
+		t.Fatalf("latest report or push lost: %v", revisions)
+	}
+}

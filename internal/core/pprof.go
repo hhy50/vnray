@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	_ "net/http/pprof" // 注册 /debug/pprof 处理器到 DefaultServeMux
+	"net/http/pprof"
 	"runtime"
 	"time"
 
@@ -13,14 +15,18 @@ import (
 	"github.com/hhy50/vnray/internal/routine"
 )
 
-// startPprof 启动诊断端点（diagnostics.pprof_listen 非空时）：
-//   - /debug/pprof/：CPU/堆/协程等标准画像（net/http/pprof）。
-//   - /debug/runtime：runtime.MemStats 与协程数的 JSON 快照，供脚本采样。
-//
-// 端点随 app ctx 退出而关闭；只应绑定回环地址，调用方不做再校验。
-func startPprof(ctx context.Context, addr string) {
+type pprofService struct {
+	srv  *http.Server
+	done chan struct{}
+}
+
+func newPprofService(addr string) *pprofService {
 	mux := http.NewServeMux()
-	mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	mux.HandleFunc("/debug/runtime", func(w http.ResponseWriter, _ *http.Request) {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
@@ -40,20 +46,44 @@ func startPprof(ctx context.Context, addr string) {
 			"last_gc_delta_ms": time.Since(time.Unix(0, int64(m.LastGC))).Milliseconds(),
 		})
 	})
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	return &pprofService{srv: &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}}
+}
+
+// Name 返回诊断服务名。
+func (s *pprofService) Name() string { return "DiagnosticsService" }
+
+// Start 同步打开诊断监听，失败交由宿主回滚启动。
+func (s *pprofService) Start(ctx context.Context) error {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
+	if err != nil {
+		return fmt.Errorf("diagnostics listen: %w", err)
+	}
+	s.done = make(chan struct{})
 
 	routine.Go("core.pprof.serve", func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logging.Errorf("pprof: serve %s: %v", addr, err)
+		defer close(s.done)
+		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logging.Error("pprof: serve stopped", "err", err)
 		}
 	})
-	routine.Go("core.pprof.watchClose", func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			logging.Warnf("pprof: shutdown: %v", err)
-		}
-	})
-	logging.Info(fmt.Sprintf("pprof: diagnostics listening on http://%s/debug/pprof", addr))
+	logging.Info("pprof: diagnostics listening", "addr", ln.Addr().String())
+	return nil
+}
+
+// Drain 停止诊断请求并等待 HTTP 循环退出。
+func (s *pprofService) Drain(ctx context.Context) error {
+	if s.done == nil {
+		return nil
+	}
+	err := s.srv.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, s.srv.Close())
+	}
+	select {
+	case <-s.done:
+		return err
+	case <-ctx.Done():
+		return errors.Join(err, ctx.Err())
+	}
 }

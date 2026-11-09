@@ -157,8 +157,7 @@ func DefaultServerProxyRouting() Routing {
 	}
 }
 
-// PluginConfig 是入站插件的启动种子配置：仅当某插件在库中没有任何记录时，才按
-// Enabled 列表用内置默认参数启用它；已有记录（含管理台停用）一律以库为准。
+// PluginConfig 是首次数据库初始化时的插件种子配置；初始化完成后以数据库为准。
 type PluginConfig struct {
 	Enabled []string `yaml:"enabled"`
 }

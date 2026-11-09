@@ -10,7 +10,7 @@
 ## 1. 设计原则
 
 1. **教学可读优先**：代码是给人读的。巧妙但隐晦的写法，展开成朴素写法加注释。
-2. **小内核、薄分层**：核心机制（dispatcher / pipe / outbound）保持零业务依赖；装配逻辑（App 类型、依赖构造、配置翻译）只允许出现在装配包：`internal/core`（server，入口 `initServerApp` 手写组装）与 `internal/cli`（client，命令装配手写），均不用依赖注入框架。
+2. **小内核、薄分层**：核心机制（dispatcher / pipe / outbound）保持零业务依赖；装配逻辑（App 类型、依赖构造、配置翻译）只允许出现在装配包：`internal/core`（server，入口 `initServerApp` 手写组装）与 `cmd/client`（client，命令装配手写），均不用依赖注入框架。
 3. **依赖最小化**：标准库能解决的不引第三方。新增运行时依赖必须在 PR 中说明理由、许可证与维护活跃度。
 4. **每个改动可回滚**：小步提交、小 PR（建议 ≤ 400 行 diff），一个 PR 只做一件事。
 
@@ -19,23 +19,28 @@
 分层依赖**只能单向向下**，禁止反向依赖和同层环依赖：
 
 ```text
-cmd/                进程入口：只调用 internal/core（server）或 internal/cli（client），不放业务逻辑
-internal/cli/       客户端命令层 + 装配（手写）：cobra 命令、配置覆盖、Dial 与启动、重连循环
+cmd/server/        服务端进程入口：调用 internal/core.RunServer
+cmd/client/        客户端进程入口、命令层与手写装配：配置覆盖、Dial 与启动、重连循环
 internal/client/    客户端运行时：Dial（认证握手）/ Client.Serve（请求流、隧道流、心跳应答）
-internal/core/ 服务端命令层 + 装配 + 数据面服务实现（ConnectorService：握手、心跳、转发选路与会话表）；持有 GORM/SQLite 等服务端专用依赖，与 cli 分包以隔离 client 二进制
-admin/              管理面：Bindings（user_key 绑定表，写穿 store）、AdminService（Web 管理页，读 transport.SessionManager）
-vmess/              VMess 入站协议实现（AEAD 请求头 + 分块载荷），被 internal/plugin 的 v2ray 插件使用
-vless/              VLESS 入站协议实现（明文头 + 明文载荷），被 internal/plugin 的 v2ray 插件使用
-shadowsocks/        Shadowsocks AEAD 入站协议实现，被 internal/plugin 的 ss 插件使用
+internal/core/ 服务端命令层 + 装配 + 数据面服务实现（ConnectorService：握手、心跳、转发选路与会话表）；持有 GORM/SQLite 等服务端专用依赖，与客户端装配分包以隔离 client 二进制
+admin/              管理面：HTTP API、认证与 Web 管理页；Bindings 保留兼容别名
+internal/access/    用户绑定、认证索引、凭据缓存及客户端配置推送；管理面与数据面共用
+internal/plugin/    插件契约、注册表、共享运行态与收尾状态门
+internal/inbound/   V2Ray、SS、VNRay 入站插件与转发辅助
+internal/sqliteweb/ sqlite-web 插件实现
+internal/portmap/   端口映射控制面与监听运行态；控制面串行化持久化和发布
+vmess/              VMess 入站协议实现（AEAD 请求头 + 分块载荷），被 internal/inbound 使用
+vless/              VLESS 入站协议实现（明文头 + 明文载荷），被 internal/inbound 使用
+shadowsocks/        Shadowsocks AEAD 入站协议实现，被 internal/inbound 使用
 internal/acl/       目标网段守卫：包装 dispatch.Dispatcher 在分发前校验
 internal/transport/ 会话层：SessionManager（会话登记表）/ Session 包装 / UserRegistry 契约 / 隧道与双向搬运工具
 internal/tcp/       事件驱动多路复用监听器（功能级）：Start 打开监听并驱动事件循环；TCP 接入 + 会话/流的建立与事件派发；以 Session/Stream 抽象对外，不向上层泄漏多路复用实现
 internal/dispatch/ 数据面内核：Dispatcher / Link / OutboundHandler
 internal/protocol/  DMP 二进制帧编解码（固定头 10 B，魔数 0x2026）
 internal/pipe/      基础原语：单向内存管道，不依赖项目内任何其他包
-internal/store/     绑定表可插拔存储（GORM）：Store 接口 + memory/sqlite/mysql；只依赖 GORM 与驱动，不依赖数据面包
+internal/store/     可插拔存储（GORM）：Store 接口 + memory/sqlite/mysql；依赖持久化驱动和协议配置类型，不依赖会话与传输包
 internal/routine/   基础原语：统一协程启动（routine.Go，带 panic recover 与日志）
-internal/extension/ 扩展三级生命周期：Service / Component / Feature 契约与可选 Drainer（只有契约，编排由 core.Instance 承担）；不依赖数据面包
+internal/extension/ 进程级 Service 契约与可选 Drainer；由 core.Instance 编排，不依赖数据面包
 internal/config/    配置结构：YAML 加载与校验；不依赖 core/transport
 internal/logging/   横切设施：日志
 configs/            随仓库发布的示例配置，由测试加载校验
@@ -43,17 +48,18 @@ configs/            随仓库发布的示例配置，由测试加载校验
 
 规则：
 
-- `pipe` 不得 import 项目内任何包；`dispatch` 只允许依赖 `pipe`（及 `internal/logging` 这类无状态横切设施）。
-- `internal/extension` 只依赖标准库与 `internal/logging`；实现包按结构化接口满足三级契约，不反向依赖编排者。新增能力先按**生命周期**定级：进程级（与程序同生共死、无 Stop）→ 服务 Service；可任意启停的中间单元 → 组件 Component；最细能力 → 功能 Feature。详见 [docs/adr/0006](docs/adr/0006-extension-levels.md)。
-- `internal/config` 保持为纯数据包（标准库 + yaml），不 import `core`/`transport`；配置到数据面对象的翻译在装配层完成（客户端翻译在 `internal/cli`）。
-- `cmd` 只允许调用 `internal/cli` 或 `internal/core` 的启动入口（三行 main）；参数解析、配置装配、依赖构造、组件启动的编排全部在对应装配包完成。
+- `pipe` 不得 import 项目内任何包；`dispatch` 只依赖 `pipe`、`protocol`、`routine` 与 `logging`，不得反向依赖会话或管理面。
+- `internal/extension` 只依赖标准库；进程级服务实现 `Service`，需要等待在途工作的实现另提供 `Drainer`。插件的动态启停由 `plugin.Manager` 管理，不强制增加 Component/Feature 空壳。当前控制面边界见 [ADR 0053](docs/adr/0053-context-and-control-boundaries.md)。
+- Plugin 是可配置能力，不是额外的依赖层。生产插件由 `core.initServerApp` 显式构造；持有后台任务的服务必须实现可等待的 Drain。热停用保留存量连接，进程 Drain 终止并等待；流量最后落库完成后才能关闭数据库。详见 [ADR 0051](docs/adr/0051-server-lifecycle-and-control-boundaries.md)。
+- `internal/config` 保持为纯数据包（标准库 + yaml），不 import `core`/`transport`；配置到数据面对象的翻译在装配层完成（客户端翻译在 `cmd/client`）。
+- `cmd/client` 使用 `main` 包承载客户端参数解析、配置装配、依赖构造与启动编排；通信实现保留在 `internal/client`。`cmd/server` 只调用 `internal/core` 的启动入口，服务端装配仍在 `initServerApp` 手写完成。
 - `dispatch` 不得 import `internal/transport`；协议层只通过 `dispatch.Dispatcher` 等接口与内核交互。
-- `internal/transport` 不得 import `admin`：会话登记簿要实现 `transport.SessionEvents`，反向依赖会构成环（装配只放在 `internal/cli` / `internal/core`）。
+- `internal/transport` 不得 import `admin`：会话登记簿要实现 `transport.SessionEvents`，反向依赖会构成环（装配只放在 `cmd/client` / `internal/core`）。
 - 实现包的默认归宿是 `internal/`；例外只有 `vmess/`、`vless/`、`shadowsocks/`、`admin/` 四个放在仓库根——它们因此不再受 `internal` 的导入限制，成为可被外部 import 的公开包（改动其导出 API 属于破坏性变更）。
-- 服务端与客户端同处一个模块，但**依赖必须能分开**：client 侧（`internal/cli`、`internal/client`）不得 import `internal/core`/`admin`/`internal/store`，否则 SQLite 驱动的 init 会被链进 client 二进制。
+- 服务端与客户端同处一个模块，但**依赖必须能分开**：client 侧（`cmd/client`、`internal/client`）不得 import `internal/core`/`admin`/`internal/store`，否则 SQLite 驱动的 init 会被链进 client 二进制。
 - 包名用小写短词、单数、与目录同名；不要 `util`、`common` 这类无信息量的包，应按职责命名。
 
-依赖方向通过 CI 中的 `go vet` 与后续引入的 `depguard` 规则强制。
+CI 通过客户端依赖检查和 `.github/scripts/check-dependencies.py` 强制上述底层包边界；`go vet` 检查 Go 静态问题，不代替依赖方向检查。其余业务包的依赖由评审核对。
 
 ## 3. 编码风格
 
@@ -68,7 +74,7 @@ configs/            随仓库发布的示例配置，由测试加载校验
 - 遵循 Go 惯用法：驼峰命名、首字母缩略词保持一致大小写（`ID`、`URL`、`HTTPPayload`）。
 - 变量名作用域越短越短，作用域越长越要有信息量：`for _, r := range rules` 可以，跨函数的 `r` 不行。
 - 接收器名称在整个类型的方法集里保持一致，短名即可（如 `func (d *DefaultDispatcher)` 用 `d`）。
-- **所有导出标识符必须有 godoc 注释**（CI 用 `revive` 检查），注释以标识符名称开头；包注释以 `Package xxx` 开头。
+- **所有导出标识符必须有 godoc 注释**（CI 用 `revive` 的存量基线检查新增问题），注释以标识符名称开头；包注释以 `Package xxx` 开头。
 - 注释必须精简：**只给特别需要注意的地方写注释**——并发与关闭语义、反直觉行为、必须读实现才能发现的坑；显而易见的代码一律不写。注释解释"为什么"，而不是复述"做什么"。
 - **禁止行尾注释，尤其禁止把注释写在结构体字段后面**；确需说明时写在被描述对象的上方独立行。本条对 Agent 额外生效，见 `AGENTS.md`。
 
@@ -106,14 +112,14 @@ func (e *ProtocolError) Error() string { ... }
 本项目的核心复杂度在并发，以下条款全部为**必须**：
 
 1. **每个 goroutine 都要有明确的生命周期归属**：谁启动、谁等待它退出、什么信号触发它退出，三者在代码中都能直接看出来。新起 goroutine 时同步写出它的退出路径。
-2. **所有生产代码的协程必须经 `routine.Go(name, fn)` 启动**（name 用"包.组件.职责"命名）：panic 统一 recover 并记录 Error 日志，不允许裸 `go` 击穿进程。若协程结果必须送达调用方（如经 channel 返回错误），需在闭包内保证 panic 路径也送达（参考 `internal/core/outbound.go` 上行泵）。测试代码不受此约束——测试中 panic 应当失败。
-2. **等待用 WaitGroup 或 channel，禁止"启动后不管"**。参考 `internal/transport` 中 `Client.Serve()` 的 `wg.Wait()` 与 `core.DirectOutbound` 的 `done` channel。
-3. **取消信号一律走 context**：可取消的阻塞操作必须能被 `ctx.Done()` 解除；网络拨号用 `DialContext`，管道操作要能被 `Interrupt` 唤醒。
-4. **channel 发送方负责关闭**；多个发送方时由协调者关闭。禁止向可能已关闭的 channel 发送。
-5. **资源清理成对出现**：拿到 `net.Conn` 立刻写 `defer conn.Close()`；`context.WithCancel` 立刻写 `defer cancel()`。新增 Close 类型必须说明幂等性。
-6. 双向搬运按方向收尾（半关闭）：某一方向读到 EOF 只对**那一端** `Close()`，另一方向继续搬运；只有出错才两端一起 Close。半关闭由端点自身提供：yamux 的 `Close` 即半关闭（发 FIN、只禁本地写、读方向保留），VMess 用户侧的带内终结块随 `vmess.Conn.Close` 一并发出（见 `vmess/server.go`）。对隧道流的 `Close` 只允许服务端转发侧使用；客户端 `handleTunnel` 不对隧道流发 FIN，只把读尽传播成 `link.Writer.Close()`。半关闭后对端 FIN 与未读缓冲的安全由 yamux 原生保证（流完全关闭后 `Read` 仍先交付缓冲再 EOF），定向回归见 `internal/tcp/halfclose_test.go`，参考 `internal/transport/forward.go` 的 `ProxyBidirectional`、[docs/adr/0023-reinstate-server-half-close.md](docs/adr/0023-reinstate-server-half-close.md)、[docs/adr/0024-switch-smux-to-yamux.md](docs/adr/0024-switch-smux-to-yamux.md) 与 [docs/adr/0025-close-instead-of-closewrite.md](docs/adr/0025-close-instead-of-closewrite.md)。
-7. 带 `sync.Mutex`/`sync.Cond` 的结构体禁止值拷贝（`go vet` 的 copylocks 检查），需要共享一律传指针。
-8. 新增并发代码必须：
+2. **所有生产代码的协程必须经 `routine.Go(name, fn)` 启动**（name 用"包.组件.职责"命名）：panic 统一 recover 并记录 Error 日志，不允许裸 `go` 击穿进程。若协程结果必须送达调用方，需在闭包内保证 panic 路径也送达。测试代码不受此约束——测试中 panic 应当失败。
+3. **等待用 WaitGroup 或 channel，禁止"启动后不管"**。启动者必须能说明取消信号与退出等待的归属。
+4. **取消信号一律走 context**：可取消的阻塞操作必须能被 `ctx.Done()` 解除；网络拨号用 `DialContext`，管道操作要能被 `Interrupt` 唤醒。
+5. **channel 发送方负责关闭**；多个发送方时由协调者关闭。禁止向可能已关闭的 channel 发送。
+6. **资源清理成对出现**：拿到 `net.Conn` 立刻写 `defer conn.Close()`；`context.WithCancel` 立刻写 `defer cancel()`。新增 Close 类型必须说明幂等性。
+7. 双向搬运按方向收尾：正常 EOF 优先调用目标端的 `CloseWrite()`，保留另一方向；异常或上下文取消必须解除双方的阻塞读写与限速等待。底层 `tcp.Stream.Close` 保留 yamux FIN 半关闭语义；`transport` 返回的隧道包装器则通过 `CloseWrite` 半关闭，通过 `Close/Abort` 结束整个隧道并归还并发位。VMess 用户侧的带内终结块仍由 `vmess.Conn.Close` 发出。客户端 `handleTunnel` 不对隧道流发 FIN，只把读尽传播成 `link.Writer.Close()`。回归见 `internal/tcp/halfclose_test.go`、`internal/transport/lifecycle_test.go`，当前约定见 [ADR 0051](docs/adr/0051-server-lifecycle-and-control-boundaries.md)。
+8. 带 `sync.Mutex`/`sync.Cond` 的结构体禁止值拷贝（`go vet` 的 copylocks 检查），需要共享一律传指针。
+9. 新增并发代码必须：
    - 通过 `go test -race`；
    - 配可重复执行的测试（`-count=N` 或压力参数）；
    - 覆盖取消/提前结束路径，而不只是 happy path。
@@ -157,7 +163,7 @@ func (e *ProtocolError) Error() string { ... }
 ## 7. API 与协议的兼容性
 
 - 仓库未发布 v1 前，`core` 的导出接口仍允许演进，但任何破坏 `Dispatcher`/`OutboundHandler` 签名的改动必须在 PR 与 CHANGELOG 中显式标注 `BREAKING`。
-- 线路协议（`protocol` 中的 DMP 二进制帧）变更：**魔数不含版本、两端不做协商**（见 [ADR 0014](docs/adr/0014-fixed-header-layout.md)），所以改线格式等于硬切——旧对端会在 `bad magic` 处被拒。因此协议格式的说明以 [docs/PROTOCOL.md](docs/PROTOCOL.md) 为准，**改协议必须同步改文档、且必须写一篇 ADR 说明不兼容范围**（对应「旧 ADR 不删、新增标注 supersedes」的规矩）。
+- 线路协议（`protocol` 中的 DMP 二进制帧）变更：**魔数不含版本、两端不做协商**，所以改线格式等于硬切——旧对端会在 `bad magic` 处被拒。协议格式以 [docs/PROTOCOL.md](docs/PROTOCOL.md) 为准，**改协议必须同步改文档、且必须写一篇 ADR 说明不兼容范围**（对应「旧 ADR 不删、新增标注 supersedes」的规矩）。
 - **消息类型编号只增不改**：新增类型在末位追加（当前 `Data=1` / `DataResult=2` / `Error=3` / `Ping=4` / `Pong=5` / `Auth=6` / `AuthResult=7` / `Forward=8` / `ForwardResult=9` / `Tunnel=10` / `TunnelResult=11` / `UserAuth=12`），不复用历史上被删除类型的编号；`validType` 用显式枚举而非区间判断，避免空号被误判为合法。v1.0.0 之前若有调整，必须在 ADR 中记录编号变更。
 - v1.0.0 之后遵循[语义化版本](https://semver.org/lang/zh-CN/)：破坏性变更升 major，向后兼容的功能升 minor，修复升 patch。
 
@@ -206,7 +212,7 @@ scope: core | server | pipe | cmd | app | acl | manager | logging | ci（可省�
 
 ## 12. 开发环境
 
-- Go 版本：以 `go.mod` 声明为准（当前 1.22）；本地允许更新版本开发，但不得使用新版本专属语法导致旧版无法构建。
+- Go 版本：以 `go.mod` 声明为准（当前 1.26.3）；本地开发与 CI 均使用兼容的工具链。
 - 提交前最小命令集（后续会由 Makefile 封装）：
 
 ```sh
@@ -214,11 +220,11 @@ gofmt -s -l cmd internal
 go mod tidy && git diff --exit-code -- go.mod go.sum
 go vet ./...
 go test -race ./...
-go test -short ./internal/transport -count=20 -timeout=60s
+go test -short ./internal/transport -count=20 -timeout=180s
 ```
 
 ## 13. 迭代节奏
 
-- 用 milestone 组织迭代，每个里程碑有明确主题与退出标准，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+- 用 milestone 组织迭代，每个里程碑有明确主题与退出标准。
 - 一个里程碑内的 PR 顺序：规范/测试先行 → 机制实现 → 文档收尾；不把未经测试的机制合入 main。
 - 大改动先出 ADR 或在 issue 中讨论方案再写代码。

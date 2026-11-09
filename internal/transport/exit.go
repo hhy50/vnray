@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"net"
 
 	"github.com/hhy50/vnray/internal/dispatch"
@@ -16,6 +17,19 @@ const LocalClientName = "server:self"
 // 远程客户端会话（*Session）与服务端本机出口都实现它。
 type Exit interface {
 	OpenTunnel(dest dispatch.Destination, req protocol.TunnelRequest) (net.Conn, error)
+}
+
+// OpenTunnel 使用出口的可取消建连能力，兼容已有出口实现。
+func OpenTunnel(ctx context.Context, exit Exit, dest dispatch.Destination, req protocol.TunnelRequest) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := exit.(interface {
+		OpenTunnelContext(context.Context, dispatch.Destination, protocol.TunnelRequest) (net.Conn, error)
+	}); ok {
+		return contextual.OpenTunnelContext(ctx, dest, req)
+	}
+	return exit.OpenTunnel(dest, req)
 }
 
 // ExitResolver 按绑定客户端名解析出口；未命中返回 false。

@@ -3,15 +3,17 @@ package core
 import (
 	"context"
 	"reflect"
-	"sync"
+	"slices"
+	"sync/atomic"
 	"time"
 
-	"github.com/hhy50/vnray/admin"
+	"github.com/hhy50/vnray/internal/access"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
+	"github.com/hhy50/vnray/internal/transport"
 )
 
 // applyTimeout 是运行时配置落库的等待上限。
@@ -27,30 +29,13 @@ func defaultServiceSettings(cfg *config.Server) config.ServiceSettings {
 	return s
 }
 
-// loadServiceSettings 读取管理台保存的运行时配置段并覆盖基线。首次启动（库里没有初始化
-// 标记）时把生效基线整份落库，此后一律以库为准。任何读取/解析/校验失败都只告警并回退
-// 基线，不拒绝启动——坏配置不该拦住服务进程。
+// loadServiceSettings 只读取已初始化的服务配置；解析失败时回退基线。
 func loadServiceSettings(ctx context.Context, st store.Store, cfg *config.Server) config.ServiceSettings {
 	base := defaultServiceSettings(cfg)
 	kv, err := st.GetServiceSettings(ctx)
 	if err != nil {
 		logging.Warnf("service settings: load failed, using defaults: %v", err)
 		return base
-	}
-	if _, initialized := kv[store.ServiceSettingsInitializedKey]; !initialized {
-		seed := kv
-		if len(seed) == 0 {
-			if seed, err = config.EncodeServiceSettings(base); err != nil {
-				logging.Warnf("service settings: encode defaults: %v", err)
-				return base
-			}
-			logging.Info("service settings: first start, seeding defaults")
-		}
-		// 已有段但没有标记（老库）：原样写回一次补标记，不覆盖用户数据。
-		seed[store.ServiceSettingsInitializedKey] = "true"
-		if err := st.SetServiceSettings(ctx, seed); err != nil {
-			logging.Warnf("service settings: seed failed: %v", err)
-		}
 	}
 	if len(kv) == 0 {
 		return base
@@ -100,72 +85,123 @@ func sessionConfigFromSettings(s config.SessionSettings) *tcp.SessionConfig {
 // serviceConfig 是运行时服务配置的持有者与分发中心，实现 admin.ServiceSettings。
 // 它是管理台与运行时组件之间的唯一写口：管理台提交 → 校验 → 落库 → 热分发。
 type serviceConfig struct {
-	applyMu  sync.Mutex
-	mu       sync.RWMutex
-	cur      config.ServiceSettings
+	cur      atomic.Pointer[config.ServiceSettings]
 	settings store.Store
 	svc      *ConnectorService
 	meter    *traffic.Meter
+	sessions sessionConfigApplier
 	// resolver 与 bindings 用于热改本机出口：原子换 local 出口、增删 client_bindings 行。
 	resolver *exitResolver
-	bindings *admin.Bindings
+	bindings *access.Bindings
+}
+
+type sessionConfigApplier interface {
+	ApplySessionConfig(*tcp.SessionConfig)
 }
 
 // newServiceConfig 构造分发中心；initial 是启动解析出的生效值。
-func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Meter, resolver *exitResolver, bindings *admin.Bindings, initial config.ServiceSettings) *serviceConfig {
+func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Meter, resolver *exitResolver, bindings *access.Bindings, initial config.ServiceSettings) *serviceConfig {
 	svc.ApplyTransportEncryption(initial.TransportEncryption)
-	initial.GlobalClient = initial.GlobalClient.Clone()
+	initial = cloneServiceSettings(initial)
 	if bindings != nil {
 		bindings.SetGlobalClientConfig(initial.GlobalClient)
-		svc.sessions.ClientReady = bindings.PushClientConfig
+		svc.sessions.ClientReady = func(client *transport.Session) error {
+			return bindings.PushClientConfig(svc.context(), client)
+		}
 	}
-	return &serviceConfig{cur: initial, settings: st, svc: svc, meter: meter, resolver: resolver, bindings: bindings}
+	c := &serviceConfig{settings: st, svc: svc, meter: meter, resolver: resolver, bindings: bindings}
+	c.cur.Store(&initial)
+	return c
+}
+
+func (c *serviceConfig) setSessionConfigApplier(applier sessionConfigApplier) {
+	c.sessions = applier
 }
 
 // Current 返回当前生效的运行时配置快照。
 func (c *serviceConfig) Current() config.ServiceSettings {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	current := c.cur
+	return cloneServiceSettings(*c.cur.Load())
+}
+
+func cloneServiceSettings(current config.ServiceSettings) config.ServiceSettings {
 	current.GlobalClient = current.GlobalClient.Clone()
+	if current.VLESS.TLS != nil {
+		tls := *current.VLESS.TLS
+		current.VLESS.TLS = &tls
+	}
+	routing := &current.ServerProxy.Routing
+	routing.Outbounds = slices.Clone(routing.Outbounds)
+	routing.Rules = slices.Clone(routing.Rules)
+	for i := range routing.Rules {
+		match := &routing.Rules[i].Match
+		match.Host = slices.Clone(match.Host)
+		match.DomainPrefix = slices.Clone(match.DomainPrefix)
+		match.DomainSuffix = slices.Clone(match.DomainSuffix)
+		match.DomainKeyword = slices.Clone(match.DomainKeyword)
+		match.Port = slices.Clone(match.Port)
+	}
 	return current
 }
 
 // VLESSTLS 返回 vless 的 TLS 参数（副本）；从未配置过时返回 nil。
 func (c *serviceConfig) VLESSTLS() *config.VLESSTLS {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.cur.VLESS.TLS == nil {
+	current := c.cur.Load()
+	if current.VLESS.TLS == nil {
 		return nil
 	}
-	cp := *c.cur.VLESS.TLS
+	cp := *current.VLESS.TLS
 	return &cp
 }
 
-// SetVLESSTLS 只写 vless 这一段：证书由插件签发，不触发其它组件的热分发，也不碰其它
-// 段（并发改日志级别之类的写入不会互相覆盖）。本地快照同步更新，否则管理台以快照为
-// 基线保存服务配置时会把证书冲掉。
-func (c *serviceConfig) SetVLESSTLS(t config.VLESSTLS) error {
+// SetVLESSTLS 保存 VLESS TLS 配置。
+func (c *serviceConfig) SetVLESSTLS(ctx context.Context, t config.VLESSTLS) error {
 	raw, err := config.EncodeVLESSSettings(config.VLESSSettings{TLS: &t})
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 	if err := c.settings.SetServiceSettings(ctx, map[string]string{config.SettingVLESS: raw}); err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.cur.VLESS.TLS = &t
-	c.mu.Unlock()
+	for {
+		current := c.cur.Load()
+		next := cloneServiceSettings(*current)
+		next.VLESS.TLS = &t
+		if c.cur.CompareAndSwap(current, &next) {
+			break
+		}
+	}
 	return nil
 }
 
-// Apply 校验并落库新的运行时配置；落库失败不改运行态，成功后热分发到各组件。
-func (c *serviceConfig) Apply(next config.ServiceSettings) error {
-	c.applyMu.Lock()
-	defer c.applyMu.Unlock()
-	next.GlobalClient = next.GlobalClient.Clone()
+// Apply 全量提交运行时配置，VLESS 证书由专用写口维护。
+func (c *serviceConfig) Apply(ctx context.Context, next config.ServiceSettings) error {
+	return c.Update(ctx, func(current *config.ServiceSettings) error {
+		next.VLESS = current.VLESS
+		*current = next
+		return nil
+	})
+}
+
+// Update 保存配置变更并下发到运行态。
+func (c *serviceConfig) Update(ctx context.Context, update func(*config.ServiceSettings) error) error {
+	next := c.Current()
+	before := next.GlobalClient.Clone()
+	if err := update(&next); err != nil {
+		return err
+	}
+	if err := c.apply(ctx, next); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(before, next.GlobalClient) {
+		c.pushClientConfigs(ctx)
+	}
+	return nil
+}
+
+func (c *serviceConfig) apply(ctx context.Context, next config.ServiceSettings) error {
+	next = cloneServiceSettings(next)
 	if err := next.Validate(); err != nil {
 		return err
 	}
@@ -186,21 +222,24 @@ func (c *serviceConfig) Apply(next config.ServiceSettings) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 	if err := c.settings.SetServiceSettings(ctx, kv); err != nil {
 		return err
 	}
-	c.dispatch(next, sess, local)
+	c.dispatch(ctx, next, sess, local)
 	return nil
 }
 
 // dispatch 把生效值推给各运行时组件并更新本地快照。日志级别非法不可能发生（已被校验）。
-func (c *serviceConfig) dispatch(next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
+func (c *serviceConfig) dispatch(ctx context.Context, next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
 	c.svc.ApplyTransportEncryption(next.TransportEncryption)
 	globalChanged := !reflect.DeepEqual(c.Current().GlobalClient, next.GlobalClient)
 	c.svc.ApplyHeartbeat(heartbeatIntervalOf(next.Heartbeat), next.Heartbeat.Timeout.Std())
 	c.svc.ApplySessionConfig(sess)
+	if c.sessions != nil {
+		c.sessions.ApplySessionConfig(sess)
+	}
 	c.meter.SetFlushInterval(next.TrafficFlushInterval.Std())
 	if err := logging.SetLevel(next.LogLevel); err != nil {
 		logging.Warnf("service settings: set log level: %v", err)
@@ -209,27 +248,36 @@ func (c *serviceConfig) dispatch(next config.ServiceSettings, sess *tcp.SessionC
 	if err := logging.SetLogRotation(next.LogRotation); err != nil {
 		logging.Warnf("service settings: set log rotation: %v", err)
 	}
-	c.applyServerProxy(next.ServerProxy, local)
-	c.mu.Lock()
-	c.cur = next
-	c.mu.Unlock()
+	c.applyServerProxy(ctx, next.ServerProxy, local)
+	c.cur.Store(&next)
 	if c.bindings != nil && globalChanged {
 		c.bindings.SetGlobalClientConfig(next.GlobalClient)
-		for _, client := range c.svc.sessions.ClientSessions() {
-			if err := c.bindings.PushClientConfig(client); err != nil {
-				logging.Warn("service settings: push client config failed", "client", client.Info().Name, "err", err)
-			}
+	}
+}
+
+func (c *serviceConfig) pushClientConfigs(ctx context.Context) {
+	if c.bindings == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), applyTimeout)
+	defer cancel()
+	for _, client := range c.svc.sessions.ClientSessions() {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := c.bindings.PushClientConfigContext(ctx, client); err != nil {
+			logging.Warn("service settings: push client config failed", "client", client.Info().Name, "err", err)
 		}
 	}
 }
 
 // applyServerProxy 热改本机出口：替换 resolver 的本机出口，并让 client_bindings 的
 // 「本机」行随开关增删。停用不影响在途隧道（已发出的出口由调用方持有）。
-func (c *serviceConfig) applyServerProxy(sp config.ServerProxySettings, local *localExit) {
+func (c *serviceConfig) applyServerProxy(ctx context.Context, sp config.ServerProxySettings, local *localExit) {
 	if c.resolver != nil {
 		c.resolver.SetLocal(local)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), applyTimeout)
 	defer cancel()
 	syncLocalClient(ctx, c.settings, c.bindings, sp.Enabled)
 }

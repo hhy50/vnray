@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"log"
 	"net/http"
@@ -112,8 +113,13 @@ func testServerConfig(authKey string) *config.Server {
 	}
 }
 
-// startPlane 起一个测试用数据面服务并登记收尾，返回其句柄。
-func startPlane(t *testing.T, popts planeOptions, registry transport.UserRegistry) *core.ConnectorService {
+type testPlane struct {
+	*core.ConnectorService
+	userAddr string
+}
+
+// startPlane 起客户端与用户的独立监听并登记收尾。
+func startPlane(t *testing.T, popts planeOptions, registry transport.UserRegistry) *testPlane {
 	t.Helper()
 
 	mgr := transport.NewSessionManager()
@@ -134,7 +140,12 @@ func startPlane(t *testing.T, popts planeOptions, registry transport.UserRegistr
 			t.Errorf("drain data plane: %v", err)
 		}
 	})
-	return plane
+	users := tcp.NewServer("127.0.0.1:0", inbound.NewVNRayUserListener(mgr, registry, nil, mgr), tcp.WithSessionConfig(popts.sessionConfig), tcp.WithMuxer(popts.muxer))
+	if err := users.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = users.Stop(context.Background()) })
+	return &testPlane{ConnectorService: plane, userAddr: users.Addr()}
 }
 
 // waitClientSession 轮询会话管理器，直到出现第一条客户端会话（替代旧的事件收集器）。
@@ -201,7 +212,7 @@ func newProxyHarnessWith(t *testing.T, dispatcher dispatch.Dispatcher, handler h
 	// 不必用"先占端口再释放"那种带竞争窗口的写法。
 	plane := startPlane(t, popts, stubUserRegistry{limitedUserKey: "c1"})
 	h.sessions = plane.Sessions()
-	h.addr = plane.Addr()
+	h.addr = plane.userAddr
 
 	client, err := client.Dial(plane.Addr(), dispatcher, dopts)
 	if err != nil {
@@ -275,7 +286,7 @@ func (h *proxyHarness) fetchThroughProxy(t *testing.T, dest dispatch.Destination
 // stubUserRegistry 是最小 UserRegistry：静态 user_key → 客户端 绑定（一律视为启用）。
 type stubUserRegistry map[string]string
 
-func (r stubUserRegistry) UserFor(key string) (transport.UserAccess, bool) {
+func (r stubUserRegistry) UserFor(_ context.Context, key string) (transport.UserAccess, bool) {
 	c, ok := r[key]
 	return transport.UserAccess{Client: c, Name: key, Active: true}, ok
 }
@@ -313,8 +324,9 @@ func TestClientProxyHeartbeat(t *testing.T) {
 	}
 
 	rtt := h.session.LastRTT()
-	if rtt <= 0 {
-		t.Fatalf("rtt = %s, want > 0", rtt)
+	// 回环往返可能短于平台时钟分辨率；成功与否由 LastHeartbeat 判断。
+	if rtt < 0 {
+		t.Fatalf("rtt = %s, want >= 0", rtt)
 	}
 	if rtt >= time.Second {
 		t.Fatalf("rtt %s is implausibly large for loopback", rtt)
@@ -434,7 +446,7 @@ func TestUserForwardDownload(t *testing.T) {
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			limits.Apply(ratelimit.Identity(store.ProtocolVNV1, sc.key), sc.upKB*1024, sc.downKB*1024)
-			u, err := userclient.Dial(plane.Addr(),
+			u, err := userclient.Dial(plane.userAddr,
 				protocol.UserAuthRequest{Key: sc.key}, nil, nil)
 			if err != nil {
 				t.Fatalf("dial user: %v", err)

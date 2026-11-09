@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 
 	// 纯 Go 的 SQLite 方言（modernc 引擎），免 CGO 工具链。
@@ -11,7 +10,7 @@ import (
 )
 
 // openSQLite 打开 SQLite 绑定表；dsn 为文件路径（含 ":memory:"），空串默认 "bindings.db"。
-func openSQLite(ctx context.Context, dsn string) (Store, error) {
+func openSQLite(dsn string) (*sqlStore, error) {
 	if dsn == "" {
 		dsn = "bindings.db"
 	}
@@ -20,7 +19,8 @@ func openSQLite(ctx context.Context, dsn string) (Store, error) {
 		return nil, fmt.Errorf("store: open sqlite %s: %w", dsn, err)
 	}
 	if sqlDB, err := db.DB(); err == nil {
-		sqlDB.SetMaxOpenConns(1) // SQLite 单写者：串行化访问避免 SQLITE_BUSY
+		// SQLite 单写者：串行化访问避免 SQLITE_BUSY。
+		sqlDB.SetMaxOpenConns(1)
 	}
-	return newSQLStore(ctx, db)
+	return &sqlStore{db: db}, nil
 }

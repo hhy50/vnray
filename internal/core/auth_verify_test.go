@@ -30,7 +30,7 @@ func TestVerifyKeyScopedKeys(t *testing.T) {
 	newService := func(shared string, keys []authKeySeed) *ConnectorService {
 		b := testBindings(t)
 		for _, k := range keys {
-			if err := b.SetAuthKey(k.key, k.scope); err != nil {
+			if err := b.SetAuthKey(context.Background(), k.key, k.scope); err != nil {
 				t.Fatalf("seed auth key %q: %v", k.key, err)
 			}
 		}
@@ -66,7 +66,7 @@ func TestVerifyKeyScopedKeys(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := newService(tt.shared, tt.keys)
-			err := svc.verifyKey(tt.client, tt.present)
+			err := svc.verifyKey(context.Background(), tt.client, tt.present)
 			if tt.allow && err != nil {
 				t.Fatalf("verifyKey(%q, %q) = %v, want allow", tt.client, tt.present, err)
 			}

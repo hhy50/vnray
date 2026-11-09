@@ -3,6 +3,7 @@ package portmap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -21,27 +22,38 @@ import (
 // acceptRetry 是 accept 出错后的重试间隔：监听器被临时性错误打断时不至于空转。
 const acceptRetry = time.Second
 
+type mappingStore interface {
+	ListPortMappings(context.Context) ([]store.PortMapping, error)
+}
+
 // Manager 持有当前生效的监听器集合；Sync 做差量启停，Drain 全部关闭。
 type Manager struct {
 	sessions *transport.SessionManager
-	st       store.Store
+	st       mappingStore
 	// traffic 是流量记账器；nil 时字节只计入全局隧道计数。
 	traffic *traffic.Meter
 	// limits 是限速注册表（与服务端用户限速共享，身份前缀 portmap: 隔离）；
 	// nil 时不限速。
 	limits *ratelimit.Registry
 
-	mu      sync.Mutex
-	running map[uint64]*lnEntry
+	syncMu    sync.Mutex
+	mu        sync.Mutex
+	running   map[uint64]*lnEntry
+	ctx       context.Context
+	cancel    context.CancelFunc
+	runners   sync.WaitGroup
+	drainOnce sync.Once
+	drained   context.Context
 }
 
-// lnEntry 是一个已启动的监听器：cfg 是启动它的映射快照，stop 用于通知 accept
-// 循环退出（先关 stop 再关监听，accept 的错误即可判定为主动停止）。
+// lnEntry 的 ctx 覆盖本代监听与连接，热停用只关闭监听。
 type lnEntry struct {
-	cfg     store.PortMapping
-	ln      net.Listener
-	stop    chan struct{}
-	stopped sync.Once
+	cfg       store.PortMapping
+	ln        net.Listener
+	ctx       context.Context
+	cancel    context.CancelFunc
+	upLimit   int64
+	downLimit int64
 }
 
 // Identity 是端口映射在限速注册表里的身份（与服务端用户身份按前缀隔离）。
@@ -49,13 +61,16 @@ func Identity(id uint64) string { return "portmap:" + strconv.FormatUint(id, 10)
 
 // NewManager 创建端口映射管理器；sessions 为会话管理器（客户端选路唯一来源），
 // st 为映射规则持久层，traffic 与 limits 可为 nil。
-func NewManager(sessions *transport.SessionManager, st store.Store, traffic *traffic.Meter, limits *ratelimit.Registry) *Manager {
+func NewManager(ctx context.Context, sessions *transport.SessionManager, st mappingStore, traffic *traffic.Meter, limits *ratelimit.Registry) *Manager {
+	ctx, cancel := context.WithCancel(ctx)
 	return &Manager{
 		sessions: sessions,
 		st:       st,
 		traffic:  traffic,
 		limits:   limits,
 		running:  make(map[uint64]*lnEntry),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -64,23 +79,44 @@ func (m *Manager) Name() string { return "PortMapService" }
 
 // Start 实现 extension.Service：进程生命周期内先按库中规则建好监听。
 func (m *Manager) Start(ctx context.Context) error {
+	if err := m.ctx.Err(); err != nil {
+		return err
+	}
 	m.Sync(ctx)
 	return nil
 }
 
-// Drain 实现 extension.Drainer：关闭全部监听器（accept 循环随之退出）。
-func (m *Manager) Drain(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, e := range m.running {
-		m.stopEntry(id, e)
+// Drain 停止接入，终止存量转发并等待所有任务退出。
+func (m *Manager) Drain(ctx context.Context) error {
+	m.cancel()
+	m.drainOnce.Do(func() {
+		// 取消后穿过登记锁，确保所有 runner Add 已结束。
+		m.mu.Lock()
+		m.mu.Unlock()
+		drained, complete := context.WithCancel(context.Background())
+		m.drained = drained
+		routine.Go("portmap.drain", func() {
+			defer complete()
+			m.runners.Wait()
+		})
+	})
+	select {
+	case <-m.drained.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // Sync 重读映射表并差量应用到监听器集合：删除/停用/配置变化的监听器关闭重建，
 // 其余保持不动（不惊扰在途连接）。ctx 只约束读库；监听器挂在各自协程上。
 func (m *Manager) Sync(ctx context.Context) {
+	// 读取与应用属于一次串行更新，不能让旧查询覆盖新监听状态。
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+	if m.ctx.Err() != nil {
+		return
+	}
 	rows, err := m.st.ListPortMappings(ctx)
 	if err != nil {
 		logging.Error("portmap: list mappings failed", "err", err)
@@ -95,6 +131,9 @@ func (m *Manager) Sync(ctx context.Context) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.ctx.Err() != nil {
+		return
+	}
 	for id, e := range m.running {
 		want, ok := desired[id]
 		if !ok {
@@ -107,10 +146,10 @@ func (m *Manager) Sync(ctx context.Context) {
 		}
 		delete(desired, id)
 		// 数据面没变、只改了限速：原地重推速率，不重建监听器（在途连接不断）。
-		if m.limits != nil && (want.Config.UpLimit != e.cfg.Config.UpLimit ||
-			want.Config.DownLimit != e.cfg.Config.DownLimit) {
+		if m.limits != nil && (want.Config.UpLimit != e.upLimit ||
+			want.Config.DownLimit != e.downLimit) {
 			m.limits.Apply(Identity(id), want.Config.UpLimit, want.Config.DownLimit)
-			e.cfg = want
+			e.upLimit, e.downLimit = want.Config.UpLimit, want.Config.DownLimit
 			logging.Info("portmap: limits updated", "id", id,
 				"up_bps", want.Config.UpLimit, "down_bps", want.Config.DownLimit)
 		}
@@ -156,17 +195,45 @@ func (m *Manager) startEntry(id uint64, cfg store.PortMapping) {
 	if m.limits != nil {
 		m.limits.Apply(Identity(id), cfg.Config.UpLimit, cfg.Config.DownLimit)
 	}
-	e := &lnEntry{cfg: cfg, ln: ln, stop: make(chan struct{})}
+	ctx, cancel := context.WithCancel(m.ctx)
+	e := &lnEntry{cfg: cfg, ln: ln, ctx: ctx, cancel: cancel,
+		upLimit: cfg.Config.UpLimit, downLimit: cfg.Config.DownLimit}
 	m.running[id] = e
 	logging.Info("portmap: listener started", "id", id, "port", cfg.RemotePort,
 		"client", cfg.Client, "target", fmt.Sprintf("%s:%d", cfg.LocalHost, cfg.LocalPort),
 		"up_bps", cfg.Config.UpLimit, "down_bps", cfg.Config.DownLimit)
-	routine.Go(fmt.Sprintf("portmap.accept.%d", id), func() { m.acceptLoop(id, e) })
+	m.runners.Add(1)
+	routine.Go(fmt.Sprintf("portmap.accept.%d", id), func() {
+		defer m.runners.Done()
+		m.runEntry(id, e)
+	})
+}
+
+func (m *Manager) runEntry(id uint64, e *lnEntry) {
+	var watcher sync.WaitGroup
+	watcher.Add(1)
+	routine.Go("portmap.listener.cancel", func() {
+		defer watcher.Done()
+		<-e.ctx.Done()
+		_ = e.ln.Close()
+	})
+	defer watcher.Wait()
+	defer e.cancel()
+	var connections sync.WaitGroup
+	defer connections.Wait()
+	defer func() {
+		m.mu.Lock()
+		if m.running[id] == e {
+			m.stopEntry(id, e)
+		}
+		m.mu.Unlock()
+	}()
+	m.acceptLoop(id, e, &connections)
 }
 
 // stopEntry 关闭一个监听器并从 running 表移除；调用方必须持有 m.mu。
 func (m *Manager) stopEntry(id uint64, e *lnEntry) {
-	e.stopped.Do(func() { close(e.stop) })
+	// 保留本代连接，runnerctx 在连接收尾或父级取消时结束。
 	_ = e.ln.Close()
 	delete(m.running, id)
 	if m.limits != nil {
@@ -177,31 +244,40 @@ func (m *Manager) stopEntry(id uint64, e *lnEntry) {
 
 // acceptLoop 受理映射端口上的入站连接；主动停止（Drain/Sync 重建）时退出，
 // 其余错误按固定间隔重试。
-func (m *Manager) acceptLoop(id uint64, e *lnEntry) {
+func (m *Manager) acceptLoop(id uint64, e *lnEntry, connections *sync.WaitGroup) {
 	for {
 		conn, err := e.ln.Accept()
 		if err != nil {
-			select {
-			case <-e.stop:
+			if errors.Is(err, net.ErrClosed) || e.ctx.Err() != nil {
 				return
-			default:
 			}
 			logging.Warn("portmap: accept failed", "id", id, "port", e.cfg.RemotePort, "err", err)
 			select {
-			case <-e.stop:
+			case <-e.ctx.Done():
 				return
 			case <-time.After(acceptRetry):
 				continue
 			}
 		}
-		entry := e
-		routine.Go("portmap.conn", func() { m.handleConn(id, entry.cfg, conn) })
+		m.mu.Lock()
+		if e.ctx.Err() != nil || m.running[id] != e {
+			m.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		m.mu.Unlock()
+		connections.Add(1)
+		routine.Go("portmap.conn", func() {
+			defer connections.Done()
+			defer func() { _ = conn.Close() }()
+			m.handleConn(e.ctx, id, e.cfg, conn)
+		})
 	}
 }
 
 // handleConn 桥接一条入站连接：按映射找客户端会话，开 PortMap 流让客户端拨本地
 // 目标，成功后双向搬运。连接失败只关连接，监听器不受影响。
-func (m *Manager) handleConn(id uint64, cfg store.PortMapping, conn net.Conn) {
+func (m *Manager) handleConn(ctx context.Context, id uint64, cfg store.PortMapping, conn net.Conn) {
 	remote := conn.RemoteAddr().String()
 	dest := dispatch.Destination{Host: cfg.LocalHost, Port: cfg.LocalPort}
 	if !dest.IsValid() {
@@ -223,17 +299,19 @@ func (m *Manager) handleConn(id uint64, cfg store.PortMapping, conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	tunnel, err := sess.OpenPortMap(dest)
+	tunnel, err := sess.OpenPortMapContext(ctx, dest)
 	if err != nil {
 		logging.Warn("portmap: open client stream failed",
 			"id", id, "client", cfg.Client, "target", dest.String(), "remote", remote, "err", err)
 		_ = conn.Close()
 		return
 	}
+	defer func() { _ = tunnel.Close() }()
 	logging.Info("portmap: relay established",
 		"id", id, "client", cfg.Client, "target", dest.String(), "remote", remote)
-	var o transport.ProxyOptions
+	o := transport.ProxyOptions{Context: ctx}
 	if m.traffic != nil {
+		o.Stats = m.traffic.PortMappingStats(id)
 		o.ClientStats = m.traffic.ClientStats(cfg.Client)
 	}
 	// 同一映射的所有连接共享同一对桶（Pair 命名空间按映射隔离），合计不超配额。

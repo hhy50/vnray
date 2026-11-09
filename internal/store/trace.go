@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -17,12 +18,21 @@ import (
 // 各 defer 语句处的 time.Now() 即方法入口时刻。成功走 Debug 级（config 的
 // log.level 调到 debug 才输出），失败仍 Warn——查询错误永远值得看见。
 func traceQuery(start time.Time, op, target string, err *error) {
-	dur := time.Since(start).Round(time.Microsecond)
-	if *err != nil {
-		logging.Warnf("store.query op=%s target=%s dur=%s err=%v", op, target, dur, *err)
+	traceQueryLazy(start, op, func() string { return target }, err)
+}
+
+// traceQueryLazy 是 traceQuery 的惰性版本：target 只在真要输出时才拼装。
+// 流量落库每轮数百条，info 级别下没必要为每条拼一次描述文本。
+func traceQueryLazy(start time.Time, op string, target func() string, err *error) {
+	if *err == nil && !logging.DebugEnabled() {
 		return
 	}
-	logging.Debugf("store.query op=%s target=%s dur=%s", op, target, dur)
+	dur := time.Since(start).Round(time.Microsecond)
+	if *err != nil {
+		logging.Warnf("store.query op=%s target=%s dur=%s err=%v", op, target(), dur, *err)
+		return
+	}
+	logging.Debugf("store.query op=%s target=%s dur=%s", op, target(), dur)
 }
 
 // tracedStore 是查询日志装饰层：内嵌 Store 接口，未覆写的方法原样透传（如 Close）。
@@ -62,6 +72,18 @@ func (s tracedStore) ListUsers(ctx context.Context) (out []UserBinding, err erro
 func (s tracedStore) SetClient(ctx context.Context, b ClientBinding) (err error) {
 	defer traceQuery(time.Now(), "SetClient", b.Key, &err)
 	return s.Store.SetClient(ctx, b)
+}
+
+// SetClientReportedConfig 记录上报快照写入的查询日志。
+func (s tracedStore) SetClientReportedConfig(ctx context.Context, key, reported string) (err error) {
+	defer traceQuery(time.Now(), "SetClientReportedConfig", key, &err)
+	return s.Store.SetClientReportedConfig(ctx, key, reported)
+}
+
+// SetClientServerConfig 记录运维配置写入的查询日志。
+func (s tracedStore) SetClientServerConfig(ctx context.Context, key, settings string) (err error) {
+	defer traceQuery(time.Now(), "SetClientServerConfig", key, &err)
+	return s.Store.SetClientServerConfig(ctx, key, settings)
 }
 
 func (s tracedStore) GetClient(ctx context.Context, key string) (cb ClientBinding, ok bool, err error) {
@@ -117,8 +139,18 @@ func (s tracedStore) ListPlugins(ctx context.Context) (out []PluginState, err er
 	return s.Store.ListPlugins(ctx)
 }
 
+// AddTrafficBatch 记录整批落库的查询日志。
+func (s tracedStore) AddTrafficBatch(ctx context.Context, batch TrafficBatch) (err error) {
+	defer traceQueryLazy(time.Now(), "AddTrafficBatch", func() string {
+		return fmt.Sprintf("users=%d clients=%d mappings=%d", len(batch.Users), len(batch.Clients), len(batch.PortMappings))
+	}, &err)
+	return s.Store.AddTrafficBatch(ctx, batch)
+}
+
 func (s tracedStore) AddUserTraffic(ctx context.Context, p Protocol, key string, up, down int64) (err error) {
-	defer traceQuery(time.Now(), "AddUserTraffic", userTrafficTarget(p, key, up, down), &err)
+	defer traceQueryLazy(time.Now(), "AddUserTraffic", func() string {
+		return userTrafficTarget(p, key, up, down)
+	}, &err)
 	return s.Store.AddUserTraffic(ctx, p, key, up, down)
 }
 
@@ -133,7 +165,7 @@ func (s tracedStore) DeleteUserTraffic(ctx context.Context, p Protocol, key stri
 }
 
 func (s tracedStore) AddClientTraffic(ctx context.Context, key string, up, down int64) (err error) {
-	defer traceQuery(time.Now(), "AddClientTraffic", clientTrafficTarget(key, up, down), &err)
+	defer traceQueryLazy(time.Now(), "AddClientTraffic", func() string { return clientTrafficTarget(key, up, down) }, &err)
 	return s.Store.AddClientTraffic(ctx, key, up, down)
 }
 
@@ -145,6 +177,14 @@ func (s tracedStore) ListClientTraffic(ctx context.Context) (out []ClientTraffic
 func (s tracedStore) DeleteClientTraffic(ctx context.Context, key string) (deleted bool, err error) {
 	defer traceQuery(time.Now(), "DeleteClientTraffic", key, &err)
 	return s.Store.DeleteClientTraffic(ctx, key)
+}
+
+// AddPortMappingTraffic 记录映射流量落库的查询日志。
+func (s tracedStore) AddPortMappingTraffic(ctx context.Context, id uint64, up, down int64) (err error) {
+	defer traceQueryLazy(time.Now(), "AddPortMappingTraffic", func() string {
+		return clientTrafficTarget(strconv.FormatUint(id, 10), up, down)
+	}, &err)
+	return s.Store.AddPortMappingTraffic(ctx, id, up, down)
 }
 
 // userTrafficTarget 把流量落库的目标压成一行可读文本。

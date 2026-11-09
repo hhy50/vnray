@@ -5,6 +5,7 @@ package vmess_test
 
 import (
 	"context"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"net"
 	"net/http"
@@ -97,7 +98,7 @@ func runV2RayPluginEndToEnd(t *testing.T, muxer tcp.Muxer) {
 	// v2ray 插件：启用 + uuid 路由（uuid 用户写进绑定表，与生产装配同一条路径）。
 	st := testStore(t)
 	bindings := admin.NewBindings(st)
-	plugins := plugin.NewManager(st, bindings, svc.Sessions(), nil)
+	plugins := plugin.NewRegistry(context.Background(), inbound.NewV2RayPlugin(st, bindings, svc.Sessions(), nil))
 	// 装配层在真实进程里用这条观察者把用户表变更推给验证器；这里照做以复现同一链路。
 	bindings.Watch(func(c admin.UserChange) {
 		p, err := plugins.Get("v2ray")
@@ -123,7 +124,7 @@ func runV2RayPluginEndToEnd(t *testing.T, muxer tcp.Muxer) {
 		t.Fatalf("enable v2ray: %v", err)
 	}
 	// 与生产一致：uuid 用户经用户表登记，插件靠观察者跟随。
-	if err := bindings.PutUser(store.UserBinding{
+	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eUUID, Protocol: store.ProtocolVMess, Name: "e2e-vmess",
 		Status: store.UserEnabled, Client: "test-edge",
 	}); err != nil {

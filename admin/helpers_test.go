@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hhy50/vnray/internal/portmap"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
 )
@@ -28,10 +29,9 @@ func newTestAdminService(t *testing.T) *AdminService {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	gs := st.(store.GORMSource)
 	s, err := NewAdminService("127.0.0.1:0", transport.NewSessionManager(), AdminOptions{
-		DB:       gs.GORM(),
 		Store:    st,
+		Mappings: portmap.NewControl(st, nil),
 		Username: testAdminUser,
 		Password: testAdminPass,
 	})

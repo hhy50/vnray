@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/hhy50/vnray/internal/inbound"
+	"github.com/hhy50/vnray/shadowsocks"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,8 +42,9 @@ func TestSSLink(t *testing.T) {
 
 func TestSSUserMethodAndShareLink(t *testing.T) {
 	s := newTestAdminService(t)
-	s.opts.Bindings = NewBindings(s.opts.Store)
-	s.opts.Plugins = plugin.NewManager(s.opts.Store, s.opts.Bindings, nil, nil)
+	s.opts.Bindings = NewBindings(s.opts.Store.(store.Store))
+	s.opts.Plugins = plugin.NewRegistry(context.Background(), inbound.NewV2RayPlugin(s.opts.Store.(store.Store), s.opts.Bindings.(*Bindings), nil, nil),
+		inbound.NewSSPlugin(s.opts.Store.(store.Store), s.opts.Bindings.(*Bindings), nil, nil))
 	s.opts.PublicHost = "vpn.example.com"
 	p, err := s.opts.Plugins.Get("ss")
 	if err != nil {
@@ -66,13 +69,13 @@ func TestSSUserMethodAndShareLink(t *testing.T) {
 			if w.Code != http.StatusOK {
 				t.Fatalf("limits = %d: %s", w.Code, w.Body.String())
 			}
-			u, ok := NewBindings(s.opts.Store).Lookup(store.ProtocolSS, method+"-password")
+			u, ok := NewBindings(s.opts.Store.(store.Store)).Lookup(context.Background(), store.ProtocolSS, method+"-password")
 			if !ok || u.Config.SSMethod != method || u.Config.UpLimit != 12*1024 {
 				t.Fatalf("persisted config = %+v, found = %v", u.Config, ok)
 			}
 		})
 	}
-	if err := s.opts.Bindings.PutUser(store.UserBinding{
+	if err := s.opts.Bindings.(*Bindings).PutUser(context.Background(), store.UserBinding{
 		Protocol: store.ProtocolSS, Key: "legacy-password", Name: "旧用户", Client: "edge", Status: store.UserEnabled,
 	}); err != nil {
 		t.Fatal(err)
@@ -92,7 +95,7 @@ func TestSSUserMethodAndShareLink(t *testing.T) {
 		if !user.Shareable || !strings.HasPrefix(user.ShareLink, "ss://") || user.ShareLinkLegacy != "" {
 			t.Fatalf("share = %+v", user)
 		}
-		if user.UserKey == "legacy-password" && user.SSMethod != plugin.DefaultSSMethod {
+		if user.UserKey == "legacy-password" && user.SSMethod != shadowsocks.DefaultMethod {
 			t.Fatalf("legacy method = %q", user.SSMethod)
 		}
 		link, _ := url.Parse(user.ShareLink)

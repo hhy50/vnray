@@ -577,8 +577,22 @@ func TestServerConcurrentSubConnections(t *testing.T) {
 	for _, sub := range subs {
 		sub.waitEnd(t, 0)
 	}
+	pending := make(map[string]struct{}, len(targets))
 	for _, tgt := range targets {
-		h.waitDone(t, tgt.String())
+		pending[tgt.String()] = struct{}{}
+	}
+	// 各 handler 独立结束，完成通知没有跨连接的顺序保证。
+	deadline := time.After(testTimeout)
+	for range targets {
+		select {
+		case target := <-h.done:
+			if _, ok := pending[target]; !ok {
+				t.Fatalf("unexpected or duplicate handler completion for %q", target)
+			}
+			delete(pending, target)
+		case <-deadline:
+			t.Fatalf("handlers did not finish: %v", pending)
+		}
 	}
 }
 

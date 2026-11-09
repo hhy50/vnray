@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "包名里的版本号（如 v0.0.1）；留空则取 internal/cli/version.go 的常量"
+        description: "包名里的版本号（如 v0.0.1）；留空则取 cmd/client/version.go 的常量"
         required: false
 
 # 默认只读：跑 npm ci 的 job 不该拿到能改写仓库的 token，写权限只给 release job。
@@ -36,9 +36,9 @@ jobs:
         id: const
         run: |
           set -euo pipefail
-          CONST=$(sed -nE 's/^const version = "([^"]+)".*/\1/p' internal/cli/version.go)
+          CONST=$(sed -nE 's/^const version = "([^"]+)".*/\1/p' cmd/client/version.go)
           if [ -z "$CONST" ]; then
-            echo "::error::internal/cli/version.go 里没找到 const version = \"...\""
+            echo "::error::cmd/client/version.go 里没找到 const version = \"...\""
             exit 1
           fi
           echo "value=$CONST" >> "$GITHUB_OUTPUT"
@@ -148,7 +148,7 @@ jobs:
           if [ "$GOOS" = "windows" ]; then SUFFIX=".exe"; fi
 
           # -trimpath 去掉本机路径，-s -w 去符号表。
-          # 版本号是 internal/cli/version.go 里的常量，发布前手改，构建不注入。
+          # 版本号是 cmd/client/version.go 里的常量，发布前手改，构建不注入。
           go build -trimpath -ldflags "-s -w" -o "vnserver${SUFFIX}" ./cmd/server
           go build -trimpath -ldflags "-s -w" -o "vnclient${SUFFIX}" ./cmd/client
 

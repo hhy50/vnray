@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"net"
 	"net/http"
@@ -83,7 +84,7 @@ func runV2RayPluginMuxEndToEnd(t *testing.T, muxer tcp.Muxer) {
 	// v2ray 插件：启用 + uuid 路由（uuid 用户写进绑定表，与生产装配同一条路径）。
 	st := testStore(t)
 	bindings := admin.NewBindings(st)
-	plugins := plugin.NewManager(st, bindings, svc.Sessions(), nil)
+	plugins := plugin.NewRegistry(context.Background(), inbound.NewV2RayPlugin(st, bindings, svc.Sessions(), nil))
 	bindings.Watch(func(c admin.UserChange) {
 		p, err := plugins.Get("v2ray")
 		if err != nil {
@@ -107,7 +108,7 @@ func runV2RayPluginMuxEndToEnd(t *testing.T, muxer tcp.Muxer) {
 	}); err != nil {
 		t.Fatalf("enable v2ray: %v", err)
 	}
-	if err := bindings.PutUser(store.UserBinding{
+	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eUUID, Protocol: store.ProtocolVMess, Name: "e2e-vmess-mux",
 		Status: store.UserEnabled, Client: "test-edge",
 	}); err != nil {

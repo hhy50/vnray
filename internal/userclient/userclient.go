@@ -29,7 +29,7 @@ type Client struct {
 	session tcp.Session
 }
 
-// Dial 拨入数据面并以 user_key 完成 UserAuth 认证。req 可携带用户自报信息；
+// Dial 拨入 vnray-user 独立端口并以 user_key 完成 UserAuth 认证。req 可携带用户自报信息；
 // cfg 为多路复用会话配置，必须与服务端一致（keepalive 尤其要两端对称），nil 用
 // 默认值；muxer 选择多路复用后端，nil 用 tcp.DefaultMuxer，必须与服务端一致。
 // 认证被拒绝时返回 *AuthError。

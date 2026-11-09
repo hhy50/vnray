@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hhy50/vnray/admin"
+	"github.com/hhy50/vnray/internal/access"
 	"github.com/hhy50/vnray/internal/acl"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/dispatch"
@@ -40,11 +40,19 @@ func buildLocalExit(sp config.ServerProxySettings) (*localExit, error) {
 
 // OpenTunnel 校验目标并出站：ACL/目标校验同步返回错误，拨号异步（与远程客户端一致，
 // 失败随 Link 传播）。返回的 net.Conn 由调用方经 ProxyBidirectional 双向搬运。
-func (e *localExit) OpenTunnel(dest dispatch.Destination, _ protocol.TunnelRequest) (net.Conn, error) {
+func (e *localExit) OpenTunnel(dest dispatch.Destination, req protocol.TunnelRequest) (net.Conn, error) {
+	return e.OpenTunnelContext(context.Background(), dest, req)
+}
+
+// OpenTunnelContext 将请求取消传给本机出站。
+func (e *localExit) OpenTunnelContext(ctx context.Context, dest dispatch.Destination, _ protocol.TunnelRequest) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !dest.IsValid() {
 		return nil, fmt.Errorf("server proxy: invalid destination %s", dest)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	link, err := e.dispatcher.Dispatch(ctx, dest)
 	if err != nil {
 		cancel()
@@ -65,13 +73,17 @@ func (c *linkConn) Read(p []byte) (int, error) { return c.link.Reader.Read(p) }
 // Write 写入出站侧的字节。
 func (c *linkConn) Write(p []byte) (int, error) { return c.link.Writer.Write(p) }
 
-// Close 只做半关闭（结束上行方向、保留读方向），语义等同 yamux 流的 Close。
-func (c *linkConn) Close() error { return c.link.Writer.Close() }
+// CloseWrite 结束上行方向并保留下行。
+func (c *linkConn) CloseWrite() error { return c.link.Writer.Close() }
+
+// Close 取消出站并中断两个方向。
+func (c *linkConn) Close() error { c.Abort(); return nil }
 
 // Abort 是异常收尾：取消出站 ctx 并中断读方向，避免长连接目标让下行泵永久阻塞。
 func (c *linkConn) Abort() {
 	c.cancel()
 	c.link.Reader.Interrupt()
+	c.link.Writer.Interrupt()
 }
 
 // 以下方法仅为满足 net.Conn；ProxyBidirectional 不调用它们。
@@ -127,12 +139,12 @@ func buildExitResolver(settings config.ServiceSettings, sessions *transport.Sess
 // syncLocalClient 让 client_bindings 里的「本机」行与开关一致：启用则登记，停用则只删
 // 注册行——直接走 store 而非 Bindings.DeleteClient，避免连带删除 client_traffic
 // （本机出口的累计流量记在 client 维度，停用不该清零）。
-func syncLocalClient(ctx context.Context, st store.Store, b *admin.Bindings, enabled bool) {
+func syncLocalClient(ctx context.Context, st store.Store, b *access.Bindings, enabled bool) {
 	if enabled {
 		if b == nil {
 			return
 		}
-		if err := b.SetClient(admin.ClientBinding{
+		if err := b.SetClient(ctx, access.ClientBinding{
 			ClientKey:  transport.LocalClientName,
 			ClientType: store.ClientTypeLocal,
 		}); err != nil {

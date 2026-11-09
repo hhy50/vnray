@@ -5,8 +5,8 @@
 # 客户端默认长期在线，连接失败或会话中断后按固定间隔不断重连。
 server:
   addr: 127.0.0.1:9000
-  # 握手认证：本端密钥，接入服务端后随认证帧上报；必须与服务端 auth.key 一致。
-  auth_key: vnray-shared-key
+  # 安全握手使用的生成密钥；配置上报不会发送此密钥。
+  auth_key: 2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=
   reconnect:
     enabled: true
     interval: 10s

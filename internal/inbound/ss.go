@@ -1,4 +1,4 @@
-package plugin
+package inbound
 
 // ss 插件：Shadowsocks AEAD TCP 入站 + 密码 → 客户端 路由。
 // 密码路由与其限速配置存于 vn_user_bindings 表（protocol = ss），经注入的 UserStore 读写；
@@ -10,13 +10,12 @@ import (
 	"net"
 	"sort"
 	"strconv"
-	"sync"
 
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/ratelimit"
-	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
@@ -27,7 +26,7 @@ import (
 const pluginSS = "ss"
 
 // DefaultSSMethod 是未显式配置时的加密方法。
-const DefaultSSMethod = "aes-256-gcm"
+const DefaultSSMethod = shadowsocks.DefaultMethod
 
 // SSRoute 是一条 ss 密码 → 客户端 的路由。
 type SSRoute struct {
@@ -38,13 +37,14 @@ type SSRoute struct {
 
 // SSPlugin 提供 Shadowsocks 入站：认证密码后按路由把流量经绑定客户端的隧道送出。
 type SSPlugin struct {
-	mu        sync.Mutex
+	runtime   plugin.Runtime
+	run       *plugin.InboundRun
 	store     store.Store
 	users     UserStore
+	rules     RuleEvaluator
 	exits     transport.ExitResolver
 	limits    *ratelimit.Registry
 	traffic   *traffic.Meter
-	cancel    context.CancelFunc
 	listener  net.Listener
 	validator *shadowsocks.Validator
 	port      int
@@ -52,14 +52,21 @@ type SSPlugin struct {
 	running   bool
 }
 
-// setTraffic 注入流量记账器（插件管理器在装配时调用）。
-func (p *SSPlugin) setTraffic(t *traffic.Meter) { p.traffic = t }
+// SetTraffic 注入流量记账器；须在插件启动前调用。
+func (p *SSPlugin) SetTraffic(t *traffic.Meter) { p.traffic = t }
 
-// newSSPlugin 创建 ss 插件；验证器在构造期即建立，用户页随时增删的密码不会丢。
-func newSSPlugin(st store.Store, users UserStore, exits transport.ExitResolver, limits *ratelimit.Registry) *SSPlugin {
+// SetRules 注入用户出站规则；须在插件启动前调用。
+func (p *SSPlugin) SetRules(rules RuleEvaluator) { p.rules = rules }
+
+// BindDrainGate 在注册时接入管理器的收尾状态门。
+func (p *SSPlugin) BindDrainGate(g *plugin.DrainGate) { p.runtime.BindDrainGate(g) }
+
+// NewSSPlugin 创建由装配层注入依赖的 Shadowsocks 插件。
+func NewSSPlugin(st store.Store, users UserStore, exits transport.ExitResolver, limits *ratelimit.Registry) *SSPlugin {
 	method, _ := shadowsocks.ParseMethod(DefaultSSMethod)
 	return &SSPlugin{
 		store:     st,
+		runtime:   plugin.NewRuntime(),
 		users:     users,
 		exits:     exits,
 		limits:    limits,
@@ -72,14 +79,12 @@ func newSSPlugin(st store.Store, users UserStore, exits transport.ExitResolver, 
 func (p *SSPlugin) Name() string { return pluginSS }
 
 // Status 返回当前状态：监听端口与加密方法。
-func (p *SSPlugin) Status() Status {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return Status{
+func (p *SSPlugin) Status() plugin.Status {
+	return plugin.Status{
 		Name:    pluginSS,
-		Enabled: p.running,
-		Ports:   []PortKV{{Protocol: store.ProtocolSS, Port: p.port}},
-		Params:  map[string]string{"method": p.method},
+		Enabled: p.running, LastError: p.runtime.LastError(),
+		Ports:  []plugin.PortKV{{Protocol: store.ProtocolSS, Port: p.port}},
+		Params: map[string]string{"method": p.method},
 	}
 }
 
@@ -90,15 +95,13 @@ func (p *SSPlugin) SyncUser(proto store.Protocol, key, client string, status sto
 	if proto != store.ProtocolSS {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	// 停用与删除对验证器而言动作相同：摘掉，密码不再能试解通过。
 	if deleted || status != store.UserEnabled {
 		p.validator.Remove(key)
 		return
 	}
 	method := p.method
-	if u, ok := p.users.LookupUser(proto, key); ok && u.Config.SSMethod != "" {
+	if u, ok := p.users.LookupUser(p.runtime.Context(), proto, key); ok && u.Config.SSMethod != "" {
 		method = u.Config.SSMethod
 	}
 	if err := p.validator.AddWithMethod(key, client, method); err != nil {
@@ -106,56 +109,42 @@ func (p *SSPlugin) SyncUser(proto store.Protocol, key, client string, status sto
 	}
 }
 
-// Restore 进程启动时从存储恢复启停状态、方法与密码路由。
-func (p *SSPlugin) Restore(ctx context.Context) {
-	p.mu.Lock()
-	p.restoreLocked(ctx)
-	p.mu.Unlock()
-}
-
-func (p *SSPlugin) restoreLocked(ctx context.Context) {
-	cur, ok, _ := p.store.GetPlugin(ctx, pluginSS)
-	if m := cur.Config.Method; m != "" {
-		if _, err := shadowsocks.ParseMethod(m); err != nil {
-			logging.Warn("ss: stored method invalid", "method", m)
-		} else if m != p.method {
-			p.setMethodLocked(m)
-		}
+// Restore 恢复启停状态、方法与密码路由，错误由宿主处理。
+func (p *SSPlugin) Restore(ctx context.Context) error {
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
 	}
-	for _, r := range p.ssRoutes() {
-		if err := p.validator.AddWithMethod(r.Password, r.Client, r.Method); err != nil {
-			logging.Warn("ss: restore user failed", "err", err)
-		}
+	cur, ok, err := p.store.GetPlugin(ctx, pluginSS)
+	if err != nil {
+		return p.runtime.Record(err)
 	}
-	// 与 v2ray 同理：端口独立于启停恢复，停用态也要认得上次配的端口。
+	method := p.method
+	if cur.Config.Method != "" {
+		method = cur.Config.Method
+	}
+	prepared, err := p.prepareUsers(ctx, method)
+	if err != nil {
+		return p.runtime.Record(err)
+	}
+	p.validator.ReplaceUsers(prepared)
+	p.method = method
 	if port := cur.Config.Ports[store.ProtocolSS]; port > 0 {
 		p.port = port
 	}
-	if !ok || cur.Status != store.PluginEnabled || p.port == 0 {
-		return
+	if !ok || cur.Status != store.PluginEnabled {
+		return nil
 	}
-	if err := p.startLocked(ctx, p.port); err != nil {
-		logging.Warn("ss: restore listener failed", "err", err)
+	if p.port <= 0 {
+		return p.runtime.Record(fmt.Errorf("plugin: invalid ss port %d", p.port))
 	}
+	return p.runtime.Record(p.configure(ctx, p.port, p.method, false))
 }
 
-// saveLocked 把启停状态、端口与方法写进 vn_plugin；status 为空串表示沿用库中原值
-// （停用态改端口时不该顺手把状态改掉）。调用方必须持锁。
-func (p *SSPlugin) saveLocked(ctx context.Context, status store.PluginStatus, port int, method string) error {
-	cur, ok, _ := p.store.GetPlugin(ctx, pluginSS)
-	if !ok {
-		cur = store.PluginState{Name: pluginSS}
-	}
-	cur.Name = pluginSS
-	if status != "" {
-		cur.Status = status
-	}
-	if cur.Config.Ports == nil {
-		cur.Config.Ports = map[store.Protocol]int{}
-	}
-	cur.Config.Ports[store.ProtocolSS] = port
-	cur.Config.Method = method
-	return p.store.SetPlugin(ctx, cur)
+func (p *SSPlugin) save(ctx context.Context, status store.PluginStatus, port int, method string) error {
+	return plugin.SaveState(ctx, p.store, pluginSS, status, func(c *store.PluginConfig) {
+		c.Ports[store.ProtocolSS] = port
+		c.Method = method
+	})
 }
 
 // Enable 启用插件：校验并持久化端口与方法，然后立即开始监听。
@@ -171,146 +160,143 @@ func (p *SSPlugin) Enable(ctx context.Context, params map[string]string) error {
 			return fmt.Errorf("plugin: %w", err)
 		}
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if method == "" {
 		method = p.method
 	}
-	if err := p.saveLocked(ctx, store.PluginEnabled, port, method); err != nil {
-		return err
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
 	}
-	if method != p.method {
-		p.setMethodLocked(method)
-	}
-	if p.running && p.port == port {
-		return nil
-	}
-	p.stopLocked()
-	return p.startLocked(ctx, port)
+	return p.runtime.Record(p.configure(ctx, port, method, true))
 }
 
 // Disable 停用插件：停止监听并持久化状态。
 func (p *SSPlugin) Disable(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if err := p.saveLocked(ctx, store.PluginDisabled, p.port, p.method); err != nil {
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
+	}
+	if err := p.save(ctx, store.PluginDisabled, p.port, p.method); err != nil {
 		return err
 	}
-	p.stopLocked()
+	p.stop()
 	return nil
 }
 
-// SetPort 修改监听端口并持久化：停用时只改待启用端口（下次启用生效）；运行中则热切换
-// ——先用一个立即关闭的探针监听预检新端口可绑，通过后关旧监听、起新监听，失败时旧
-// 监听原样保留。旧监听上的存量连接不随监听关闭而断开（连接各有协程），只有新连接
-// 走新端口。
+// SetPort 准备新监听并持久化成功后切换；失败保留旧运行态。
 func (p *SSPlugin) SetPort(ctx context.Context, port int) error {
-	if port <= 0 || port >= 65536 {
+	if port <= 0 || port > 65535 {
 		return fmt.Errorf("plugin: invalid ss port %d", port)
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.running && p.port == port {
-		return nil
+	if p.runtime.IsDraining() {
+		return plugin.ErrDraining
 	}
 	if !p.running {
-		if err := p.saveLocked(ctx, "", port, p.method); err != nil {
-			return err
+		if err := p.save(ctx, "", port, p.method); err != nil {
+			return p.runtime.Record(err)
 		}
 		p.port = port
-		logging.Info("ss: port updated", "port", port, "running", false)
-		return nil
+		return p.runtime.Record(nil)
 	}
-	old := p.port
-	probe, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("plugin: ss listen :%d: %w", port, err)
-	}
-	_ = probe.Close()
-	p.stopLocked()
-	if err := p.startLocked(ctx, port); err != nil {
-		// 预检通过仍可能竞态失败：回滚到旧端口，别把在用的服务弄丢。
-		if rerr := p.startLocked(ctx, old); rerr != nil {
-			logging.Error("ss: rollback to previous port failed", "port", old, "err", rerr)
+	return p.runtime.Record(p.configure(ctx, port, p.method, true))
+}
+
+func (p *SSPlugin) configure(ctx context.Context, port int, method string, persist bool) error {
+	var prepared *shadowsocks.Validator
+	if method != p.method {
+		var err error
+		prepared, err = p.prepareUsers(ctx, method)
+		if err != nil {
+			return err
 		}
-		return err
 	}
-	if err := p.saveLocked(ctx, store.PluginEnabled, port, p.method); err != nil {
-		return err
+	var ln net.Listener
+	if !p.running || p.port != port {
+		var err error
+		ln, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			return fmt.Errorf("plugin: ss listen :%d: %w", port, err)
+		}
 	}
-	logging.Info("ss: port updated", "port", port, "running", true)
+	if persist {
+		if err := p.save(ctx, store.PluginEnabled, port, method); err != nil {
+			if ln != nil {
+				_ = ln.Close()
+			}
+			return err
+		}
+	}
+	if prepared != nil {
+		p.validator.ReplaceUsers(prepared)
+		p.method = method
+	}
+	if ln != nil {
+		p.stop()
+		p.listener, p.port, p.running = ln, port, true
+		run, err := p.runtime.StartInbound("plugin.ss.accept", ln, func(ctx context.Context) plugin.Server {
+			return shadowsocks.NewServer(p.validator, func(password, client string, target shadowsocks.Target, conn *shadowsocks.Conn) {
+				p.handle(ctx, password, client, target, conn)
+			})
+		}, func(err error) {
+			if p.listener == ln {
+				p.running = false
+				p.runtime.Record(err)
+			}
+		})
+		p.run = run
+		if err != nil {
+			p.running = false
+			return err
+		}
+	}
 	return nil
 }
 
-// Stop 运行中插件立即停止监听（进程收尾用，不改动持久化状态）。
+// Drain 终止所有监听代次的存量连接并等待退出。
+func (p *SSPlugin) Drain(ctx context.Context) error {
+	runs := p.runtime.BeginDrain()
+	p.stop()
+	return plugin.DrainRuns(ctx, runs)
+}
+
+// Stop 停止监听，既有连接由 Drain 或对端结束。
 func (p *SSPlugin) Stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopLocked()
+	p.stop()
 }
 
-// setMethodLocked 更新默认方法，显式指定方法的用户保持原配置；调用方必须持锁。
-func (p *SSPlugin) setMethodLocked(method string) {
-	p.method = method
-	for _, r := range p.ssRoutes() {
-		if err := p.validator.AddWithMethod(r.Password, r.Client, r.Method); err != nil {
-			logging.Warn("ss: reload user failed", "err", err)
+func (p *SSPlugin) prepareUsers(ctx context.Context, method string) (*shadowsocks.Validator, error) {
+	m, err := shadowsocks.ParseMethod(method)
+	if err != nil {
+		return nil, err
+	}
+	routes, err := p.ssRoutes(ctx, method)
+	if err != nil {
+		return nil, err
+	}
+	prepared := shadowsocks.NewValidator(m)
+	for _, r := range routes {
+		if err := prepared.AddWithMethod(r.Password, r.Client, r.Method); err != nil {
+			return nil, err
 		}
 	}
+	return prepared, nil
 }
 
-// startLocked 启动 Shadowsocks 监听；调用方必须持锁。
-func (p *SSPlugin) startLocked(_ context.Context, port int) error {
-	method, err := shadowsocks.ParseMethod(p.method)
-	if err != nil {
-		return fmt.Errorf("plugin: %w", err)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("plugin: ss listen :%d: %w", port, err)
-	}
-	// 监听器的生命周期只由 Stop（Drain 收尾）显式管理，不随调用方 ctx 消亡：
-	// 管理台的 Enable/SetPort 带的是 HTTP 请求 ctx，请求返回即取消，绑上去
-	// 会把刚起的监听立刻关掉（插件显示"运行中"但端口无人监听）。
-	runCtx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	p.listener = ln
-	p.port = port
-	p.running = true
-	logging.Info("ss: inbound started", "port", port, "method", method.Name)
-
-	routine.Go("plugin.ss.watch", func() {
-		<-runCtx.Done()
-		_ = ln.Close()
-	})
-	routine.Go("plugin.ss.accept", func() {
-		server := shadowsocks.NewServer(p.validator, p.handle)
-		if err := server.Serve(ln); err != nil && runCtx.Err() == nil {
-			logging.Warn("ss: inbound stopped", "err", err)
-		}
-	})
-	return nil
-}
-
-// stopLocked 停止监听；调用方必须持锁。
-func (p *SSPlugin) stopLocked() {
-	if !p.running {
-		return
-	}
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.listener != nil {
-		_ = p.listener.Close()
+func (p *SSPlugin) stop() {
+	if p.run != nil {
+		p.run.Stop()
 	}
 	p.running = false
-	logging.Info("ss: inbound stopped", "port", p.port)
 }
 
 // ssRoutes 返回当前全部启用中的密码 → 客户端 路由（从用户表读取）。停用的用户不是路由，
 // 这里就不列出——它同时决定了重启后验证器的灌入范围。
-func (p *SSPlugin) ssRoutes() []SSRoute {
-	all := p.users.ListUsers()
+func (p *SSPlugin) ssRoutes(ctx context.Context, defaultMethod string) ([]SSRoute, error) {
+	if p.users == nil {
+		return nil, nil
+	}
+	all, err := p.users.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ss: list users: %w", err)
+	}
 	out := make([]SSRoute, 0, len(all))
 	for _, u := range all {
 		if u.Protocol != store.ProtocolSS || u.Status != store.UserEnabled {
@@ -318,24 +304,22 @@ func (p *SSPlugin) ssRoutes() []SSRoute {
 		}
 		method := u.Config.SSMethod
 		if method == "" {
-			method = p.method
+			method = defaultMethod
 		}
 		out = append(out, SSRoute{Password: u.Key, Client: u.Client, Method: method})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Password < out[j].Password })
-	return out
+	return out, nil
 }
 
-// SSRoutes 返回按密码排序的路由列表（管理台展示用）。
-func (p *SSPlugin) SSRoutes() []SSRoute {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.ssRoutes()
+// SSRoutes 返回按密码排序的路由列表（诊断与测试的观察口，读用户表）。
+func (p *SSPlugin) SSRoutes() ([]SSRoute, error) {
+	return p.ssRoutes(p.runtime.Context(), p.method)
 }
 
 // AccountLimits 返回 ss 账号当前的上下行限速（字节/秒；0 = 不限速）。
 func (p *SSPlugin) AccountLimits(account string) (up, down int64) {
-	u, ok := p.users.LookupUser(store.ProtocolSS, account)
+	u, ok := p.users.LookupUser(p.runtime.Context(), store.ProtocolSS, account)
 	if !ok {
 		return 0, 0
 	}
@@ -343,8 +327,15 @@ func (p *SSPlugin) AccountLimits(account string) (up, down int64) {
 }
 
 // handle 把解码完成的 Shadowsocks 连接经绑定客户端的隧道送达目标。
-func (p *SSPlugin) handle(password, client string, target shadowsocks.Target, conn *shadowsocks.Conn) {
+func (p *SSPlugin) handle(ctx context.Context, password, client string, target shadowsocks.Target, conn *shadowsocks.Conn) {
 	log := p.userLog(password)
+	policy := userPolicy{users: p.users, rules: p.rules, proto: store.ProtocolSS, key: password}
+	direct, err := policy.check(ctx, target.Host)
+	if err != nil {
+		log.Info("ss: destination denied", "client", client, "target", target.String(), "err", err)
+		_ = conn.Close()
+		return
+	}
 	exit, ok := p.exits.Resolve(client)
 	if !ok {
 		if client == transport.LocalClientName {
@@ -361,16 +352,16 @@ func (p *SSPlugin) handle(password, client string, target shadowsocks.Target, co
 	// 用户级并发：占一个并发位再建隧道，超限排队。
 	if p.limits != nil {
 		gate := p.limits.Gate(ratelimit.Identity(store.ProtocolSS, password))
-		if err := gate.Acquire(nil); err != nil {
+		if err := acquireUserGate(ctx, gate); err != nil {
 			log.Warn("ss: user concurrency limit reached", "client", client, "target", target.String(), "err", err)
 			_ = conn.Close()
 			return
 		}
 		defer gate.Release()
 	}
-	tunnel, err := exit.OpenTunnel(
+	tunnel, err := transport.OpenTunnel(ctx, exit,
 		dispatch.Destination{Host: target.Host, Port: target.Port},
-		protocol.TunnelRequest{Origin: "ss"})
+		protocol.TunnelRequest{Origin: "ss", Direct: direct})
 	if err != nil {
 		log.Warn("ss: open tunnel failed",
 			"client", client, "target", target.String(), "err", err)
@@ -380,7 +371,7 @@ func (p *SSPlugin) handle(password, client string, target shadowsocks.Target, co
 	log.Info("ss: tunnel established", "client", client, "target", target.String())
 	// 按密码限速与统计：上行限 ss 连接的 reader（用户发多快），
 	// 下行限隧道 reader（客户端送多快）；字节按密码与 client 两个维度各记一份。
-	var o transport.ProxyOptions
+	o := transport.ProxyOptions{Context: ctx}
 	if p.limits != nil {
 		pair := p.limits.Pair(ratelimit.Identity(store.ProtocolSS, password))
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats
@@ -400,7 +391,7 @@ func (p *SSPlugin) handle(password, client string, target shadowsocks.Target, co
 func (p *SSPlugin) userLog(password string) *logging.Scoped {
 	level, name := "", ""
 	if p.users != nil {
-		if u, ok := p.users.LookupUser(store.ProtocolSS, password); ok {
+		if u, ok := p.users.LookupUser(p.runtime.Context(), store.ProtocolSS, password); ok {
 			level = u.Config.LogLevel
 			name = u.Name
 		}

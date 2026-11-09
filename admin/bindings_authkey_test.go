@@ -22,7 +22,7 @@ func newTestBindings(t *testing.T) *Bindings {
 // mustAuthKey 写入一条密钥，失败即终止用例。
 func mustAuthKey(t *testing.T, b *Bindings, key, scope string) {
 	t.Helper()
-	if err := b.SetAuthKey(key, scope); err != nil {
+	if err := b.SetAuthKey(context.Background(), key, scope); err != nil {
 		t.Fatalf("set auth key %q scope %q: %v", key, scope, err)
 	}
 }
@@ -32,18 +32,18 @@ func mustAuthKey(t *testing.T, b *Bindings, key, scope string) {
 func TestBindingsAuthKeys(t *testing.T) {
 	b := newTestBindings(t)
 
-	if err := b.SetAuthKey("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "*"); err != nil {
 		t.Fatalf("set auth key: %v", err)
 	}
 	// 同密钥换范围即覆盖，不产生第二条记录。
-	if err := b.SetAuthKey("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "team1:*"); err != nil {
+	if err := b.SetAuthKey(context.Background(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "team1:*"); err != nil {
 		t.Fatalf("overwrite auth key: %v", err)
 	}
-	if err := b.SetAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=", "team1:group:name"); err != nil {
+	if err := b.SetAuthKey(context.Background(), "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=", "team1:group:name"); err != nil {
 		t.Fatalf("set second auth key: %v", err)
 	}
 
-	snap := b.AuthKeySnapshot()
+	snap := b.AuthKeySnapshot(context.Background())
 	if len(snap) != 2 || snap[0].Key != "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=" || snap[1].Key != "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=" {
 		t.Fatalf("snapshot = %+v, want 2 keys in asc order", snap)
 	}
@@ -54,14 +54,14 @@ func TestBindingsAuthKeys(t *testing.T) {
 		t.Errorf("mirrored key must carry id and created_at, got %+v", snap[0])
 	}
 
-	deleted, err := b.DeleteAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=")
+	deleted, err := b.DeleteAuthKey(context.Background(), "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=")
 	if err != nil || !deleted {
 		t.Fatalf("delete = (%v, %v), want (true, nil)", deleted, err)
 	}
-	if deleted, _ = b.DeleteAuthKey("ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A="); deleted {
+	if deleted, _ = b.DeleteAuthKey(context.Background(), "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A="); deleted {
 		t.Error("delete again must report false")
 	}
-	if got := len(b.AuthKeySnapshot()); got != 1 {
+	if got := len(b.AuthKeySnapshot(context.Background())); got != 1 {
 		t.Fatalf("snapshot after delete has %d keys, want 1", got)
 	}
 
@@ -71,7 +71,7 @@ func TestBindingsAuthKeys(t *testing.T) {
 		{"key-ok-999", "a:b:*"},
 		{"key-ok-999", ""},
 	} {
-		if err := b.SetAuthKey(bad.key, bad.scope); err == nil {
+		if err := b.SetAuthKey(context.Background(), bad.key, bad.scope); err == nil {
 			t.Errorf("SetAuthKey(%q, %q): want error", bad.key, bad.scope)
 		}
 	}
@@ -82,7 +82,7 @@ func TestMatchClientAuthKey(t *testing.T) {
 	b := newTestBindings(t)
 
 	// 表为空：configured=false，调用方回退旧校验路径。
-	if configured, ok := b.MatchClientAuthKey("any:name:here", "whatever"); configured || ok {
+	if configured, ok := b.MatchClientAuthKey(context.Background(), "any:name:here", "whatever"); configured || ok {
 		t.Fatalf("empty table = (%v, %v), want (false, false)", configured, ok)
 	}
 
@@ -103,7 +103,7 @@ func TestMatchClientAuthKey(t *testing.T) {
 		{"team1:g:a", "wrong-key", false},
 	}
 	for _, tt := range cases {
-		configured, ok := b.MatchClientAuthKey(tt.name, tt.key)
+		configured, ok := b.MatchClientAuthKey(context.Background(), tt.name, tt.key)
 		if !configured {
 			t.Fatalf("configured must stay true once keys exist")
 		}

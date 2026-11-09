@@ -23,6 +23,7 @@ import (
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/core"
 	"github.com/hhy50/vnray/internal/dispatch"
+	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/store"
@@ -78,7 +79,17 @@ func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 		t.Fatalf("parse origin addr: %v", err)
 	}
 	originPort, _ := strconv.Atoi(portStr)
+	runVlessPlugin(t, useTLS, func(conn net.Conn) {
+		if mux {
+			runMuxSubConnections(t, conn, host, originPort)
+			return
+		}
+		runSingleConnection(t, conn, host, originPort)
+	})
+}
 
+func runVlessPlugin(t *testing.T, useTLS bool, exercise func(net.Conn)) {
+	t.Helper()
 	cfg := &config.Server{
 		Server: config.ServerOptions{
 			Listen: "127.0.0.1:0",
@@ -114,7 +125,7 @@ func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 	// v2ray 插件的 vless 入站：启用 + uuid 路由（uuid 用户写进绑定表，与生产装配同一条路径）。
 	st := testStore(t)
 	bindings := admin.NewBindings(st)
-	plugins := plugin.NewManager(st, bindings, svc.Sessions(), nil)
+	plugins := plugin.NewRegistry(context.Background(), inbound.NewV2RayPlugin(st, bindings, svc.Sessions(), nil))
 	bindings.Watch(func(c admin.UserChange) {
 		p, err := plugins.Get("v2ray")
 		if err != nil {
@@ -146,7 +157,7 @@ func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 		t.Fatalf("enable v2ray: %v", err)
 	}
 	// vless 用户以 protocol=vless 登记：该协议只进 vless 入站的验证器。
-	if err := bindings.PutUser(store.UserBinding{
+	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eUUID, Protocol: store.ProtocolVLESS, Name: "e2e-vless",
 		Status: store.UserEnabled, Client: "test-edge",
 	}); err != nil {
@@ -156,11 +167,7 @@ func runVlessPluginEndToEnd(t *testing.T, mux, useTLS bool) {
 	conn := dialVless(t, vlessPort, useTLS)
 	defer func() { _ = conn.Close() }()
 
-	if mux {
-		runMuxSubConnections(t, conn, host, originPort)
-		return
-	}
-	runSingleConnection(t, conn, host, originPort)
+	exercise(conn)
 }
 
 // dialVless 连接 vless 入站；useTLS 时先完成 TLS 握手（自签证书故测试里直接跳过

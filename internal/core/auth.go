@@ -13,7 +13,6 @@ import (
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/secure"
-	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/transport"
 )
@@ -27,173 +26,148 @@ var ErrAuthRejected = errors.New("authentication rejected")
 // errKeyMismatch 是密钥不匹配的原因，会作为拒绝原因回给客户端。
 var errKeyMismatch = errors.New("key mismatch")
 
-// Handshake 实现 tcp.EventListener：在会话转入数据面之前完成认证，并按首帧区分角色——
-// Auth（客户端）校验已证明的传输身份与范围，UserAuth（用户）查绑定表。
-// 返回的元数据由 SessionManager 在**认证成功之后**登记；任一路径失败都返回零值，不入表。
+// Handshake 在安全传输握手后接收首次配置上报。
 func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, error) {
-	// AcceptStream 的 deadline 是会话级设置，握手期间独享，返回前必须清掉。
-	if err := session.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
-		return tcp.SessionInfo{}, fmt.Errorf("core: set auth accept deadline: %w", err)
+	ctx := s.context()
+	if ctx == nil {
+		return tcp.SessionInfo{}, ErrAuthRejected
 	}
-	defer func() { _ = session.SetDeadline(time.Time{}) }()
-
-	stream, err := session.AcceptStream()
+	stream, frame, err := initialFrame(session, protocol.ConfigReport)
 	if err != nil {
-		return tcp.SessionInfo{}, fmt.Errorf("core: accept auth stream: %w", err)
+		return tcp.SessionInfo{}, err
 	}
 	defer func() { _ = stream.Close() }()
-	if err := stream.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
-		return tcp.SessionInfo{}, fmt.Errorf("core: set auth stream deadline: %w", err)
-	}
-
-	frame, err := protocol.NewDecoder(stream).ReadFrame()
+	info, err := s.readClientReport(ctx, session, frame, "", false)
 	if err != nil {
-		return tcp.SessionInfo{}, fmt.Errorf("core: read auth frame: %w", err)
-	}
-	switch frame.Type {
-	case protocol.Auth:
-		if _, ok := tcp.Connection(session).(*secure.Conn); !ok {
-			_ = frame.CloseBody()
-			protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "authenticated client transport required"})
-			return tcp.SessionInfo{}, ErrAuthRejected
-		}
-		return s.handshakeClient(session, stream, frame)
-	case protocol.UserAuth:
-		return s.handshakeUser(session, stream, frame)
-	default:
-		_ = frame.CloseBody()
-		return tcp.SessionInfo{}, fmt.Errorf("%w: unexpected frame %d on auth stream", protocol.ErrProtocol, frame.Type)
-	}
-}
-
-// handshakeClient 校验客户端传输身份及范围授权。
-func (s *ConnectorService) handshakeClient(session tcp.Session, stream tcp.Stream, frame *protocol.Frame) (tcp.SessionInfo, error) {
-	payload, err := protocol.ReadPayload(frame)
-	if err != nil {
+		protocol.WriteReply(stream, protocol.ConfigReportResult, protocol.Reply{Reason: err.Error()})
 		return tcp.SessionInfo{}, err
 	}
-	req, err := protocol.ParseAuthRequest(payload)
-	if err != nil {
+	client := transport.NewSession(session, session.RemoteAddr().String(), info)
+	s.saveClientReport(ctx, client, info)
+	// 日志级别、并发上限与下发快照一次读出：握手路径上少两次点查。
+	var runtime transport.ClientRuntime
+	if s.sessionCfg != nil {
+		runtime = s.sessionCfg.ClientRuntime(ctx, info.Name)
+		client.SetClientConcurrency(runtime.Concurrency)
+	}
+	if err := client.SendConfigReportResult(stream, func() protocol.PushConfig { return runtime.Push }); err != nil {
 		return tcp.SessionInfo{}, err
-	}
-	conn, authenticated := tcp.Connection(session).(*secure.Conn)
-	if !authenticated || req.Key != fmt.Sprintf("%x", conn.KeyID()) {
-		return tcp.SessionInfo{}, ErrAuthRejected
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), AuthTimeout)
-	defer cancel()
-	key, err := s.lookupTransportKey(ctx, conn.KeyID())
-	if err != nil {
-		return tcp.SessionInfo{}, ErrAuthRejected
-	}
-
-	// 保留名归服务端本机出口：真实客户端不得冒用（防止它顶替本机出口出现在管理台）。
-	if req.Info.Name == transport.LocalClientName {
-		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "reserved client name"})
-		return tcp.SessionInfo{}, fmt.Errorf("%w: reserved client name %q", ErrAuthRejected, req.Info.Name)
-	}
-
-	if err := s.verifyKey(req.Info.Name, base64.StdEncoding.EncodeToString(key[:])); err != nil {
-		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: err.Error()})
-		return tcp.SessionInfo{}, fmt.Errorf("%w: %v", ErrAuthRejected, err)
-	}
-	// 应答带上服务端下发的全量配置快照：客户端重连/重启时随认证一并拿到，不丢配置。
-	var pushCfg protocol.PushConfig
-	if s.sessionCfg != nil {
-		pushCfg = s.sessionCfg.PushConfig(req.Info.Name)
-	}
-	protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: true, Config: &pushCfg})
-	// 会话日志器取客户端配置的级别：此后这条会话的日志都走它，不再用全局级别。
-	var level string
-	if s.sessionCfg != nil {
-		level = s.sessionCfg.ClientLogLevel(req.Info.Name)
-		// 上报快照持久化到 client_bindings.config：离线也能看最后一次上报。
-		if reported, err := json.Marshal(req.Info); err == nil {
-			if err := s.sessionCfg.SaveClientReportedConfig(req.Info.Name, string(reported)); err != nil {
-				logging.Warn("core: save reported client config failed", "client", req.Info.Name, "err", err)
-			}
-		}
-	}
-	client := transport.NewSession(session, session.RemoteAddr().String(), req.Info)
-	// 客户端级并发上限（对设备的 OpenStream）在会话建立时按运维配置设定。
-	if s.sessionCfg != nil {
-		client.SetClientConcurrency(s.sessionCfg.ClientConcurrency(req.Info.Name))
 	}
 	return tcp.SessionInfo{
 		Session: session,
 		Remote:  session.RemoteAddr().String(),
 		Kind:    tcp.KindClient,
-		Name:    req.Info.Name,
-		Log:     logging.NewScoped(level, "client", req.Info.Name),
+		Name:    info.Name,
+		Log:     logging.NewScoped(runtime.LogLevel, "client", info.Name),
 		Meta:    client,
 	}, nil
 }
 
-// handshakeUser 校验用户密钥：必须已在绑定表中登记，通过后返回会话元数据。
-// 用户会话不进管理台、不跑心跳，只按绑定的客户端名选路。
-func (s *ConnectorService) handshakeUser(session tcp.Session, stream tcp.Stream, frame *protocol.Frame) (tcp.SessionInfo, error) {
-	payload, err := protocol.ReadPayload(frame)
+func initialFrame(session tcp.Session, want protocol.Type) (tcp.Stream, *protocol.Frame, error) {
+	if err := session.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = session.SetDeadline(time.Time{}) }()
+	stream, err := session.AcceptStream()
 	if err != nil {
-		return tcp.SessionInfo{}, err
+		return nil, nil, err
 	}
-	req, err := protocol.ParseUserAuthRequest(payload)
+	if err := stream.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
+		_ = stream.Close()
+		return nil, nil, err
+	}
+	frame, err := protocol.NewDecoder(stream).ReadFrame()
+	if err == nil && frame.Type != want {
+		_ = frame.CloseBody()
+		err = fmt.Errorf("%w: expected frame %d, got %d", protocol.ErrProtocol, want, frame.Type)
+	}
 	if err != nil {
-		return tcp.SessionInfo{}, err
+		_ = stream.Close()
+		return nil, nil, err
 	}
-
-	if s.bindings == nil {
-		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "user access is not enabled"})
-		return tcp.SessionInfo{}, fmt.Errorf("%w: user access is not enabled", ErrAuthRejected)
-	}
-	access, ok := s.bindings.UserFor(req.Key)
-	if !ok {
-		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "user key is not registered"})
-		return tcp.SessionInfo{}, fmt.Errorf("%w: user key is not registered", ErrAuthRejected)
-	}
-	if !access.Active {
-		// 停用的用户认得出是谁，但不放行；应答与日志都要能区分"停用"和"没登记"。
-		protocol.WriteReply(stream, protocol.AuthResult, protocol.Reply{OK: false, Reason: "user is disabled"})
-		return tcp.SessionInfo{}, fmt.Errorf("%w: user is disabled", ErrAuthRejected)
-	}
-	protocol.WriteReply(stream, protocol.AuthResult, s.userAuthReply(access.Client))
-	// 会话日志器取该用户配置的级别；Meta 带上 UserMeta：转发桥按 user_key 从限速
-	// 注册表取桶，用户上报的自信息随会话保留（客户端会话的 Meta 是 *transport.Session）。
-	// 出站规则名也在这里定下：规则内容随时可改，但一个会话只认一个规则名。
-	var level, userRule string
-	if s.sessionCfg != nil {
-		if cfg, ok := s.sessionCfg.UserConfig(store.ProtocolVNV1, req.Key); ok {
-			level = cfg.LogLevel
-			userRule = cfg.Rule
-		}
-	}
-	return tcp.SessionInfo{
-		Session: session,
-		Remote:  session.RemoteAddr().String(),
-		Kind:    tcp.KindUser,
-		Name:    access.Client,
-		Log:     logging.NewScoped(level, "user", req.Key),
-		Meta:    transport.UserMeta{Key: req.Key, Name: access.Name, Rule: userRule, Info: req.Info},
-	}, nil
+	return stream, frame, nil
 }
 
-// userAuthReply 组装用户认证成功的应答：回带绑定客户端的配置——在线时是它上报的
-// 完整配置，离线时仅剩名字（客户端的配置随会话存在，服务端不另存）。
-func (s *ConnectorService) userAuthReply(clientName string) protocol.Reply {
-	reply := protocol.Reply{OK: true, Client: &protocol.ClientInfo{Name: clientName}}
-	if info, ok := s.sessions.SessionByName(clientName); ok {
-		if client := clientOf(info); client != nil {
-			reported := client.Info()
-			reply.Client = &reported
+func (s *ConnectorService) readClientReport(ctx context.Context, session tcp.Session, frame *protocol.Frame, name string, established bool) (protocol.ClientInfo, error) {
+	payload, err := protocol.ReadPayload(frame)
+	if err != nil {
+		return protocol.ClientInfo{}, err
+	}
+	req, err := protocol.ParseConfigReportRequest(payload)
+	if err != nil {
+		return protocol.ClientInfo{}, err
+	}
+	conn, ok := tcp.Connection(session).(*secure.Conn)
+	if !ok {
+		return protocol.ClientInfo{}, ErrAuthRejected
+	}
+	ctx, cancel := context.WithTimeout(ctx, AuthTimeout)
+	defer cancel()
+	key, err := s.lookupTransportKey(ctx, conn.KeyID())
+	if err != nil {
+		return protocol.ClientInfo{}, ErrAuthRejected
+	}
+	if req.Info.Name == transport.LocalClientName || (established && req.Info.Name != name) {
+		return protocol.ClientInfo{}, fmt.Errorf("%w: invalid client name", ErrAuthRejected)
+	}
+	if err := s.verifyKey(ctx, req.Info.Name, base64.StdEncoding.EncodeToString(key[:])); err != nil {
+		return protocol.ClientInfo{}, fmt.Errorf("%w: %v", ErrAuthRejected, err)
+	}
+	return req.Info, nil
+}
+
+// configSnapshot 返回该客户端当前应下发的分层配置快照。
+func (s *ConnectorService) configSnapshot(ctx context.Context, name string) protocol.PushConfig {
+	if s.sessionCfg == nil {
+		return protocol.PushConfig{}
+	}
+	return s.sessionCfg.ClientRuntime(ctx, name).Push
+}
+
+func (s *ConnectorService) saveClientReport(ctx context.Context, client *transport.Session, info protocol.ClientInfo) {
+	client.UpdateInfo(info)
+	if s.sessionCfg != nil {
+		if reported, err := json.Marshal(info); err == nil {
+			if err := s.sessionCfg.SaveClientReportedConfig(ctx, info.Name, string(reported)); err != nil {
+				logging.Warn("core: save reported client config failed", "client", info.Name, "err", err)
+			}
 		}
 	}
-	return reply
+}
+
+func (s *ConnectorService) handleClientReport(info *tcp.SessionInfo, stream tcp.Stream) error {
+	ctx := s.context()
+	if ctx == nil {
+		return ErrAuthRejected
+	}
+	if err := stream.SetDeadline(time.Now().Add(AuthTimeout)); err != nil {
+		return err
+	}
+	frame, err := protocol.NewDecoder(stream).ReadFrame()
+	if err == nil && frame.Type != protocol.ConfigReport {
+		_ = frame.CloseBody()
+		err = fmt.Errorf("%w: expected config report", protocol.ErrProtocol)
+	}
+	if err != nil {
+		_ = info.Session.Close()
+		return err
+	}
+	reported, err := s.readClientReport(ctx, info.Session, frame, info.Name, true)
+	if err != nil {
+		protocol.WriteReply(stream, protocol.ConfigReportResult, protocol.Reply{Reason: err.Error()})
+		_ = info.Session.Close()
+		return err
+	}
+	client := clientOf(info)
+	s.saveClientReport(ctx, client, reported)
+	return client.SendConfigReportResult(stream, func() protocol.PushConfig { return s.configSnapshot(ctx, info.Name) })
 }
 
 // verifyKey 校验客户端认证。密钥表已配置（管理台可管）时按范围 key 判定：客户端名
 // 落在某条记录的范围里且密钥相等才放行；表为空时回退配置文件的随机密钥，无密钥则拒绝。
-func (s *ConnectorService) verifyKey(clientName, key string) error {
+func (s *ConnectorService) verifyKey(ctx context.Context, clientName, key string) error {
 	if s.sessionCfg != nil {
-		configured, ok := s.sessionCfg.MatchClientAuthKey(clientName, key)
+		configured, ok := s.sessionCfg.MatchClientAuthKey(ctx, clientName, key)
 		if configured {
 			if !ok {
 				return errKeyMismatch

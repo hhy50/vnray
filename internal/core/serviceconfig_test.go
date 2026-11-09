@@ -25,13 +25,12 @@ func TestSessionConfigFromDefaultsMatchesBackend(t *testing.T) {
 	}
 }
 
-// TestLoadServiceSettings 断言启动合并：基线取内置默认值与配置文件日志级别，首次启动
-// 整份落库，库里有快照则覆盖，坏数据回退基线。
+// TestLoadServiceSettings 验证持久配置覆盖基线，坏数据回退基线。
 func TestLoadServiceSettings(t *testing.T) {
 	ctx := context.Background()
-	st := testStore(t)
 	cfg := config.DefaultServer()
 	cfg.Log.Level = "debug"
+	st := initializedTestStore(t, &cfg)
 
 	base := loadServiceSettings(ctx, st, &cfg)
 	if base.LogLevel != "debug" {
@@ -41,13 +40,13 @@ func TestLoadServiceSettings(t *testing.T) {
 		t.Fatalf("heartbeat/public_host should come from built-in defaults: %+v", base)
 	}
 
-	// 首次启动把默认值整份写进库并写初始化标记；空值段（public_host 默认空）不占行。
+	// 空值段（public_host 默认空）不占行。
 	seeded, err := st.GetServiceSettings(ctx)
 	if err != nil {
 		t.Fatalf("read seeded settings: %v", err)
 	}
-	if _, ok := seeded[store.ServiceSettingsInitializedKey]; !ok {
-		t.Fatalf("first start should write the initialized marker, got %v", seeded)
+	if _, ok := seeded[store.ServiceSettingsInitializedKey]; ok {
+		t.Fatal("legacy initialization marker exposed as runtime settings")
 	}
 	for _, key := range []string{
 		config.SettingLogLevel, config.SettingTrafficFlush, config.SettingHeartbeat,
@@ -80,9 +79,8 @@ func TestLoadServiceSettings(t *testing.T) {
 	}
 }
 
-// TestLoadServiceSettingsSeedsOnce 断言初始化只做一次：已初始化后重启不重刷默认值，
-// 否则用户改过的配置每次启动都会被重置。
-func TestLoadServiceSettingsSeedsOnce(t *testing.T) {
+// TestLoadServiceSettingsPreservesEdits 验证加载不会覆盖已有配置。
+func TestLoadServiceSettingsPreservesEdits(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
 	cfg := config.DefaultServer()
@@ -112,7 +110,7 @@ func TestServiceConfigApplyPersistsAndDispatches(t *testing.T) {
 	next.TrafficFlushInterval = config.Duration(3 * time.Second)
 	next.Session.KeepAliveInterval = config.Duration(20 * time.Second)
 
-	if err := sc.Apply(next); err != nil {
+	if err := sc.Apply(context.Background(), next); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -151,7 +149,7 @@ func TestServiceConfigVLESSTLS(t *testing.T) {
 		t.Fatalf("VLESSTLS() = %+v, want nil before configuration", got)
 	}
 	want := config.VLESSTLS{Enabled: true, ServerName: "node.example.com", CertPEM: "CERT", KeyPEM: "KEY"}
-	if err := sc.SetVLESSTLS(want); err != nil {
+	if err := sc.SetVLESSTLS(context.Background(), want); err != nil {
 		t.Fatalf("set vless tls: %v", err)
 	}
 	if got := sc.VLESSTLS(); got == nil || *got != want {
@@ -177,7 +175,7 @@ func TestServiceConfigVLESSTLS(t *testing.T) {
 	// 否则改一次日志级别就把证书冲掉了。
 	next := sc.Current()
 	next.LogLevel = "debug"
-	if err := sc.Apply(next); err != nil {
+	if err := sc.Apply(context.Background(), next); err != nil {
 		t.Fatalf("apply service settings: %v", err)
 	}
 	if got := sc.VLESSTLS(); got == nil || *got != want {
@@ -201,7 +199,7 @@ func TestServiceConfigApplyRejectsInvalid(t *testing.T) {
 
 	bad := initial
 	bad.LogLevel = "verbose"
-	if err := sc.Apply(bad); err == nil {
+	if err := sc.Apply(context.Background(), bad); err == nil {
 		t.Fatal("Apply accepted an invalid log level")
 	}
 	if kv, _ := st.GetServiceSettings(context.Background()); len(kv) != 0 {

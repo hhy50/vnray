@@ -15,8 +15,10 @@ func TestSetFlushIntervalHotReload(t *testing.T) {
 	defer cancel()
 	st := testStore(t)
 	m := NewMeter(nil)
+	m.RestoreUser(store.ProtocolVNV1, "alice")
 	m.SetFlushInterval(10 * time.Millisecond)
-	m.Run(ctx, st)
+	done := m.Run(ctx, st)
+	defer func() { cancel(); <-done }()
 
 	m.UserStats(store.ProtocolVNV1, "alice").UpWrite.Add(42)
 

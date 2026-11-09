@@ -32,28 +32,38 @@ func ProxyDatagramBidirectional(a, b DatagramConn, name string, idle time.Durati
 	tunnelActive.Add(1)
 	defer tunnelActive.Add(-1)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := o.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
 			cancel()
-			_ = a.Close()
-			_ = b.Close()
+			abortConnection(a)
+			abortConnection(b)
 		})
 	}
+	// 请求取消即中断两端；AfterFunc 只在真取消时起协程，不必为每条隧道常驻一个观察者。
+	stopCancelWatch := context.AfterFunc(ctx, closeBoth)
+	defer stopCancelWatch()
 
 	// 活动信号：任一方读到数据都重置空闲定时器；静默超时就整体关停（UDP 无 EOF 靠它兜底）。
-	activity := make(chan struct{}, 4)
+	var activity chan struct{}
+	var wg sync.WaitGroup
 	if idle > 0 {
-		idleDone := make(chan struct{})
+		activity = make(chan struct{}, 4)
+		wg.Add(1)
 		routine.Go(name+".idle", func() {
+			defer wg.Done()
 			timer := time.NewTimer(idle)
 			defer timer.Stop()
 			for {
 				select {
-				case <-idleDone:
+				case <-ctx.Done():
 					return
 				case <-timer.C:
 					closeBoth()
@@ -69,22 +79,20 @@ func ProxyDatagramBidirectional(a, b DatagramConn, name string, idle time.Durati
 				}
 			}
 		})
-		defer close(idleDone)
 	}
 
 	up := &datagramPipe{
 		name: name + ".up", src: a, dst: b,
-		limiter: o.UpLimit, readCnt: o.Stats.upRead(), writeCnt: o.Stats.upWrite(),
-		clientCnt: o.ClientStats.upWrite(), globalCnt: &tunnelTraffic,
+		limiter: o.UpLimit, readCnt: o.Stats.UpReadRef(), writeCnt: o.Stats.UpWriteRef(),
+		clientCnt: o.ClientStats.UpWriteRef(), globalCnt: &tunnelTraffic,
 		activity: activity, onErr: closeBoth,
 	}
 	down := &datagramPipe{
 		name: name + ".down", src: b, dst: a,
-		limiter: o.DownLimit, readCnt: o.Stats.downRead(), writeCnt: o.Stats.downWrite(),
-		clientCnt: o.ClientStats.downWrite(), globalCnt: &tunnelTraffic,
+		limiter: o.DownLimit, readCnt: o.Stats.DownReadRef(), writeCnt: o.Stats.DownWriteRef(),
+		clientCnt: o.ClientStats.DownWriteRef(), globalCnt: &tunnelTraffic,
 		activity: activity, onErr: closeBoth,
 	}
-	var wg sync.WaitGroup
 	wg.Add(2)
 	routine.Go(up.name, func() { defer wg.Done(); up.run(ctx) })
 	routine.Go(down.name, func() { defer wg.Done(); down.run(ctx) })
@@ -99,7 +107,7 @@ type datagramPipe struct {
 	src       DatagramConn
 	dst       DatagramConn
 	limiter   Limiter
-	readCnt   *atomic.Int64 // 可为 nil（未启用统计）
+	readCnt   *atomic.Int64
 	writeCnt  *atomic.Int64
 	clientCnt *atomic.Int64
 	globalCnt *atomic.Int64
@@ -109,9 +117,10 @@ type datagramPipe struct {
 
 // run 跑到源 EOF（干净结束）或出错为止，两者都走 onErr 整体关闭。
 func (p *datagramPipe) run(ctx context.Context) {
+	defer p.onErr()
 	for {
 		packet, rerr := p.src.ReadPacket()
-		if len(packet) > 0 {
+		if len(packet) > 0 || rerr == nil {
 			select {
 			case p.activity <- struct{}{}:
 			default:

@@ -12,7 +12,7 @@ import (
 	"io"
 	"math"
 	"os"
-	"sync"
+	"sync/atomic"
 
 	"github.com/hhy50/vnray/internal/logging"
 	"golang.org/x/crypto/sha3"
@@ -80,9 +80,8 @@ func (s *shakeSizeCodec) nextPadding() uint16 { return s.next() % 64 }
 // 其余取自会话 IV；附加认证数据为空。
 type chunkAuth struct {
 	aead  cipher.AEAD
-	iv    []byte // 16 字节会话 IV
-	count uint16
-	mu    sync.Mutex
+	iv    []byte
+	count atomic.Uint32
 }
 
 func newChunkAuth(aead cipher.AEAD, iv []byte) *chunkAuth {
@@ -92,15 +91,16 @@ func newChunkAuth(aead cipher.AEAD, iv []byte) *chunkAuth {
 func (a *chunkAuth) overhead() int { return a.aead.Overhead() }
 
 func (a *chunkAuth) nextNonce() []byte {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	n := make([]byte, a.aead.NonceSize())
-	binary.BigEndian.PutUint16(n, a.count)
-	copy(n[2:], a.iv[2:])
-	a.count++
-	if a.count == math.MaxUint16 {
-		a.count = 0
+	var count uint32
+	for {
+		count = a.count.Load()
+		if a.count.CompareAndSwap(count, (count+1)%math.MaxUint16) {
+			break
+		}
 	}
+	binary.BigEndian.PutUint16(n, uint16(count))
+	copy(n[2:], a.iv[2:])
 	return n
 }
 
@@ -158,9 +158,8 @@ func (r *chunkReader) nextChunk() error {
 	if debugChunks {
 		logging.Warnf("chunk read: size=%d padding=%d", size, padding)
 	}
-	if int(size) == r.auth.overhead()+int(padding) {
-		r.done = true
-		return io.EOF
+	if int(size) < r.auth.overhead()+int(padding) {
+		return fmt.Errorf("vmess: chunk size %d is smaller than authentication and padding", size)
 	}
 	data := make([]byte, size)
 	if _, err := io.ReadFull(r.r, data); err != nil {
@@ -172,6 +171,10 @@ func (r *chunkReader) nextChunk() error {
 	plain, err := r.auth.open(data[:size])
 	if err != nil {
 		return err
+	}
+	if len(plain) == 0 {
+		r.done = true
+		return io.EOF
 	}
 	r.buf = plain
 	r.pos = 0
@@ -196,7 +199,6 @@ func (r *chunkReader) nextPayload() ([]byte, error) {
 
 // chunkWriter 把明文写入封装成分块加密帧；Close 写出终结块（空载荷）。
 type chunkWriter struct {
-	mu      sync.Mutex
 	w       io.Writer
 	auth    *chunkAuth
 	codec   sizeCodec
@@ -208,8 +210,6 @@ func newChunkWriter(w io.Writer, auth *chunkAuth, codec sizeCodec, padding bool)
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	written := 0
 	for len(p) > 0 {
 		n := min(len(p), maxChunkPayload)
@@ -224,8 +224,6 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 
 // Close 写出终结块（空载荷分块），对端读到即视为请求/响应结束。
 func (w *chunkWriter) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	return w.sealSized(nil, 0)
 }
 
@@ -235,8 +233,6 @@ const maxPacketSize = 65535
 // WritePacket 把单个数据报封装成一个分块写出（不经 Write 的 16K 分包，保持数据报唯一）。
 // 长度超限（含认证开销与填充）时拒绝返回错误。
 func (w *chunkWriter) WritePacket(payload []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	return w.sealSized(payload, maxPacketSize)
 }
 

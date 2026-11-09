@@ -1,11 +1,9 @@
 package transport_test
 
-// 四端链路测试：用户 A 与客户端 D 连同一个主端口（多路复用会话靠握手首帧的
-// Auth/UserAuth 区分角色），A 以 UserAuth 出示 user_key 认证（密钥须已在注册表
-// 登记），之后的每条 Forward 流经其绑定的客户端去访问只有该客户端够得到的目标 B。
-// 链路：A → 主端口 → 用户会话 → Forward 流 → 服务端C → Tunnel 流 → 客户端D → B。
+// 用户与客户端使用独立端口，Forward 按用户绑定的客户端选路。
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -34,7 +32,7 @@ const (
 // 表里的用户一律视为启用。
 type testRegistry map[string]string
 
-func (r testRegistry) UserFor(key string) (transport.UserAccess, bool) {
+func (r testRegistry) UserFor(_ context.Context, key string) (transport.UserAccess, bool) {
 	client, ok := r[key]
 	return transport.UserAccess{Client: client, Name: key, Active: true}, ok
 }
@@ -66,7 +64,7 @@ func startEchoServer(t *testing.T) string {
 
 // startForwardLink 组装服务端 C 与客户端 D：C 接受用户接入并注册 user_key → clientName，
 // D 以 clientName 接入；返回服务端句柄。cfg/muxer 为 nil 时用默认值，两端一致。
-func startForwardLink(t *testing.T, cfg *tcp.SessionConfig, muxer tcp.Muxer, registry transport.UserRegistry, clientName string) *core.ConnectorService {
+func startForwardLink(t *testing.T, cfg *tcp.SessionConfig, muxer tcp.Muxer, registry transport.UserRegistry, clientName string) *testPlane {
 	t.Helper()
 
 	plane := startPlane(t, planeOptions{
@@ -113,13 +111,13 @@ func testUserInfo() protocol.UserInfo {
 	}
 }
 
-// dialUser 以用户身份连主端口并完成 UserAuth：成功返回用户多路复用会话与服务端应答
+// dialUser 以用户身份连用户端口并完成 UserAuth：成功返回用户多路复用会话与服务端应答
 // （用户路径的应答带绑定客户端的配置）；被拒时会话已关闭、应答 ok=false。
 // cfg/muxer 为 nil 时用默认值。
-func dialUser(t *testing.T, plane *core.ConnectorService, key string, cfg *tcp.SessionConfig, muxer tcp.Muxer) (tcp.Session, protocol.Reply) {
+func dialUser(t *testing.T, plane *testPlane, key string, cfg *tcp.SessionConfig, muxer tcp.Muxer) (tcp.Session, protocol.Reply) {
 	t.Helper()
 
-	conn, err := net.Dial("tcp", plane.Addr())
+	conn, err := net.Dial("tcp", plane.userAddr)
 	if err != nil {
 		t.Fatalf("dial server: %v", err)
 	}
@@ -411,7 +409,7 @@ func TestUserAuthReturnsClientConfig(t *testing.T) {
 
 // assertUserInfo 轮询断言服务端登记的用户会话带着 UserAuth 上报的自信息与 user_key
 // （AuthResult 先于 OnSessionOpen 发出，登记可能稍迟，故轮询而非一次性快照）。
-func assertUserInfo(t *testing.T, plane *core.ConnectorService) {
+func assertUserInfo(t *testing.T, plane *testPlane) {
 	t.Helper()
 
 	deadline := time.Now().Add(sessionTimeout)

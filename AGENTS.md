@@ -14,7 +14,7 @@
 ## 其他硬约束
 
 - 所有生产协程必须经 `routine.Go(name, fn)` 启动；测试代码不受限。
-- 装配全部手写：client 在 `internal/cli`，server 在 `internal/core`（入口
+- 装配全部手写：client 在 `cmd/client`，server 在 `internal/core`（入口
   `initServerApp`，不引入依赖注入框架与代码生成）。两处在同一模块内，client 不得
   引入服务端专用依赖（GORM/SQLite/Admin）。
 - 协议消息类型编号只增不改；架构取舍记入 `docs/adr/`，旧 ADR 不删、新增标注 supersedes。

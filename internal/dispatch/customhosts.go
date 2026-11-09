@@ -5,20 +5,23 @@ package dispatch
 
 import (
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/hhy50/vnray/internal/protocol"
 )
 
 // Hosts 是自定义域名表，并发安全；nil 指针表示未启用（一律走 DNS）。
 type Hosts struct {
-	mu     sync.RWMutex
-	m      map[string]string
+	tables atomic.Pointer[hostTables]
+}
+
+type hostTables struct {
+	local  map[string]string
 	global map[string]string
 }
 
 // NewHosts 创建一张空表。
-func NewHosts() *Hosts { return &Hosts{m: make(map[string]string)} }
+func NewHosts() *Hosts { return &Hosts{} }
 
 // Update 整体替换表内容；nil 等价于清空。
 func (h *Hosts) Update(entries []protocol.CustomHost) {
@@ -27,10 +30,7 @@ func (h *Hosts) Update(entries []protocol.CustomHost) {
 
 // UpdateLayers 同时替换独立与全局表，查找时独立表优先。
 func (h *Hosts) UpdateLayers(local, global []protocol.CustomHost) {
-	localTable, globalTable := hostTable(local), hostTable(global)
-	h.mu.Lock()
-	h.m, h.global = localTable, globalTable
-	h.mu.Unlock()
+	h.tables.Store(&hostTables{local: hostTable(local), global: hostTable(global)})
 }
 
 func hostTable(entries []protocol.CustomHost) map[string]string {
@@ -48,12 +48,14 @@ func (h *Hosts) LookupHost(domain string) (string, bool) {
 	if h == nil {
 		return "", false
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	tables := h.tables.Load()
+	if tables == nil {
+		return "", false
+	}
 	domain = normalizeDomain(domain)
-	ip, ok := h.m[domain]
+	ip, ok := tables.local[domain]
 	if !ok {
-		ip, ok = h.global[domain]
+		ip, ok = tables.global[domain]
 	}
 	return ip, ok
 }

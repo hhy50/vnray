@@ -1,6 +1,8 @@
 package concurrency
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +40,24 @@ func TestGateAcquireRelease(t *testing.T) {
 	g.Release()
 	g.Release()
 	g.Release() // 多释空操作，不 panic
+}
+
+func TestGateAcquireContextCancellation(t *testing.T) {
+	for _, max := range []int{0, 1} {
+		g := NewGate()
+		g.SetMax(max)
+		if err := g.Acquire(nil); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := g.AcquireContext(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("max=%d: error = %v, want canceled", max, err)
+		}
+		if got := g.Usage(); got != 1 {
+			t.Fatalf("max=%d: usage=%d, want 1", max, got)
+		}
+	}
 }
 
 func TestGateUnlimited(t *testing.T) {

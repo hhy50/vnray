@@ -4,7 +4,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { PortMap } from '../api/types'
-import { rate, shortName } from '../lib/format'
+import { bytes, rate, shortName } from '../lib/format'
 import { useI18n } from '../i18n'
 
 const { t } = useI18n()
@@ -185,6 +185,12 @@ onMounted(load)
       <el-table-column :label="t('portmaps.colLimits')" width="112">
         <template #default="{ row }">
           <span class="faint">{{ rate(row.limit_up_kb) }} / {{ rate(row.limit_down_kb) }}</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column :label="t('portmaps.colTraffic')" min-width="140">
+        <template #default="{ row }">
+          <span class="mono" :title="t('portmaps.trafficTip')">↑ {{ bytes(row.up_bytes) }} / ↓ {{ bytes(row.down_bytes) }}</span>
         </template>
       </el-table-column>
 

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -45,7 +46,7 @@ type fakeSettings struct {
 
 func (f *fakeSettings) Current() config.ServiceSettings { return f.cur }
 
-func (f *fakeSettings) Apply(next config.ServiceSettings) error {
+func (f *fakeSettings) Apply(_ context.Context, next config.ServiceSettings) error {
 	f.cur, f.applied = next, true
 	return nil
 }
