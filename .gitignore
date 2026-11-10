@@ -53,3 +53,4 @@ web/admin/dist/
 
 !docs/adr/0054-explicit-lock-removal.md
 !docs/adr/0055-snapshot-and-registry-locks.md
+!docs/adr/0061-ringbuffer-pipe.md

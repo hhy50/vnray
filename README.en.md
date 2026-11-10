@@ -70,6 +70,8 @@ Architecturally, this may look like installing a V2Ray server inside the client 
 | **Client** | A private or target network | Connects to the server proactively and accesses services on the local machine or its surrounding network |
 | **User client** | The user's device | Connects to the server with VLESS, VMess, or Shadowsocks |
 
+Each in-memory pipe allocates a reusable 64 KiB buffer on its first write. Writers wait when the buffer is full, including writes larger than the capacity. Graceful close preserves buffered tail data. See [ADR 0061](docs/adr/0061-ringbuffer-pipe.md) for the implementation decision.
+
 ## Quick start
 
 The steps below use the example configuration included in the repository. For a minimal test, the server and client can run on the same machine. In a real deployment, place the client on a private-network machine that can reach the target service.

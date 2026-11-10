@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/hashicorp/yamux v0.1.3-0.20261012062701-98ba9c9ac60f
+	github.com/smallnest/ringbuffer v0.2.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.54.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
