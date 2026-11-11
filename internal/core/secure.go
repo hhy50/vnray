@@ -7,12 +7,20 @@ import (
 
 	"github.com/hhy50/vnray/internal/authkey"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
 	"github.com/hhy50/vnray/internal/secure"
 )
 
+var (
+	clientHandshakes        = metrics.NewCounter("client_handshakes_total")
+	clientHandshakeFailures = metrics.NewCounter("client_handshake_failures_total")
+)
+
 func (s *ConnectorService) upgradeConnection(ctx context.Context, raw net.Conn) (net.Conn, error) {
+	clientHandshakes.Inc()
 	conn, err := secure.Server(ctx, raw, s.lookupTransportKey, s.transportEncryption.Load())
 	if err != nil {
+		clientHandshakeFailures.Inc()
 		return nil, err
 	}
 	// 与客户端的握手日志配对，两端日志对得上才能排查模式不一致。

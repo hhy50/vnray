@@ -82,3 +82,26 @@ func labelHint() string {
 	}
 	return strings.Join(names, ", ")
 }
+
+func TestGoLifecycleAcrossMetricsToggle(t *testing.T) {
+	for _, initiallyEnabled := range []bool{false, true} {
+		metrics.SetEnabled(initiallyEnabled)
+		g := gaugeFor("test.routine.toggle")
+		entered, release := make(chan struct{}), make(chan struct{})
+		Go("test.routine.toggle", func() { close(entered); <-release })
+		<-entered
+		if g.Value() != 1 {
+			t.Errorf("active while enabled=%v: %d", initiallyEnabled, g.Value())
+		}
+		metrics.SetEnabled(!initiallyEnabled)
+		close(release)
+		deadline := time.Now().Add(2 * time.Second)
+		for g.Value() != 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("unbalanced gauge: %d", g.Value())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	metrics.SetEnabled(true)
+}

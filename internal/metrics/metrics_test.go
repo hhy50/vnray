@@ -1,13 +1,15 @@
 package metrics
 
 import (
+	"encoding/json"
 	"math"
 	"sync"
 	"testing"
 )
 
 func TestCounterAndGauge(t *testing.T) {
-	c := NewCounter("test_counter_total")
+	resetTestRegistry(t)
+	c := NewCounter(t.Name() + "_test_counter_total")
 	c.Inc()
 	c.Add(5)
 	c.Add(-1)
@@ -15,20 +17,21 @@ func TestCounterAndGauge(t *testing.T) {
 		t.Fatalf("counter value = %d, want 6", got)
 	}
 
-	g := NewGauge("test_gauge")
+	g := NewGauge(t.Name() + "_test_gauge")
 	g.Set(10)
 	g.Add(-4)
 	if got := g.Value(); got != 6 {
 		t.Fatalf("gauge value = %d, want 6", got)
 	}
 
-	if NewCounter("test_counter_total").s != c.s {
+	if NewCounter(t.Name()+"_test_counter_total").s != c.s {
 		t.Fatal("duplicate registration should return the same series")
 	}
 }
 
 func TestCounterRejectsNegative(t *testing.T) {
-	c := NewCounter("test_negative_total")
+	resetTestRegistry(t)
+	c := NewCounter(t.Name() + "_test_negative_total")
 	c.Add(3)
 	c.Add(-2)
 	if got := c.Value(); got != 3 {
@@ -37,7 +40,8 @@ func TestCounterRejectsNegative(t *testing.T) {
 }
 
 func TestHistogramBucketsAndSum(t *testing.T) {
-	h := NewHistogram("test_histogram_seconds", []float64{0.5, 1})
+	resetTestRegistry(t)
+	h := NewHistogram(t.Name()+"_test_histogram_seconds", []float64{0.5, 1})
 	h.Observe(0.25)
 	h.Observe(0.75)
 	h.Observe(2)
@@ -52,7 +56,7 @@ func TestHistogramBucketsAndSum(t *testing.T) {
 	snaps := Snapshot()
 	var found *Series
 	for i := range snaps {
-		if snaps[i].Name == "test_histogram_seconds" {
+		if snaps[i].Name == t.Name()+"_test_histogram_seconds" {
 			found = &snaps[i]
 		}
 	}
@@ -69,8 +73,10 @@ func TestHistogramBucketsAndSum(t *testing.T) {
 }
 
 func TestSnapshotSortedAndKinds(t *testing.T) {
+	resetTestRegistry(t)
 	NewCounter("zz_last_total")
 	NewGauge("aa_first")
+	NewHistogram("middle_seconds", DurationBounds)
 	snaps := Snapshot()
 	for i := 1; i < len(snaps); i++ {
 		if snaps[i-1].Name > snaps[i].Name {
@@ -87,9 +93,10 @@ func TestSnapshotSortedAndKinds(t *testing.T) {
 }
 
 func TestDisabledNoOps(t *testing.T) {
-	c := NewCounter("test_gate_total")
-	g := NewGauge("test_gate_gauge")
-	h := NewHistogram("test_gate_seconds", DurationBounds)
+	resetTestRegistry(t)
+	c := NewCounter(t.Name() + "_test_gate_total")
+	g := NewGauge(t.Name() + "_test_gate_gauge")
+	h := NewHistogram(t.Name()+"_test_gate_seconds", DurationBounds)
 	c.Add(2)
 	g.Set(7)
 	h.Observe(0.001)
@@ -109,8 +116,8 @@ func TestDisabledNoOps(t *testing.T) {
 	if got := c.Value(); got != beforeC {
 		t.Fatalf("counter changed while disabled: %d -> %d", beforeC, got)
 	}
-	if got := g.Value(); got != beforeG {
-		t.Fatalf("gauge changed while disabled: %d -> %d", beforeG, got)
+	if got := g.Value(); got != 0 {
+		t.Fatalf("gauge must track state while disabled: %d -> %d", beforeG, got)
 	}
 	if got := h.Count(); got != before {
 		t.Fatalf("histogram count changed while disabled: %d -> %d", before, got)
@@ -127,17 +134,19 @@ func TestDisabledNoOps(t *testing.T) {
 }
 
 func TestDuplicateKindPanics(t *testing.T) {
-	NewGauge("test_dup_name")
+	resetTestRegistry(t)
+	NewGauge(t.Name() + "_test_dup_name")
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected panic on conflicting registration")
 		}
 	}()
-	NewCounter("test_dup_name")
+	NewCounter(t.Name() + "_test_dup_name")
 }
 
 func TestConcurrentObserve(t *testing.T) {
-	h := NewHistogram("test_concurrent_seconds", DurationBounds)
+	resetTestRegistry(t)
+	h := NewHistogram(t.Name()+"_test_concurrent_seconds", DurationBounds)
 	const goroutines, perG = 8, 1000
 	var wg sync.WaitGroup
 	for i := 0; i < goroutines; i++ {
@@ -156,7 +165,7 @@ func TestConcurrentObserve(t *testing.T) {
 	var total int64
 	snaps := Snapshot()
 	for _, s := range snaps {
-		if s.Name == "test_concurrent_seconds" {
+		if s.Name == t.Name()+"_test_concurrent_seconds" {
 			for _, b := range s.Buckets {
 				total += b.Count
 			}
@@ -165,4 +174,59 @@ func TestConcurrentObserve(t *testing.T) {
 	if total != goroutines*perG {
 		t.Fatalf("bucket total = %d, want %d", total, goroutines*perG)
 	}
+}
+
+func resetTestRegistry(t *testing.T) {
+	t.Helper()
+	mu.Lock()
+	seriesByName = map[string]*series{}
+	registeredSeries.Store(nil)
+	mu.Unlock()
+	SetEnabled(true)
+	t.Cleanup(func() { SetEnabled(true) })
+}
+
+func TestGaugeLifecycleAcrossToggle(t *testing.T) {
+	resetTestRegistry(t)
+	g := NewGauge("active")
+	SetEnabled(false)
+	g.Add(1)
+	SetEnabled(true)
+	g.Add(-1)
+	if g.Value() != 0 {
+		t.Fatalf("unbalanced lifecycle: %d", g.Value())
+	}
+	g.Add(1)
+	SetEnabled(false)
+	g.Add(-1)
+	SetEnabled(true)
+	if g.Value() != 0 {
+		t.Fatalf("stale lifecycle: %d", g.Value())
+	}
+}
+
+func TestHistogramJSON(t *testing.T) {
+	resetTestRegistry(t)
+	h := NewHistogram("latency", []float64{1})
+	for _, v := range []float64{0.5, 2, math.NaN(), math.Inf(1), -1} {
+		h.Observe(v)
+	}
+	data, err := json.Marshal(Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(data) || h.Count() != 2 {
+		t.Fatalf("invalid snapshot: %s", data)
+	}
+}
+
+func BenchmarkGaugeAdd(b *testing.B) {
+	g := NewGauge("benchmark_active")
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			g.Add(1)
+			g.Add(-1)
+		}
+	})
 }

@@ -6,9 +6,9 @@
 package metrics
 
 import (
+	"encoding/json"
 	"math"
-	"runtime"
-	"runtime/pprof"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -38,19 +38,30 @@ type series struct {
 }
 
 var (
-	mu           sync.RWMutex
-	seriesByName = map[string]*series{}
-	// enabled 是采集总开关：关闭后所有记录方法变为 no-op，快照接口也应停服。
-	enabled atomic.Bool
+	mu               sync.Mutex
+	seriesByName     = map[string]*series{}
+	registeredSeries atomic.Pointer[[]*series]
+	// 状态量必须跨开关维护配对增减；开关只暂停事件计数与后台采样。
+	collectionState atomic.Uint64
 )
 
-func init() { enabled.Store(true) }
+func init() { collectionState.Store(1) }
 
-// SetEnabled 全局开关指标采集，立即生效；已累计的读数保留不清零。
-func SetEnabled(on bool) { enabled.Store(on) }
+// SetEnabled 暂停事件采集与快照服务；状态量继续维护，累计值不清零。
+func SetEnabled(on bool) {
+	for {
+		state := collectionState.Load()
+		if (state&1 != 0) == on {
+			return
+		}
+		if collectionState.CompareAndSwap(state, state+1) {
+			return
+		}
+	}
+}
 
 // Enabled 返回采集开关的当前状态。
-func Enabled() bool { return enabled.Load() }
+func Enabled() bool { return collectionState.Load()&1 != 0 }
 
 // register 创建或复用同名序列；kind/bounds 不一致视为编程错误，直接 panic
 // （注册发生在初始化期，错误在启动时即暴露）。
@@ -58,7 +69,7 @@ func register(name, kind string, bounds []float64) *series {
 	mu.Lock()
 	defer mu.Unlock()
 	if s, ok := seriesByName[name]; ok {
-		if s.kind != kind {
+		if s.kind != kind || !slices.Equal(s.bounds, bounds) {
 			panic("metrics: " + name + " registered as " + s.kind + " and " + kind)
 		}
 		return s
@@ -66,6 +77,12 @@ func register(name, kind string, bounds []float64) *series {
 	s := &series{name: name, kind: kind, bounds: bounds}
 	s.buckets = make([]atomic.Int64, len(bounds)+1)
 	seriesByName[name] = s
+	registered := make([]*series, 0, len(seriesByName))
+	for _, entry := range seriesByName {
+		registered = append(registered, entry)
+	}
+	sort.Slice(registered, func(i, j int) bool { return registered[i].name < registered[j].name })
+	registeredSeries.Store(&registered)
 	return s
 }
 
@@ -79,7 +96,7 @@ func NewCounter(name string) *Counter {
 
 // Inc 计数加一。
 func (c *Counter) Inc() {
-	if !enabled.Load() {
+	if !Enabled() {
 		return
 	}
 	c.s.value.Add(1)
@@ -87,7 +104,7 @@ func (c *Counter) Inc() {
 
 // Add 累加 n；负数按 0 处理，计数器不允许回退。
 func (c *Counter) Add(n int64) {
-	if n <= 0 || !enabled.Load() {
+	if n <= 0 || !Enabled() {
 		return
 	}
 	c.s.value.Add(n)
@@ -115,21 +132,11 @@ func CounterFor(name string) *Counter {
 	return &Counter{s: register(name, TypeCounter, nil)}
 }
 
-// Add 增减读数（传负数即减少）。
-func (g *Gauge) Add(delta int64) {
-	if !enabled.Load() {
-		return
-	}
-	g.s.value.Add(delta)
-}
+// Add 增减状态量，即使暂停采集也保持生命周期配对。
+func (g *Gauge) Add(delta int64) { g.s.value.Add(delta) }
 
 // Set 覆盖读数。
-func (g *Gauge) Set(v int64) {
-	if !enabled.Load() {
-		return
-	}
-	g.s.value.Store(v)
-}
+func (g *Gauge) Set(v int64) { g.s.value.Store(v) }
 
 // Value 返回当前读数。
 func (g *Gauge) Value() int64 { return g.s.value.Load() }
@@ -139,13 +146,19 @@ type Histogram struct{ s *series }
 
 // NewHistogram 注册并返回一个直方图；bounds 须升序，最后补一个 +Inf 桶。
 func NewHistogram(name string, bounds []float64) *Histogram {
+	for i, b := range bounds {
+		if math.IsNaN(b) || math.IsInf(b, 0) || b < 0 || (i > 0 && b <= bounds[i-1]) {
+			panic("metrics: invalid histogram bounds")
+		}
+	}
+	bounds = append([]float64(nil), bounds...)
 	return &Histogram{s: register(name, TypeHistogram, bounds)}
 }
 
 // Observe 记录一次观测值。
 func (h *Histogram) Observe(v float64) {
 	s := h.s
-	if !enabled.Load() {
+	if !Enabled() || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
 		return
 	}
 	s.observed.Add(1)
@@ -195,19 +208,12 @@ type Series struct {
 
 // Snapshot 输出全部注册序列，按名称排序；只供暴露层低频调用。
 func Snapshot() []Series {
-	mu.RLock()
-	names := make([]string, 0, len(seriesByName))
-	for name := range seriesByName {
-		names = append(names, name)
+	registered := registeredSeries.Load()
+	if registered == nil {
+		return []Series{}
 	}
-	mu.RUnlock()
-	sort.Strings(names)
-
-	out := make([]Series, 0, len(names))
-	for _, name := range names {
-		mu.RLock()
-		s := seriesByName[name]
-		mu.RUnlock()
+	out := make([]Series, 0, len(*registered))
+	for _, s := range *registered {
 		out = append(out, snapshotSeries(s))
 	}
 	return out
@@ -217,7 +223,6 @@ func snapshotSeries(s *series) Series {
 	out := Series{Name: s.name, Type: s.kind}
 	switch s.kind {
 	case TypeHistogram:
-		out.Count = s.observed.Load()
 		out.Sum = math.Float64frombits(s.sumBits.Load())
 		out.Buckets = make([]Bucket, 0, len(s.buckets))
 		for i := range s.buckets {
@@ -225,7 +230,9 @@ func snapshotSeries(s *series) Series {
 			if i < len(s.bounds) {
 				upper = s.bounds[i]
 			}
-			out.Buckets = append(out.Buckets, Bucket{Upper: upper, Count: s.buckets[i].Load()})
+			count := s.buckets[i].Load()
+			out.Count += count
+			out.Buckets = append(out.Buckets, Bucket{Upper: upper, Count: count})
 		}
 	default:
 		out.Value = s.value.Load()
@@ -233,49 +240,14 @@ func snapshotSeries(s *series) Series {
 	return out
 }
 
-// RuntimeInfo 是进程 runtime 在快照时刻的读数。CPU 占用没有跨平台的无依赖
-// 取法，这里用 GC CPU 分数近似；精确进程 CPU 需外部采集器。
-type RuntimeInfo struct {
-	Goroutines    int     `json:"goroutines"`
-	Gomaxprocs    int     `json:"gomaxprocs"`
-	Threads       int     `json:"threads"`
-	HeapAlloc     uint64  `json:"heap_alloc"`
-	HeapObjects   uint64  `json:"heap_objects"`
-	HeapSys       uint64  `json:"heap_sys"`
-	Sys           uint64  `json:"sys_mem"`
-	NextGC        uint64  `json:"next_gc"`
-	NumGC         uint32  `json:"gc_count"`
-	GCPauseLastNs uint64  `json:"gc_pause_last_ns"`
-	GCCPUFraction float64 `json:"gc_cpu_fraction"`
-}
-
-// RuntimeSnapshot 读取 runtime 指标。ReadMemStats 有短暂 STW，只允许暴露层调用。
-func RuntimeSnapshot() RuntimeInfo {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	info := RuntimeInfo{
-		Goroutines:    runtime.NumGoroutine(),
-		Gomaxprocs:    runtime.GOMAXPROCS(0),
-		Threads:       threadCount(),
-		HeapAlloc:     ms.HeapAlloc,
-		HeapObjects:   ms.HeapObjects,
-		HeapSys:       ms.HeapSys,
-		Sys:           ms.Sys,
-		NextGC:        ms.NextGC,
-		NumGC:         ms.NumGC,
-		GCCPUFraction: ms.GCCPUFraction,
+// MarshalJSON 用 null 表示无穷上界，避免 encoding/json 拒绝整个快照。
+func (b Bucket) MarshalJSON() ([]byte, error) {
+	var upper *float64
+	if !math.IsInf(b.Upper, 0) {
+		upper = &b.Upper
 	}
-	// PauseNs 是环形数组，取最近一次暂停。
-	if n := ms.NumGC; n > 0 {
-		info.GCPauseLastNs = ms.PauseNs[(n-1)%uint32(len(ms.PauseNs))]
-	}
-	return info
-}
-
-// threadCount 取 OS 线程数；profile 实例由 runtime 维护，Count 无锁且廉价。
-func threadCount() int {
-	if p := pprof.Lookup("threadcreate"); p != nil {
-		return p.Count()
-	}
-	return 0
+	return json.Marshal(struct {
+		Upper *float64 `json:"le"`
+		Count int64    `json:"count"`
+	}{upper, b.Count})
 }

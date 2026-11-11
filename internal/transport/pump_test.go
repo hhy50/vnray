@@ -258,3 +258,38 @@ func (b *limitedBuffer) Len() int { return len(b.data) }
 type eofReader struct{}
 
 func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+func TestTransferSnapshotDirections(t *testing.T) {
+	before := TransferSnapshot()
+	a := rwCloser{Reader: strings.NewReader("upload"), Writer: io.Discard, Closer: nopCloser{}}
+	b := rwCloser{Reader: strings.NewReader("down"), Writer: io.Discard, Closer: nopCloser{}}
+	ProxyBidirectional(a, b, "test.transfer.metrics")
+	after := TransferSnapshot()
+	if after.UploadBytes-before.UploadBytes != 6 || after.DownloadBytes-before.DownloadBytes != 4 || after.Requests-before.Requests != 1 || after.Active != before.Active {
+		t.Fatalf("transfer delta: before=%+v after=%+v", before, after)
+	}
+}
+
+type partialWriteFailure struct{}
+
+func (partialWriteFailure) Write([]byte) (int, error) { return 2, io.ErrClosedPipe }
+
+func TestPumpCountsPartialWrite(t *testing.T) {
+	var written, client, global atomic.Int64
+	aborted := false
+	p := pipeline{src: strings.NewReader("payload"), dst: partialWriteFailure{}, writeCnt: &written, clientCnt: &client, globalCnt: &global, abort: func() { aborted = true }, teardown: func() { t.Error("partial write must abort") }}
+	p.run(context.Background())
+	if !aborted || written.Load() != 2 || client.Load() != 2 || global.Load() != 2 {
+		t.Fatalf("partial write count = %d/%d/%d, aborted=%v", written.Load(), client.Load(), global.Load(), aborted)
+	}
+}
+
+type zeroWriter struct{}
+
+func (zeroWriter) Write([]byte) (int, error) { return 0, nil }
+
+func TestWriteAllRejectsNoProgress(t *testing.T) {
+	if n, err := writeAll(zeroWriter{}, []byte("payload")); n != 0 || err != io.ErrShortWrite {
+		t.Fatalf("writeAll = %d, %v", n, err)
+	}
+}

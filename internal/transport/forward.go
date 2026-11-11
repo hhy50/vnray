@@ -232,33 +232,41 @@ type ProxyOptions struct {
 
 // 隧道转发量与并发数：管理台图表的采样数据源，atomic 免锁、热路径只付一次加法。
 var (
-	tunnelTraffic atomic.Int64
-	tunnelActive  atomic.Int64
+	tunnelUp        atomic.Int64
+	tunnelDown      atomic.Int64
+	tunnelTotal     atomic.Int64
+	pumpAllocations atomic.Uint64
+	tunnelActive    atomic.Int64
 )
 
 // TunnelStats 返回累计转发字节数与当前活跃隧道数。
 func TunnelStats() (traffic int64, active int64) {
-	return tunnelTraffic.Load(), tunnelActive.Load()
+	return tunnelUp.Load() + tunnelDown.Load(), tunnelActive.Load()
 }
 
 // pumpBufSize 是泵的搬运块大小：16KiB 在低速率下节流更平滑，高速率下系统调用次数也可接受。
 const pumpBufSize = 16 * 1024
 
 // writeAll 完整写入 b，避免底层 Writer 部分写。
-func writeAll(w io.Writer, b []byte) error {
+func writeAll(w io.Writer, b []byte) (int, error) {
+	total := 0
 	for len(b) > 0 {
 		n, err := w.Write(b)
+		total += n
 		if err != nil {
-			return err
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
 		}
 		b = b[n:]
 	}
-	return nil
+	return total, nil
 }
 
 // pumpBufs 池化搬运缓冲：泵是常驻热路径，逐块分配是纯浪费。
 var pumpBufs = sync.Pool{
-	New: func() any { b := make([]byte, pumpBufSize); return &b },
+	New: func() any { b := make([]byte, pumpBufSize); pumpAllocations.Add(1); return &b },
 }
 
 // pipeline 是一条单向搬运管线：从 src 池化读 → （可选）限速 → 写 dst，并累计字节。
@@ -297,19 +305,20 @@ func (p *pipeline) run(ctx context.Context) {
 					return
 				}
 			}
-			werr := writeAll(p.dst, buf[:n])
+			written, werr := writeAll(p.dst, buf[:n])
 			if p.readCnt != nil {
 				p.readCnt.Add(int64(n))
 			}
-			if werr == nil {
+			if written > 0 {
 				if p.writeCnt != nil {
-					p.writeCnt.Add(int64(n))
+					p.writeCnt.Add(int64(written))
 				}
 				if p.clientCnt != nil {
-					p.clientCnt.Add(int64(n))
+					p.clientCnt.Add(int64(written))
 				}
-				p.globalCnt.Add(int64(n))
-			} else {
+				p.globalCnt.Add(int64(written))
+			}
+			if werr != nil {
 				return
 			}
 		}
@@ -355,6 +364,7 @@ func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptio
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	tunnelTotal.Add(1)
 	tunnelActive.Add(1)
 	defer tunnelActive.Add(-1)
 
@@ -381,7 +391,7 @@ func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptio
 		name: name + ".up", src: a, dst: b,
 		limiter: o.UpLimit, readCnt: o.Stats.UpReadRef(), writeCnt: o.Stats.UpWriteRef(),
 		clientCnt: o.ClientStats.UpWriteRef(),
-		globalCnt: &tunnelTraffic,
+		globalCnt: &tunnelUp,
 		teardown:  func() { closeWrite(b) },
 		abort:     abruptClose,
 	}
@@ -389,7 +399,7 @@ func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptio
 		name: name + ".down", src: b, dst: a,
 		limiter: o.DownLimit, readCnt: o.Stats.DownReadRef(), writeCnt: o.Stats.DownWriteRef(),
 		clientCnt: o.ClientStats.DownWriteRef(),
-		globalCnt: &tunnelTraffic,
+		globalCnt: &tunnelDown,
 		teardown:  func() { closeWrite(a) },
 		abort:     abruptClose,
 	}
@@ -399,4 +409,20 @@ func ProxyBidirectional(a, b io.ReadWriteCloser, name string, opts ...ProxyOptio
 	routine.Go(down.name, func() { defer wg.Done(); down.run(ctx) })
 	wg.Wait()
 	abruptClose()
+}
+
+// TransferInfo 是全部 TCP/UDP 泵的进程内累计值，不读取业务锁或持久层。
+type TransferInfo struct {
+	Requests             int64  `json:"requests"`
+	Active               int64  `json:"active"`
+	UploadBytes          int64  `json:"upload_bytes"`
+	DownloadBytes        int64  `json:"download_bytes"`
+	BufferAllocations    uint64 `json:"buffer_allocations"`
+	BufferAllocatedBytes uint64 `json:"buffer_allocated_bytes"`
+}
+
+// TransferSnapshot 返回已进入搬运阶段的请求与成功写入的载荷字节，不含协议开销。
+func TransferSnapshot() TransferInfo {
+	allocations := pumpAllocations.Load()
+	return TransferInfo{Requests: tunnelTotal.Load(), Active: tunnelActive.Load(), UploadBytes: tunnelUp.Load(), DownloadBytes: tunnelDown.Load(), BufferAllocations: allocations, BufferAllocatedBytes: allocations * pumpBufSize}
 }

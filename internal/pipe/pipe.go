@@ -13,6 +13,14 @@ import (
 // 记录进出缓冲的字节数；nil 时不统计。
 var bufferObserver atomic.Pointer[func(int64)]
 
+var allocations atomic.Uint64
+
+// BufferAllocations 返回懒分配环形缓冲的累计次数与字节数，不代表当前驻留内存。
+func BufferAllocations() (count, bytes uint64) {
+	count = allocations.Load()
+	return count, count * pipeLimit
+}
+
 // SetBufferObserver 注册缓冲字节观察者：delta 为本次进入（正）或离开（负）
 // 缓冲的字节数。必须在服务启动前调用，运行期不可替换。
 func SetBufferObserver(f func(int64)) {
@@ -94,6 +102,7 @@ func (w *Writer) Write(b []byte) (int, error) {
 		}
 		if q.buf == nil {
 			q.buf = ringbuffer.New(pipeLimit)
+			allocations.Add(1)
 		}
 		n, err := q.buf.Write(b[written:])
 		written += n

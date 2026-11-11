@@ -56,20 +56,22 @@ type AdminOptions struct {
 
 // AdminService 是 Web 管理面服务：会话认证 + Vue SPA + 业务 API。
 type AdminService struct {
-	streamStop  chan struct{}
-	stopOnce    sync.Once
-	requests    atomic.Int64
-	stopping    atomic.Bool
-	requestOnce sync.Once
-	requestDone chan struct{}
-	serveDone   chan struct{}
-	authDone    <-chan struct{}
-	cancel      context.CancelFunc
-	clients     *transport.SessionManager
-	opts        AdminOptions
-	started     time.Time
-	srv         *http.Server
-	auth        *AuthService
+	streamStop   chan struct{}
+	stopOnce     sync.Once
+	requests     atomic.Int64
+	stopping     atomic.Bool
+	requestOnce  sync.Once
+	requestDone  chan struct{}
+	serveDone    chan struct{}
+	authDone     <-chan struct{}
+	metricsDone  chan struct{}
+	metricsCache atomic.Pointer[metricsSnapshot]
+	cancel       context.CancelFunc
+	clients      *transport.SessionManager
+	opts         AdminOptions
+	started      time.Time
+	srv          *http.Server
+	auth         *AuthService
 	// addr 为实际监听地址，Start 之后可用。
 	addr string
 }
@@ -227,6 +229,11 @@ func (s *AdminService) Start(ctx context.Context) error {
 	s.srv.BaseContext = func(net.Listener) context.Context { return runCtx }
 	done := make(chan struct{})
 	s.serveDone = done
+	s.metricsDone = make(chan struct{})
+	routine.Go("admin.metrics.sample", func() {
+		defer close(s.metricsDone)
+		s.runMetrics(runCtx)
+	})
 	logging.Info("admin: web admin started", "addr", s.addr, "ui", uiPath)
 	if s.auth != nil {
 		s.authDone = s.auth.start(runCtx)
@@ -289,6 +296,7 @@ func (s *AdminService) WaitDrained(ctx context.Context) error {
 		{"requests", requestDone},
 		{"serve", s.serveDone},
 		{"auth cleanup", s.authDone},
+		{"metrics sampler", s.metricsDone},
 	}
 	if !stopping && (requests != 0 || serving) {
 		return errors.New("admin: drain has not started")

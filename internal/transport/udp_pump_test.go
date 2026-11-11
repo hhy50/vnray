@@ -15,6 +15,7 @@ import (
 
 // TestProxyDatagramBidirectional 双向搬运、上行限速计费、两侧统计与收尾。
 func TestProxyDatagramBidirectional(t *testing.T) {
+	before := TransferSnapshot()
 	a, aPeer := net.Pipe()
 	b, bPeer := net.Pipe()
 	aD := protocol.NewDatagramConn(a)
@@ -72,6 +73,10 @@ func TestProxyDatagramBidirectional(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("pump did not return after one side closed")
+	}
+	after := TransferSnapshot()
+	if after.UploadBytes-before.UploadBytes != 5 || after.DownloadBytes-before.DownloadBytes != 5 || after.Requests-before.Requests != 1 || after.Active != before.Active {
+		t.Fatalf("datagram transfer delta: before=%+v after=%+v", before, after)
 	}
 }
 

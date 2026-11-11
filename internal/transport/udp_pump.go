@@ -29,6 +29,7 @@ func ProxyDatagramBidirectional(a, b DatagramConn, name string, idle time.Durati
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	tunnelTotal.Add(1)
 	tunnelActive.Add(1)
 	defer tunnelActive.Add(-1)
 
@@ -84,13 +85,13 @@ func ProxyDatagramBidirectional(a, b DatagramConn, name string, idle time.Durati
 	up := &datagramPipe{
 		name: name + ".up", src: a, dst: b,
 		limiter: o.UpLimit, readCnt: o.Stats.UpReadRef(), writeCnt: o.Stats.UpWriteRef(),
-		clientCnt: o.ClientStats.UpWriteRef(), globalCnt: &tunnelTraffic,
+		clientCnt: o.ClientStats.UpWriteRef(), globalCnt: &tunnelUp,
 		activity: activity, onErr: closeBoth,
 	}
 	down := &datagramPipe{
 		name: name + ".down", src: b, dst: a,
 		limiter: o.DownLimit, readCnt: o.Stats.DownReadRef(), writeCnt: o.Stats.DownWriteRef(),
-		clientCnt: o.ClientStats.DownWriteRef(), globalCnt: &tunnelTraffic,
+		clientCnt: o.ClientStats.DownWriteRef(), globalCnt: &tunnelDown,
 		activity: activity, onErr: closeBoth,
 	}
 	wg.Add(2)

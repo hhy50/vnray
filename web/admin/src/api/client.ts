@@ -186,7 +186,7 @@ export const api = {
   serviceConfigSave: (body: ServiceConfig) =>
     request('/api/service-config', json('PUT', body)),
 
-  metrics: () => request<MetricsSnapshot>('/api/metrics'),
+  metrics: (signal?: AbortSignal) => request<MetricsSnapshot>('/api/metrics', { signal }),
 
   clientConfig: () => request<ClientConfig>('/api/client-config'),
   clientConfigSave: (body: ClientConfig) =>

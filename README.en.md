@@ -235,3 +235,11 @@ The example configuration is intended for local verification and contains public
 Admin configuration changes are not serialized across requests. Concurrent saves may overwrite one another, and inbound configuration changes may affect or disconnect existing connections. Shared account, authentication, and connection tables use concurrent containers; individual table operations do not make an entire admin operation transactional.
 
 vnray is under active development. Protocols, configuration, and admin console APIs may change. Issues and improvement suggestions are welcome.
+
+## Performance metrics
+
+The admin dashboard groups metrics into **Server, Process, and Operations**. When enabled, one background task samples every 2 seconds. The authenticated `/admin/ops/api/metrics` endpoint serves pre-encoded snapshots without database scans or request-time `ReadMemStats`.
+
+Linux / OpenWrt with procfs provides host CPU/memory/network rates and process CPU/RSS. Host values are OS-visible resources, not container quotas; process CPU uses 100% per core. Go heap, goroutines and GC are separate from physical memory and OS CPU. Operational metrics cover buffered payload, cumulative allocations, secure handshakes, heartbeat probes, requests entering transfer, and directional payload bytes.
+
+Disabling pauses resource sampling and event counters, but lifecycle gauges remain balanced across toggles. Transfer and allocation totals span the process lifetime. Unsupported or not-yet-sampled fields are `—`, never substituted with misleading zeros. macOS currently provides process CPU, host total memory and Go runtime data; other platforms retain Go runtime and operational metrics. See [ADR 0066](docs/adr/0066-background-metrics.md).

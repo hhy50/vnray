@@ -312,3 +312,26 @@ func TestNoObserverIsNoop(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 }
+
+func TestBufferAllocationIsLazyAndReused(t *testing.T) {
+	before, bytesBefore := BufferAllocations()
+	r, w := New()
+	_ = w.Close()
+	if after, _ := BufferAllocations(); after != before {
+		t.Fatal("empty pipe allocated a buffer")
+	}
+	r, w = New()
+	for range 2 {
+		if _, err := w.Write([]byte("abc")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(r, make([]byte, 3)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Interrupt()
+	after, bytesAfter := BufferAllocations()
+	if after-before != 1 || bytesAfter-bytesBefore != pipeLimit {
+		t.Fatalf("allocations = %d, bytes = %d", after-before, bytesAfter-bytesBefore)
+	}
+}

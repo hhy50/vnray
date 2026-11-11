@@ -5,8 +5,14 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
 	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/transport"
+)
+
+var (
+	heartbeatAttempts = metrics.NewCounter("client_heartbeats_total")
+	heartbeatFailures = metrics.NewCounter("client_heartbeat_failures_total")
 )
 
 // HeartbeatOptions 是服务端侧的心跳策略。
@@ -113,8 +119,10 @@ func (s *ConnectorService) clientSessions() []*transport.Session {
 
 // pingSession 对单个会话做一次探测，把成功结果写回会话。
 func (s *ConnectorService) pingSession(sess *transport.Session) {
+	heartbeatAttempts.Inc()
 	rtt, err := sess.PingRTT(s.currentHeartbeat().Timeout)
 	if err != nil {
+		heartbeatFailures.Inc()
 		// 会话已关闭时这里必然报错，不再重复记日志。
 		if sess.IsClosed() {
 			return

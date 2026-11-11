@@ -16,8 +16,7 @@ import (
 type ServiceSettings struct {
 	// TransportEncryption 只影响新连接，缺省开启。
 	TransportEncryption bool `json:"transport_encryption"`
-	// MetricsEnabled 是进程性能指标的采集总开关：默认关闭；开启后采集指标并
-	// 暴露管理台指标接口。热改即时生效。
+	// MetricsEnabled 控制后台采样、事件累计与指标接口；状态量不受开关影响。
 	MetricsEnabled bool                 `json:"metrics_enabled"`
 	GlobalClient   GlobalClientSettings `json:"global_client"`
 	// PublicHost 同 Server.PublicHost：vmess:// 分享链接对外暴露的裸主机。

@@ -250,9 +250,9 @@ export interface ServiceConfig {
   log_to_file: boolean
 }
 
-// MetricsBucket 是直方图单桶快照；le 为上界（秒），最后一桶为 Infinity。
+// MetricsBucket 是直方图单桶快照；le 为上界（秒），最后一桶用 null 表示无穷上界。
 export interface MetricsBucket {
-  le: number
+  le: number | null
   count: number
 }
 
@@ -267,24 +267,45 @@ export interface MetricsSeries {
   buckets?: MetricsBucket[]
 }
 
-// MetricsRuntime 是进程 runtime 的即时读数。
-export interface MetricsRuntime {
-  goroutines: number
-  gomaxprocs: number
-  threads: number
-  heap_alloc: number
-  heap_objects: number
-  heap_sys: number
-  sys_mem: number
-  next_gc: number
-  gc_count: number
-  gc_pause_last_ns: number
-  gc_cpu_fraction: number
+export interface MetricsServer {
+  cpu_percent: number | null
+  memory_total: number | null
+  memory_used: number | null
+  receive_bytes_per_second: number | null
+  transmit_bytes_per_second: number | null
+  interfaces: number
 }
 
-// MetricsSnapshot 是 /api/metrics 的完整快照。
+export interface MetricsProcess {
+  cpu_percent: number | null
+  resident_bytes: number | null
+  goroutines: number
+  gomaxprocs: number
+  heap_alloc: number
+  heap_objects: number
+  go_memory: number
+  next_gc: number
+  gc_count: number
+  gc_pause_p99_seconds: number | null
+  gc_cpu_percent: number | null
+}
+
+export interface MetricsTransfer {
+  requests: number
+  active: number
+  upload_bytes: number
+  download_bytes: number
+  buffer_allocations: number
+  buffer_allocated_bytes: number
+}
+
 export interface MetricsSnapshot {
+  sampled_at: string
   uptime_seconds: number
-  runtime: MetricsRuntime
+  server: MetricsServer
+  process: MetricsProcess
+  transfer: MetricsTransfer
+  pipe_allocations: number
+  pipe_allocated_bytes: number
   metrics: MetricsSeries[]
 }
