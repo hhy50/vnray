@@ -82,6 +82,8 @@ func DialContext(ctx context.Context, addr string, dispatcher dispatch.Dispatche
 	if err != nil {
 		return nil, err
 	}
+	// 握手成功即输出协商出的传输模式，便于排查"客户端为什么是明文"这类问题。
+	logging.Info("client: handshake succeeded", "server", addr, "encrypted", conn.Encrypted())
 	muxer := opts.Muxer
 	if muxer == nil {
 		muxer = tcp.DefaultMuxer()
