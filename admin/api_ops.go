@@ -531,6 +531,9 @@ func (s *AdminService) apiKeySave(w http.ResponseWriter, r *http.Request) {
 	}
 	key := authkey.Generate()
 	scope := strings.TrimSpace(in.Scope)
+	if scope == "" {
+		scope = "default:*"
+	}
 	if err := s.opts.Bindings.SetAuthKey(r.Context(), key, scope); err != nil {
 		apiFailKey(w, r, http.StatusBadRequest, msgOpFailedDetail, err)
 		return

@@ -15,7 +15,7 @@ const loading = ref(false)
 
 const showAdd = ref(false)
 const saving = ref(false)
-const form = reactive({ scope: '*' })
+const form = reactive({ scope: 'default:*' })
 const generatedKey = ref('')
 
 const scopeOptions = computed(() => [
@@ -38,7 +38,7 @@ async function load() {
 
 function openAdd() {
   generatedKey.value = ''
-  form.scope = '*'
+  form.scope = 'default:*'
   showAdd.value = true
 }
 
@@ -46,7 +46,7 @@ async function save() {
   if (saving.value || generatedKey.value) return
   saving.value = true
   try {
-    const result = await api.keySave({ scope: form.scope.trim() || '*' })
+    const result = await api.keySave({ scope: form.scope.trim() || 'default:*' })
     generatedKey.value = result.key
     form.scope = result.scope
     ElMessage.success(t('keys.saved'))

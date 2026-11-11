@@ -38,7 +38,7 @@ func initialDatabaseData(cfg *config.Server) (store.InitialData, error) {
 		return store.InitialData{}, err
 	}
 	return store.InitialData{
-		AuthKey:  store.AuthKey{Key: initialClientAuthKey, Scope: "*"},
+		AuthKey:  store.AuthKey{Key: initialClientAuthKey, Scope: "default:*"},
 		Settings: settings, Rules: rules, Plugins: plugins,
 	}, nil
 }

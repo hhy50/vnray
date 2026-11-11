@@ -29,7 +29,7 @@ func TestInitialClientAuthKey(t *testing.T) {
 	}
 	st := open()
 	keys, err := st.ListAuthKeys(ctx)
-	if err != nil || len(keys) != 1 || keys[0].Key != initialClientAuthKey || keys[0].Scope != "*" {
+	if err != nil || len(keys) != 1 || keys[0].Key != initialClientAuthKey || keys[0].Scope != "default:*" {
 		t.Fatalf("initial key missing or incorrect: count=%d, err=%v", len(keys), err)
 	}
 	if _, err := authkey.Parse(keys[0].Key); err != nil {
@@ -39,7 +39,7 @@ func TestInitialClientAuthKey(t *testing.T) {
 	if err := b.ReloadAuthKeys(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"default:edge", "office:edge"} {
+	for _, name := range []string{"default:edge", "default:office"} {
 		if configured, allowed := b.MatchClientAuthKey(context.Background(), name, initialClientAuthKey); !configured || !allowed {
 			t.Fatalf("initial key does not authorize %q", name)
 		}
