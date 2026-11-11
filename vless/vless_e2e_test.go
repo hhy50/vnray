@@ -105,7 +105,7 @@ func runVlessPlugin(t *testing.T, useTLS bool, exercise func(net.Conn)) {
 
 	agent, err := client.Dial(svc.Addr(), directDispatcher(), client.DialOptions{
 		Auth:  client.AuthOptions{Key: "p4Gz4T0rgJV9G5JYBBSPZmzIets1wUgWhqlofyf42KA="},
-		Info:  protocol.ClientInfo{Name: "test-edge", Version: "e2e", OS: "test", Arch: "test"},
+		Info:  protocol.ClientInfo{Group: "test", Name: "edge", Version: "e2e", OS: "test", Arch: "test"},
 		Muxer: tcp.YamuxMuxer(),
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func runVlessPlugin(t *testing.T, useTLS bool, exercise func(net.Conn)) {
 	// vless 用户以 protocol=vless 登记：该协议只进 vless 入站的验证器。
 	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eUUID, Protocol: store.ProtocolVLESS, Name: "e2e-vless",
-		Status: store.UserEnabled, Client: "test-edge",
+		Status: store.UserEnabled, Client: "test:edge",
 	}); err != nil {
 		t.Fatalf("register uuid: %v", err)
 	}

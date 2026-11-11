@@ -2,41 +2,85 @@ package config
 
 import "testing"
 
-// TestValidateClientName 覆盖 namespace:group:name 三段格式的合法与非法输入。
-func TestValidateClientName(t *testing.T) {
+func TestValidateClientIdentity(t *testing.T) {
 	for _, tt := range []struct {
+		group string
 		name  string
 		valid bool
 	}{
-		{"default:default:host-192.168.0.2", true},
-		{"team1:laptop:x", true},
-		{"a:b:c", true},
-		{"edge-1", false},    // 旧的单段名字不再合法
-		{"a:b", false},       // 少一段
-		{"a:b:c:d", false},   // 多一段
-		{"a::c", false},      // 段为空
-		{":b:c", false},      // namespace 为空
-		{"a:b:", false},      // name 为空
-		{"team*:g:c", false}, // 通配符与服务端范围 key 语义冲突
-		{"a:b:c*", false},    // 通配符在尾段
+		{"default", "host-192.168.0.2", true},
+		{"office", "edge-1", true},
+		{"", "edge-1", false},
+		{"office", "", false},
+		{"", "", false},
+		{"", "default:edge-1", false},
+		{"office", "default:edge-1", false},
+		{"office:lab", "edge-1", false},
+		{"team*", "edge-1", false},
+		{"office", "edge*", false},
+		{"office", "*", false},
 	} {
-		err := ValidateClientName(tt.name)
+		err := ValidateClientIdentity(tt.group, tt.name)
 		if (err == nil) != tt.valid {
-			t.Errorf("ValidateClientName(%q) = %v, want valid=%v", tt.name, err, tt.valid)
+			t.Errorf("ValidateClientIdentity(%q, %q) = %v, want valid=%v", tt.group, tt.name, err, tt.valid)
 		}
 	}
 }
 
-// TestClientValidateNameFormat 校验 Client.Validate 会拦截非三段格式的 name，
-// 留空则继续走默认名路径。
 func TestClientValidateNameFormat(t *testing.T) {
-	c := DefaultClient()
-	c.Name = "edge-1"
-	if err := c.Validate(); err == nil {
-		t.Error("Validate with legacy one-segment name: want error")
+	for _, tc := range []struct {
+		label string
+		group string
+		name  string
+		valid bool
+	}{
+		{"defaults", "", "", true},
+		{"group only", "office", "", true},
+		{"name only", "", "edge-1", true},
+		{"explicit identity", "office", "edge-1", true},
+		{"group separator", "office:lab", "edge-1", false},
+		{"group wildcard", "office*", "edge-1", false},
+		{"group wildcard with generated name", "*", "", false},
+		{"combined name", "", "office:edge-1", false},
+		{"conflicting group", "office", "default:edge-1", false},
+		{"legacy name", "", "default:default:edge-1", false},
+		{"name wildcard", "office", "edge*", false},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			c := DefaultClient()
+			c.Group = tc.group
+			c.Name = tc.name
+			if err := c.Validate(); (err == nil) != tc.valid {
+				t.Errorf("Validate group %q name %q = %v, want valid=%v", tc.group, tc.name, err, tc.valid)
+			}
+		})
 	}
-	c.Name = "default:default:edge-1"
-	if err := c.Validate(); err != nil {
-		t.Errorf("Validate with full name: %v", err)
+}
+
+func TestLoadClientIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		yaml  string
+		group string
+		name  string
+	}{
+		{"defaults", "{}", DefaultClientGroup, ""},
+		{"group only", "group: office\n", "office", ""},
+		{"name only", "name: edge-1\n", DefaultClientGroup, "edge-1"},
+		{"explicit identity", "group: office\nname: edge-1\n", "office", "edge-1"},
+		{"empty group", "group: ''\nname: edge-1\n", "", "edge-1"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			cfg := DefaultClient()
+			if err := Load(writeYAML(t, tc.yaml), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Group != tc.group || cfg.Name != tc.name {
+				t.Fatalf("loaded group=%q name=%q, want group=%q name=%q", cfg.Group, cfg.Name, tc.group, tc.name)
+			}
+		})
 	}
 }

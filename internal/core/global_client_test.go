@@ -23,7 +23,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	defer cancel()
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "edge", ServerConfig: `{"custom_hosts":[{"domain":"local.route","ip":"10.0.0.1"}],"ip_maps":[{"from":"186.12.12.1","to":"10.0.0.1"}]}`}); err != nil {
+	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "default:edge", ServerConfig: `{"custom_hosts":[{"domain":"local.route","ip":"10.0.0.1"}],"ip_maps":[{"from":"186.12.12.1","to":"10.0.0.1"}]}`}); err != nil {
 		t.Fatal(err)
 	}
 	limits := ratelimit.NewRegistry()
@@ -70,7 +70,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	connect := func() (*client.Client, <-chan protocol.PushConfig) {
 		t.Helper()
 		updates := make(chan protocol.PushConfig, 32)
-		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key}, Info: protocol.ClientInfo{Name: "edge"}, OnConfig: func(v protocol.PushConfig) { updates <- v }})
+		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key}, Info: protocol.ClientInfo{Group: "default", Name: "edge"}, OnConfig: func(v protocol.PushConfig) { updates <- v }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +94,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	}
 	c, updates := connect()
 	defer c.Close()
-	waitConfig(updates, b.PushConfig(context.Background(), "edge"))
+	waitConfig(updates, b.PushConfig(context.Background(), "default:edge"))
 	// 强制保存发生在认证应答与会话登记之间，验证补发可消除这个窗口。
 	select {
 	case <-authenticated:
@@ -123,7 +123,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 			t.Error("client Serve did not stop")
 		}
 	}()
-	waitConfig(updates, b.PushConfig(context.Background(), "edge"))
+	waitConfig(updates, b.PushConfig(context.Background(), "default:edge"))
 	next.GlobalClient.CustomHosts[0].IP = "192.168.60.10"
 	if sc.Current().GlobalClient.CustomHosts[0].IP != "192.168.60.9" {
 		t.Fatal("Apply retained caller slice")
@@ -131,7 +131,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	if err := sc.Apply(context.Background(), next); err != nil {
 		t.Fatal(err)
 	}
-	waitConfig(updates, b.PushConfig(context.Background(), "edge"))
+	waitConfig(updates, b.PushConfig(context.Background(), "default:edge"))
 	loaded := loadServiceSettings(ctx, st, &cfg)
 	if !reflect.DeepEqual(loaded.GlobalClient, next.GlobalClient) {
 		t.Fatalf("persisted config: %+v", loaded.GlobalClient)
@@ -139,7 +139,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	_ = c.Close()
 	reconnected, reconnectUpdates := connect()
 	defer reconnected.Close()
-	waitConfig(reconnectUpdates, b.PushConfig(context.Background(), "edge"))
+	waitConfig(reconnectUpdates, b.PushConfig(context.Background(), "default:edge"))
 	reconnectDone := make(chan error, 1)
 	go func() { reconnectDone <- reconnected.Serve() }()
 	defer func() {
@@ -157,7 +157,7 @@ func TestGlobalClientLiveConfig(t *testing.T) {
 	if err := sc.Apply(context.Background(), next); err != nil {
 		t.Fatal(err)
 	}
-	waitConfig(reconnectUpdates, protocol.PushConfig{ClientConfig: b.ClientPushConfig(context.Background(), "edge")})
+	waitConfig(reconnectUpdates, protocol.PushConfig{ClientConfig: b.ClientPushConfig(context.Background(), "default:edge")})
 	if loaded := loadServiceSettings(ctx, st, &cfg); len(loaded.GlobalClient.CustomHosts) != 0 || len(loaded.GlobalClient.IPMaps) != 0 {
 		t.Fatalf("clear did not persist: %+v", loaded.GlobalClient)
 	}
@@ -171,7 +171,7 @@ func TestClientResolvesPushedLayers(t *testing.T) {
 	defer cancel()
 	st := testStore(t)
 	b := admin.NewBindings(st)
-	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "edge", ServerConfig: `{"custom_hosts":[{"domain":"vpn.route","ip":"10.0.0.9"}],"ip_maps":[{"from":"186.12.12.1","to":"10.0.0.1"}]}`}); err != nil {
+	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "default:edge", ServerConfig: `{"custom_hosts":[{"domain":"vpn.route","ip":"10.0.0.9"}],"ip_maps":[{"from":"186.12.12.1","to":"10.0.0.1"}]}`}); err != nil {
 		t.Fatal(err)
 	}
 	limits := ratelimit.NewRegistry()
@@ -205,7 +205,7 @@ func TestClientResolvesPushedLayers(t *testing.T) {
 	// 与生产装配一致（cmd/client/client_app.go）：两层交给共享表，拨号前查表改写。
 	hosts, ipMaps := dispatch.NewHosts(), dispatch.NewIPMaps()
 	c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key},
-		Info: protocol.ClientInfo{Name: "edge"},
+		Info: protocol.ClientInfo{Group: "default", Name: "edge"},
 		OnConfig: func(v protocol.PushConfig) {
 			hosts.UpdateLayers(v.ClientConfig.CustomHosts, v.GlobalConfig.CustomHosts)
 			ipMaps.UpdateLayers(v.ClientConfig.IPMaps, v.GlobalConfig.IPMaps)
@@ -278,12 +278,12 @@ func TestClientResolvesPushedLayers(t *testing.T) {
 	}
 
 	// 清空独立层后同名规则回落到全局层，全局规则保持热更新后的值。
-	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "edge"}); err != nil {
+	if err := b.SetClient(context.Background(), admin.ClientBinding{ClientKey: "default:edge"}); err != nil {
 		t.Fatal(err)
 	}
 	pushed := false
 	for _, s := range svc.sessions.ClientSessions() {
-		if s.Info().Name != "edge" {
+		if s.Info().ClientKey() != "default:edge" {
 			continue
 		}
 		if err := b.PushClientConfig(context.Background(), s); err != nil {

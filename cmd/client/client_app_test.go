@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"reflect"
@@ -15,7 +16,8 @@ import (
 // 上报信息必须带上生效配置：翻译结果经 ConfigReport 帧编解码往返后逐字段不丢。
 func TestNewClientInfoCarriesConfig(t *testing.T) {
 	cfg := config.DefaultClient()
-	cfg.Name = "default:default:edge-1"
+	cfg.Group = "office"
+	cfg.Name = "edge-1"
 	cfg.Public = "192.168.31.*"
 	cfg.Private = "127.0.0.0/8,10.0.0.0/8"
 	cfg.Log = &config.Log{Level: "debug", Output: "stdout", Console: true}
@@ -23,6 +25,9 @@ func TestNewClientInfoCarriesConfig(t *testing.T) {
 	reconnect.Interval = config.Duration(10 * time.Second)
 
 	info := newClientInfo(cfg, reconnect)
+	if info.Group != "office" || info.Name != "edge-1" {
+		t.Fatalf("identity = %q/%q, want office/edge-1", info.Group, info.Name)
+	}
 
 	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: info})
 	if err != nil {
@@ -31,6 +36,15 @@ func TestNewClientInfoCarriesConfig(t *testing.T) {
 	payload, err := protocol.ReadPayload(frame)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var wire struct {
+		Client map[string]json.RawMessage `json:"client"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if string(wire.Client["group"]) != `"office"` || string(wire.Client["name"]) != `"edge-1"` || wire.Client["key"] != nil {
+		t.Fatalf("reported identity fields = %s", payload)
 	}
 	req, err := protocol.ParseConfigReportRequest(payload)
 	if err != nil {
@@ -56,23 +70,54 @@ func TestMissingTransportKeyRejected(t *testing.T) {
 	}
 }
 
-// 未配置 name 时默认名为 default:default:${hostname}-${ip}；拿不到 IPv4 则退化成
-// 不带 IP 后缀，任何情况下都不应为空或保留旧的单段格式。
 func TestNewClientInfoDefaultName(t *testing.T) {
-	cfg := config.DefaultClient()
 	hostname, _ := os.Hostname()
-
-	info := newClientInfo(cfg, config.DefaultReconnect())
-
-	if info.Name == "" {
-		t.Fatal("default name must not be empty")
+	for _, tc := range []struct {
+		group     string
+		wantGroup string
+	}{
+		{"default", "default"},
+		{"", "default"},
+		{"office", "office"},
+	} {
+		t.Run(tc.group, func(t *testing.T) {
+			cfg := config.DefaultClient()
+			cfg.Group = tc.group
+			info := newClientInfo(cfg, config.DefaultReconnect())
+			if err := config.ValidateClientIdentity(info.Group, info.Name); err != nil {
+				t.Fatalf("default name is invalid: %v", err)
+			}
+			if info.Group != tc.wantGroup {
+				t.Fatalf("group = %q, want %q", info.Group, tc.wantGroup)
+			}
+			wantPrefix := hostname
+			if info.Name != wantPrefix && !strings.HasPrefix(info.Name, wantPrefix+"-") {
+				t.Fatalf("default name = %q, want %q or %q-<ip>", info.Name, wantPrefix, wantPrefix)
+			}
+			if ip := primaryIPv4(); ip != "" && !strings.HasSuffix(info.Name, "-"+ip) {
+				t.Errorf("name %q should end with primary IPv4 %q", info.Name, ip)
+			}
+		})
 	}
-	wantPrefix := config.DefaultClientNamespace + ":" + config.DefaultClientGroup + ":" + hostname
-	if info.Name != wantPrefix && !strings.HasPrefix(info.Name, wantPrefix+"-") {
-		t.Fatalf("default name = %q, want %q or %q-<ip>", info.Name, wantPrefix, wantPrefix)
-	}
-	if ip := primaryIPv4(); ip != "" && !strings.HasSuffix(info.Name, "-"+ip) {
-		t.Errorf("name %q should end with primary IPv4 %q", info.Name, ip)
+}
+
+func TestNewClientInfoExplicitName(t *testing.T) {
+	for _, tc := range []struct {
+		group string
+		want  string
+	}{
+		{"default", "default"},
+		{"", "default"},
+		{"office", "office"},
+	} {
+		t.Run(tc.group, func(t *testing.T) {
+			cfg := config.DefaultClient()
+			cfg.Group = tc.group
+			cfg.Name = "edge-1"
+			if got := newClientInfo(cfg, config.DefaultReconnect()); got.Group != tc.want || got.Name != "edge-1" {
+				t.Fatalf("identity = %q/%q, want %s/edge-1", got.Group, got.Name, tc.want)
+			}
+		})
 	}
 }
 

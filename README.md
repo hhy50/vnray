@@ -126,12 +126,18 @@ go run ./cmd/client -c configs/client.yaml
 
 需要额外密钥时，打开管理台 `http://<服务端地址>:8080`，登录后在**认证密钥**页面选择范围并生成密钥，复制到客户端配置即可；添加接口不接受手工指定密钥。
 
+客户端配置分别设置 `group`（分组）和 `name`（组内实例名），上报时使用两个独立的 JSON 字段，例如 `{"group":"office","name":"desktop-01"}`；服务端内部绑定键仍为 `office:desktop-01`。管理台客户端列表分别展示分组和名称。`group` 不填或留空时使用 `default`；`name` 留空时生成 `<hostname>-<IPv4>`，取不到 IPv4 则省略 IP 后缀。两项都不能包含 `:` 或 `*`。密钥范围支持 `*`（全部客户端）、`office:*`（office 分组）和 `office:desktop-01`（单个客户端）。`server:self` 保留给服务端本机出口。
+
+**名称升级（BREAKING）**：已取消 namespace，旧 `namespace:group:name` 不再接受，两端需同步升级。请同步调整客户端名称、用户绑定、端口映射、客户端专属配置和密钥授权范围；不同 namespace 下同名客户端合并分组前需先消除重名。数据库不自动改写；已有 `*` 范围继续适用，`X:*` 现在表示分组 X，旧三段精确范围需改为两段，可在管理台重新生成密钥并更新客户端。原来的 `name: office:desktop-01` 需拆成 `group: office` 和 `name: desktop-01`，完整身份不变时无需调整服务端绑定或密钥。详见 [ADR 0062](docs/adr/0062-client-groups.md)、[ADR 0063](docs/adr/0063-client-group-config.md) 与 [ADR 0064](docs/adr/0064-client-report-identity-fields.md)。旧版仅上报拼接 name 的客户端也需要同步升级；独立字段格式见 [上报协议](docs/PROTOCOL.md)。
+
 编辑 [`configs/client.yaml`](configs/client.yaml)：
 
 ```yaml
 server:
   addr: <服务端公网地址>:9000
   auth_key: 2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=
+group: office
+name: desktop-01
 ```
 
 不使用管理台时，也可使用初始密钥连接。密钥表非空时只使用表内密钥及其范围授权，配置文件密钥不生效。清空密钥表后，可执行 `./vnserver keygen`，将输出的同一密钥填入服务端 `server.auth.key` 和客户端 `server.auth_key`，作为配置文件回退。密钥为 32 字节随机数的标准 Base64 编码；没有可用密钥时拒绝客户端连接。
@@ -229,7 +235,7 @@ SS 用户的分享链接包含所选加密类型和密码，使用服务端配�
 示例配置仅用于本地验证，包含公开的管理台默认凭据。将服务暴露到公网前，请至少完成以下操作：
 
 - 修改管理台账号和密码；
-- 为客户端生成密钥，并按客户端或 namespace 设置授权范围；
+- 为客户端生成密钥，并按客户端或分组 设置授权范围；
 - 只开放实际需要的端口，并限制管理台的访问来源；
 - 为用户设置合理的带宽、并发和客户端访问范围；
 - 生产环境优先启用 VLESS TLS，并妥善保管证书与密钥。

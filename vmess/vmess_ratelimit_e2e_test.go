@@ -112,7 +112,7 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 	// D：项目客户端，与 B 同网（本测试里都在本机），用直连出站访问 B。
 	agent, err := client.Dial(svc.Addr(), directDispatcher(), client.DialOptions{
 		Auth: client.AuthOptions{Key: "BobNgLwSfFd3+gss1vTKhgq2pHfpkVwJA0bBB2vW6T8="},
-		Info: protocol.ClientInfo{Name: "test-edge", Version: "rl", OS: "test", Arch: "test"},
+		Info: protocol.ClientInfo{Group: "test", Name: "edge", Version: "rl", OS: "test", Arch: "test"},
 	})
 	if err != nil {
 		t.Fatalf("client dial: %v", err)
@@ -160,14 +160,14 @@ func testV2RayRateLimitDownload(t *testing.T, finishRequest bool) {
 		t.Fatalf("enable v2ray: %v", err)
 	}
 
-	// setLimit 更新该 uuid 用户的限速配置（同时推限速桶与路由）；Client 固定为 test-edge。
+	// setLimit 更新该 uuid 用户的限速配置（同时推限速桶与路由）；Client 固定为 test:edge。
 	setLimit := func(upBps, downBps int64) {
 		if err := bindings.PutUser(context.Background(), store.UserBinding{
 			Key:      rateLimitUUID,
 			Protocol: store.ProtocolVMess,
 			Name:     "e2e-ratelimit",
 			Status:   store.UserEnabled,
-			Client:   "test-edge",
+			Client:   "test:edge",
 			Config:   store.UserConfig{UpLimit: upBps, DownLimit: downBps},
 		}); err != nil {
 			t.Fatalf("put user: %v", err)

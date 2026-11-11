@@ -134,12 +134,18 @@ Database startup prepares the schema, then writes the initial key, service setti
 
 For additional keys, sign in at `http://<server-address>:8080`, choose a scope on the **Authentication keys** page, and generate a key to copy into the client configuration. The creation API does not accept manually supplied keys.
 
+Configure `group` and `name` separately; the client reports independent JSON fields, for example `{"group":"office","name":"desktop-01"}`. The server retains `office:desktop-01` as its internal binding key. The admin client list displays group and name separately. An omitted or empty `group` uses `default`. An omitted or empty `name` generates `<hostname>-<IPv4>`; the IP suffix is omitted if no IPv4 address is available. Neither field may contain `:` or `*`. Key scopes accept `*` for all clients, `office:*` for the office group, or `office:desktop-01` for one client. `server:self` is reserved for local server egress.
+
+**Client name upgrade (BREAKING):** The namespace layer has been removed, and legacy `namespace:group:name` names are rejected. Upgrade both ends together and update client names, user bindings, port mappings, per-client settings, and key scopes. Resolve duplicate names across former namespaces before merging groups. Database records are not rewritten automatically. Existing `*` scopes still apply; `X:*` now means group X. Replace legacy three-segment exact scopes with two-segment scopes; the admin console can generate replacement keys for the clients. Split an existing `name: office:desktop-01` into `group: office` and `name: desktop-01`; preserving the full identity requires no server binding or key changes. See [ADR 0062](docs/adr/0062-client-groups.md), [ADR 0063](docs/adr/0063-client-group-config.md), and [ADR 0064](docs/adr/0064-client-report-identity-fields.md). Clients that report only a combined name must also upgrade together with the server; see the [report protocol](docs/PROTOCOL.md).
+
 Edit [`configs/client.yaml`](configs/client.yaml):
 
 ```yaml
 server:
   addr: <public-server-address>:9000
   auth_key: 2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=
+group: office
+name: desktop-01
 ```
 
 The initial key also works without the admin console. A nonempty managed key table takes precedence over the configuration key. After clearing that table, run `./vnserver keygen` and copy its output into both the server's `server.auth.key` and the client's `server.auth_key` to use the configuration fallback. Keys encode 32 random bytes in standard Base64, and clients are rejected when no valid key is available. Start the client on a machine that can reach the target service:
@@ -219,7 +225,7 @@ The client also supports temporarily overriding the server address from the comm
 The example configuration is intended for local verification and contains public default admin credentials. Before exposing the service to the public Internet:
 
 - Change the admin username and password.
-- Generate client keys and restrict their authorization scope to the intended clients or namespaces.
+- Generate client keys and restrict their authorization scope to the intended clients or groups.
 - Open only the ports you actually need and restrict access to the admin console.
 - Set reasonable bandwidth, concurrency, and client access limits for each user.
 - For production use, prefer VLESS with TLS and protect the certificates and private keys carefully.

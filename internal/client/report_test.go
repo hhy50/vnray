@@ -94,11 +94,11 @@ func TestPeriodicConfigReport(t *testing.T) {
 		return protocol.NewEncoder(stream).WriteFrame(frame)
 	}, DialOptions{
 		ReportInfo: func() protocol.ClientInfo {
-			return protocol.ClientInfo{Name: "edge", Hostname: hostname.Load().(string)}
+			return protocol.ClientInfo{Group: "office", Name: "edge", Hostname: hostname.Load().(string)}
 		},
 		OnConfig: func(cfg protocol.PushConfig) { updates <- cfg.Revision },
 	})
-	if info := <-reports; info.Hostname != "initial" {
+	if info := <-reports; info.Hostname != "initial" || info.Group != "office" || info.Name != "edge" {
 		t.Fatalf("initial report: %+v", info)
 	}
 	if revision := <-updates; revision != 1 {
@@ -112,7 +112,7 @@ func TestPeriodicConfigReport(t *testing.T) {
 	for i := uint64(2); i <= 3; i++ {
 		select {
 		case info := <-reports:
-			if info.Hostname != "refreshed" {
+			if info.Hostname != "refreshed" || info.Group != "office" || info.Name != "edge" {
 				t.Fatalf("periodic report: %+v", info)
 			}
 		case <-time.After(2 * time.Second):

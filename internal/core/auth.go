@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/authkey"
+	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/secure"
@@ -44,10 +45,11 @@ func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, erro
 	}
 	client := transport.NewSession(session, session.RemoteAddr().String(), info)
 	s.saveClientReport(ctx, client, info)
+	clientKey := info.ClientKey()
 	// 日志级别、并发上限与下发快照一次读出：握手路径上少两次点查。
 	var runtime transport.ClientRuntime
 	if s.sessionCfg != nil {
-		runtime = s.sessionCfg.ClientRuntime(ctx, info.Name)
+		runtime = s.sessionCfg.ClientRuntime(ctx, clientKey)
 		client.SetClientConcurrency(runtime.Concurrency)
 	}
 	if err := client.SendConfigReportResult(stream, func() protocol.PushConfig { return runtime.Push }); err != nil {
@@ -57,8 +59,8 @@ func (s *ConnectorService) Handshake(session tcp.Session) (tcp.SessionInfo, erro
 		Session: session,
 		Remote:  session.RemoteAddr().String(),
 		Kind:    tcp.KindClient,
-		Name:    info.Name,
-		Log:     logging.NewScoped(runtime.LogLevel, "client", info.Name),
+		Name:    clientKey,
+		Log:     logging.NewScoped(runtime.LogLevel, "client", clientKey),
 		Meta:    client,
 	}, nil
 }
@@ -107,10 +109,14 @@ func (s *ConnectorService) readClientReport(ctx context.Context, session tcp.Ses
 	if err != nil {
 		return protocol.ClientInfo{}, ErrAuthRejected
 	}
-	if req.Info.Name == transport.LocalClientName || (established && req.Info.Name != name) {
-		return protocol.ClientInfo{}, fmt.Errorf("%w: invalid client name", ErrAuthRejected)
+	if err := config.ValidateClientIdentity(req.Info.Group, req.Info.Name); err != nil {
+		return protocol.ClientInfo{}, fmt.Errorf("%w: %v", ErrAuthRejected, err)
 	}
-	if err := s.verifyKey(ctx, req.Info.Name, base64.StdEncoding.EncodeToString(key[:])); err != nil {
+	clientKey := req.Info.ClientKey()
+	if clientKey == transport.LocalClientName || (established && clientKey != name) {
+		return protocol.ClientInfo{}, fmt.Errorf("%w: invalid client identity", ErrAuthRejected)
+	}
+	if err := s.verifyKey(ctx, clientKey, base64.StdEncoding.EncodeToString(key[:])); err != nil {
 		return protocol.ClientInfo{}, fmt.Errorf("%w: %v", ErrAuthRejected, err)
 	}
 	return req.Info, nil
@@ -128,8 +134,8 @@ func (s *ConnectorService) saveClientReport(ctx context.Context, client *transpo
 	client.UpdateInfo(info)
 	if s.sessionCfg != nil {
 		if reported, err := json.Marshal(info); err == nil {
-			if err := s.sessionCfg.SaveClientReportedConfig(ctx, info.Name, string(reported)); err != nil {
-				logging.Warn("core: save reported client config failed", "client", info.Name, "err", err)
+			if err := s.sessionCfg.SaveClientReportedConfig(ctx, info.ClientKey(), string(reported)); err != nil {
+				logging.Warn("core: save reported client config failed", "client", info.ClientKey(), "err", err)
 			}
 		}
 	}

@@ -266,7 +266,7 @@ func (c *serviceConfig) pushClientConfigs(ctx context.Context) {
 			return
 		}
 		if err := c.bindings.PushClientConfigContext(ctx, client); err != nil {
-			logging.Warn("service settings: push client config failed", "client", client.Info().Name, "err", err)
+			logging.Warn("service settings: push client config failed", "client", client.Info().ClientKey(), "err", err)
 		}
 	}
 }

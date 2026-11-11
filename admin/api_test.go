@@ -140,7 +140,7 @@ func TestPortMapsEchoTLSMaterial(t *testing.T) {
 	const certPEM = "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
 	const keyPEM = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
 	err := s.opts.Store.(store.Store).SetPortMapping(context.Background(), store.PortMapping{
-		Client:     "ns:grp:cli",
+		Client:     "grp:cli",
 		RemotePort: 8443,
 		LocalHost:  "127.0.0.1",
 		LocalPort:  443,
@@ -184,7 +184,7 @@ func TestPortMapsTraffic(t *testing.T) {
 	s := newTestAdminService(t)
 	ctx := context.Background()
 	for _, port := range []int{7000, 7001} {
-		if err := s.opts.Store.(store.Store).SetPortMapping(ctx, store.PortMapping{Client: "ns:grp:cli",
+		if err := s.opts.Store.(store.Store).SetPortMapping(ctx, store.PortMapping{Client: "grp:cli",
 			RemotePort: port, LocalHost: "127.0.0.1", LocalPort: 80}); err != nil {
 			t.Fatal(err)
 		}

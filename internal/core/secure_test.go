@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,11 +74,12 @@ func TestTransportEncryptionHotReload(t *testing.T) {
 			name, key string
 			allow     bool
 		}{
-			{fmt.Sprintf("team:g:edge%d", i), keyText, true},
-			{"other:g:edge", keyText, false},
-			{"team:g:wrong", authkey.Generate(), false},
+			{fmt.Sprintf("team:edge%d", i), keyText, true},
+			{"other:edge", keyText, false},
+			{"team:wrong", authkey.Generate(), false},
 		} {
-			c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: tc.key}, Info: protocol.ClientInfo{Name: tc.name}})
+			group, name, _ := strings.Cut(tc.name, ":")
+			c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: tc.key}, Info: protocol.ClientInfo{Group: group, Name: name}})
 			if c != nil {
 				_ = c.Close()
 			}
@@ -98,7 +100,7 @@ func TestTransportEncryptionHotReload(t *testing.T) {
 		}
 		defer stream.Close()
 		_ = stream.SetDeadline(time.Now().Add(time.Second))
-		frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: fmt.Sprintf("team:g:retained%d", i)}})
+		frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Group: "team", Name: fmt.Sprintf("retained%d", i)}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,11 +157,12 @@ func TestEncryptedScopedClient(t *testing.T) {
 		name, key string
 		allow     bool
 	}{
-		{"team:group:edge", key, true},
-		{"other:group:edge", key, false},
-		{"team:group:edge", fallback, false},
+		{"team:edge", key, true},
+		{"other:edge", key, false},
+		{"team:edge", fallback, false},
 	} {
-		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: tc.key}, Info: protocol.ClientInfo{Name: tc.name}})
+		group, name, _ := strings.Cut(tc.name, ":")
+		c, err := client.Dial(svc.Addr(), nil, client.DialOptions{Auth: client.AuthOptions{Key: tc.key}, Info: protocol.ClientInfo{Group: group, Name: name}})
 		if c != nil {
 			_ = c.Close()
 		}
@@ -204,7 +207,7 @@ func testUnprovenClientRejected(t *testing.T, encrypted bool) {
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(time.Second))
-	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: "team:g:edge"}})
+	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Group: "team", Name: "edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +260,7 @@ func TestTransportIdentityCannotSwitchKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(time.Second))
-	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: "other:g:edge"}})
+	frame, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Group: "other", Name: "edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +296,7 @@ func TestKeyLookupFailsClosed(t *testing.T) {
 	if _, err := svc.lookupTransportKey(context.Background(), key.ID()); err == nil {
 		t.Fatal("storage failure fell back to configuration")
 	}
-	if err := svc.verifyKey(context.Background(), "team:g:edge", fallback); err == nil {
+	if err := svc.verifyKey(context.Background(), "team:edge", fallback); err == nil {
 		t.Fatal("authorization failed open")
 	}
 }

@@ -73,7 +73,7 @@ func TestDialPlaintextDoesNotDiscloseAuthKey(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if frame.Type != protocol.ConfigReport || auth.Info.Name != "team:g:edge" {
+			if frame.Type != protocol.ConfigReport || auth.Info.Group != "team" || auth.Info.Name != "edge" {
 				return fmt.Errorf("authentication did not bind the public key identity")
 			}
 			protocol.WriteReply(stream, protocol.ConfigReportResult, protocol.Reply{OK: true})
@@ -84,7 +84,7 @@ func TestDialPlaintextDoesNotDiscloseAuthKey(t *testing.T) {
 			return nil
 		}()
 	}()
-	c, dialErr := DialContext(ctx, ln.Addr().String(), nil, DialOptions{Auth: AuthOptions{Key: keyText}, Info: protocol.ClientInfo{Name: "team:g:edge"}})
+	c, dialErr := DialContext(ctx, ln.Addr().String(), nil, DialOptions{Auth: AuthOptions{Key: keyText}, Info: protocol.ClientInfo{Group: "team", Name: "edge"}})
 	if c != nil {
 		_ = c.Close()
 	}

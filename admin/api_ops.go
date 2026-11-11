@@ -64,8 +64,8 @@ func (s *AdminService) apiPortMaps(w http.ResponseWriter, r *http.Request) {
 	}
 	online := make(map[string]bool)
 	for _, info := range s.clientsSnapshot() {
-		if info.Client.Name != "" {
-			online[info.Client.Name] = true
+		if key := info.Client.ClientKey(); key != "" {
+			online[key] = true
 		}
 	}
 	var listening map[uint64]bool

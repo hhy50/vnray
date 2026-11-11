@@ -27,9 +27,17 @@ func prettyJSON(raw string) string {
 	return buf.String()
 }
 
+func splitClientKey(key string) (group, name string) {
+	group, name, found := strings.Cut(key, ":")
+	if !found {
+		return "", key
+	}
+	return group, name
+}
+
 // clientMatches 按关键字模糊匹配客户端的可搜索字段。
 func clientMatches(info ClientInfo, q string) bool {
-	hay := []string{info.Client.Name, info.Remote, info.Client.Hostname, info.Client.Version}
+	hay := []string{info.Client.Group, info.Client.Name, info.Client.ClientKey(), info.Remote, info.Client.Hostname, info.Client.Version}
 	for _, i := range info.Client.Interfaces {
 		hay = append(hay, i.Name, i.MAC)
 		hay = append(hay, i.Addrs...)
@@ -48,7 +56,7 @@ func (s *AdminService) clientOptions(r *http.Request) []apiClientOption {
 	seen := make(map[string]bool)
 	out := make([]apiClientOption, 0, 8)
 	for _, info := range s.clientsSnapshot() {
-		name := info.Client.Name
+		name := info.Client.ClientKey()
 		if name == "" || seen[name] {
 			continue
 		}

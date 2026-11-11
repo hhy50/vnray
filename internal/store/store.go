@@ -142,9 +142,7 @@ func ParseClientConfig(raw string) ClientConfig {
 	return c
 }
 
-// AuthKey 是一条服务端接入密钥：Key 是客户端握手指纹里的共享密钥（唯一，覆盖即改值），
-// Scope 是范围 key，约束哪些客户端名可用此密钥——"*" 全部放行、"ns:*" 放行某 namespace、
-// 其余为精确客户端名（namespace:group:name）。
+// AuthKey 是一条接入密钥，Scope 支持全部、分组或精确客户端名。
 type AuthKey struct {
 	ID        uint64
 	Key       string
@@ -153,42 +151,26 @@ type AuthKey struct {
 	UpdatedAt time.Time
 }
 
-// ValidateAuthScope 校验范围 key 的三种合法形态："*"、"ns:*"（namespace 单段、
-// 不含通配符）或不含 "*" 的精确客户端名。空串非法。
+// ValidateAuthScope 校验范围的三种合法形态："*"、"group:*" 或 "group:name"。
 func ValidateAuthScope(scope string) error {
-	switch {
-	case scope == "*":
-		return nil
-	case strings.HasSuffix(scope, ":*"):
-		ns := strings.TrimSuffix(scope, ":*")
-		if ns == "" || strings.ContainsAny(ns, "*:") {
-			return fmt.Errorf("store: auth scope %q: namespace part must be a single segment without wildcards", scope)
-		}
-		return nil
-	default:
-		if scope == "" || strings.Contains(scope, "*") {
-			return fmt.Errorf(`store: auth scope must be "*", "namespace:*" or an exact client name, got %q`, scope)
-		}
+	if scope == "*" {
 		return nil
 	}
+	group, name, found := strings.Cut(scope, ":")
+	if !found || group == "" || name == "" || strings.Contains(group, "*") ||
+		strings.Contains(name, ":") || (name != "*" && strings.Contains(name, "*")) {
+		return fmt.Errorf(`store: auth scope must be "*", "group:*" or "group:name", got %q`, scope)
+	}
+	return nil
 }
 
-// ScopeMatches 报告范围 key 是否覆盖一个客户端名："*" 全覆盖；"ns:*" 比对
-// 客户端名的 namespace 段；其余按精确名比对。名字不含 ':' 时 namespace 为空，
-// 只能被 "*" 或同名精确范围命中。
+// ScopeMatches 报告范围是否覆盖一个合法的 group:name 客户端名。
 func ScopeMatches(scope, name string) bool {
-	switch {
-	case scope == "*":
-		return true
-	case strings.HasSuffix(scope, ":*"):
-		ns, _, found := strings.Cut(name, ":")
-		if !found {
-			return false
-		}
-		return ns+":*" == scope
-	default:
-		return scope == name
+	group, client, found := strings.Cut(name, ":")
+	if !found || group == "" || client == "" || strings.Contains(name, "*") || strings.Contains(client, ":") {
+		return false
 	}
+	return scope == "*" || scope == group+":*" || scope == name
 }
 
 // validateUser 校验用户记录的必要字段。

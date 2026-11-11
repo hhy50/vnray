@@ -69,7 +69,7 @@ func TestPortMappingConformance(t *testing.T) {
 	st := sqliteStore(t)
 	ctx := context.Background()
 
-	m := PortMapping{Client: "ns:grp:edge-1", RemotePort: 7000,
+	m := PortMapping{Client: "grp:edge-1", RemotePort: 7000,
 		LocalHost: "127.0.0.1", LocalPort: 8080, Enabled: true, Remark: "web"}
 	if err := st.SetPortMapping(ctx, m); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -128,19 +128,19 @@ func TestPortMappingConformance(t *testing.T) {
 		!strings.Contains(rawConfig, `"down_limit":262144`) {
 		t.Fatalf("config column = %q, want UserConfig-compatible keys", rawConfig)
 	}
-	neg := PortMapping{Client: "ns:grp:x", RemotePort: 7002, LocalHost: "127.0.0.1", LocalPort: 80,
+	neg := PortMapping{Client: "grp:x", RemotePort: 7002, LocalHost: "127.0.0.1", LocalPort: 80,
 		Config: PortConfig{UpLimit: -1}}
 	if err := st.SetPortMapping(ctx, neg); err == nil {
 		t.Fatal("negative limit must fail")
 	}
 
 	// remote_port 全表唯一：与其他行冲突必须报错（无论插入还是改既有行）。
-	dup := PortMapping{Client: "ns:grp:edge-2", RemotePort: 7000,
+	dup := PortMapping{Client: "grp:edge-2", RemotePort: 7000,
 		LocalHost: "127.0.0.1", LocalPort: 22, Enabled: true}
 	if err := st.SetPortMapping(ctx, dup); err == nil {
 		t.Fatal("insert with duplicate remote port must fail")
 	}
-	other := PortMapping{Client: "ns:grp:edge-2", RemotePort: 7001,
+	other := PortMapping{Client: "grp:edge-2", RemotePort: 7001,
 		LocalHost: "127.0.0.1", LocalPort: 22, Enabled: true}
 	if err := st.SetPortMapping(ctx, other); err != nil {
 		t.Fatalf("insert second mapping: %v", err)
@@ -158,7 +158,7 @@ func TestPortMappingConformance(t *testing.T) {
 	}
 
 	// 更新不存在的 ID 报错；删除返回存在性。
-	missing := PortMapping{ID: 99999, Client: "ns:grp:x", RemotePort: 7100,
+	missing := PortMapping{ID: 99999, Client: "grp:x", RemotePort: 7100,
 		LocalHost: "127.0.0.1", LocalPort: 80}
 	if err := st.SetPortMapping(ctx, missing); err == nil {
 		t.Fatal("update nonexistent id must fail")
@@ -173,9 +173,9 @@ func TestPortMappingConformance(t *testing.T) {
 	// 校验：客户端、端口范围、本地主机缺一不可。
 	for _, bad := range []PortMapping{
 		{RemotePort: 7002, LocalHost: "127.0.0.1", LocalPort: 80},
-		{Client: "ns:grp:x", RemotePort: 0, LocalHost: "127.0.0.1", LocalPort: 80},
-		{Client: "ns:grp:x", RemotePort: 7002, LocalPort: 80},
-		{Client: "ns:grp:x", RemotePort: 7002, LocalHost: "127.0.0.1", LocalPort: 0},
+		{Client: "grp:x", RemotePort: 0, LocalHost: "127.0.0.1", LocalPort: 80},
+		{Client: "grp:x", RemotePort: 7002, LocalPort: 80},
+		{Client: "grp:x", RemotePort: 7002, LocalHost: "127.0.0.1", LocalPort: 0},
 	} {
 		if err := st.SetPortMapping(ctx, bad); err == nil {
 			t.Fatalf("invalid mapping must fail: %+v", bad)

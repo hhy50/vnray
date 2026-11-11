@@ -26,12 +26,12 @@ func TestConnectorDuplicateStartKeepsRunningContext(t *testing.T) {
 		t.Fatalf("duplicate start replaced the running context: %v", got)
 	}
 	session := newReportSession(t, svc, key)
-	info := protocol.ClientInfo{Name: "team:g:after-duplicate-start", Hostname: "still-running"}
+	info := protocol.ClientInfo{Group: "team", Name: "after-duplicate-start", Hostname: "still-running"}
 	reply, err := exchangeReport(t, session, info)
 	if err != nil || !reply.OK {
 		t.Fatalf("new client handshake after duplicate start: %+v, %v", reply, err)
 	}
-	stored, ok := b.LookupClient(context.Background(), info.Name)
+	stored, ok := b.LookupClient(context.Background(), info.ClientKey())
 	if !ok || stored.Config == "" {
 		t.Fatal("new client report was not persisted")
 	}

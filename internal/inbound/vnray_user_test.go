@@ -44,7 +44,7 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 	ctx := context.Background()
 	st := &userPluginStore{Store: testStore(t)}
 	b := admin.NewBindings(st)
-	if err := b.SetUser(context.Background(), admin.Binding{UserKey: "alice", Protocol: store.ProtocolVNV1, Name: "alice", Status: store.UserEnabled, Client: "edge"}); err != nil {
+	if err := b.SetUser(context.Background(), admin.Binding{UserKey: "alice", Protocol: store.ProtocolVNV1, Name: "alice", Status: store.UserEnabled, Client: "default:edge"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.DefaultServer()
@@ -99,7 +99,7 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(2 * time.Second))
-	report, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Name: "edge"}})
+	report, err := protocol.NewConfigReportFrame(protocol.ConfigReportRequest{Info: protocol.ClientInfo{Group: "default", Name: "edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 		t.Fatal("user port did not reject config report")
 	}
 	dispatcher := dispatch.NewDefaultDispatcher(nil, "direct", dispatch.NewDirectOutbound("direct"))
-	c, err := client.Dial(svc.Addr(), dispatcher, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key}, Info: protocol.ClientInfo{Name: "edge"}})
+	c, err := client.Dial(svc.Addr(), dispatcher, client.DialOptions{Auth: client.AuthOptions{Key: cfg.Server.Auth.Key}, Info: protocol.ClientInfo{Group: "default", Name: "edge"}})
 	if err != nil {
 		t.Fatal(err)
 	}

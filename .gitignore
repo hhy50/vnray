@@ -54,3 +54,6 @@ web/admin/dist/
 !docs/adr/0054-explicit-lock-removal.md
 !docs/adr/0055-snapshot-and-registry-locks.md
 !docs/adr/0061-ringbuffer-pipe.md
+!docs/adr/0062-client-groups.md
+!docs/adr/0063-client-group-config.md
+!docs/adr/0064-client-report-identity-fields.md

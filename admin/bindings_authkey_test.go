@@ -39,7 +39,7 @@ func TestBindingsAuthKeys(t *testing.T) {
 	if err := b.SetAuthKey(context.Background(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=", "team1:*"); err != nil {
 		t.Fatalf("overwrite auth key: %v", err)
 	}
-	if err := b.SetAuthKey(context.Background(), "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=", "team1:group:name"); err != nil {
+	if err := b.SetAuthKey(context.Background(), "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=", "team1:name"); err != nil {
 		t.Fatalf("set second auth key: %v", err)
 	}
 
@@ -77,30 +77,30 @@ func TestBindingsAuthKeys(t *testing.T) {
 	}
 }
 
-// TestMatchClientAuthKey 覆盖范围匹配语义：全量、namespace、精确名与未配置。
+// TestMatchClientAuthKey 覆盖范围匹配语义：全量、分组、精确名与未配置。
 func TestMatchClientAuthKey(t *testing.T) {
 	b := newTestBindings(t)
 
 	// 表为空：configured=false，调用方回退旧校验路径。
-	if configured, ok := b.MatchClientAuthKey(context.Background(), "any:name:here", "whatever"); configured || ok {
+	if configured, ok := b.MatchClientAuthKey(context.Background(), "any:here", "whatever"); configured || ok {
 		t.Fatalf("empty table = (%v, %v), want (false, false)", configured, ok)
 	}
 
 	mustAuthKey(t, b, "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", "*")
 	mustAuthKey(t, b, "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", "team1:*")
-	mustAuthKey(t, b, "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "team2:group:solo")
+	mustAuthKey(t, b, "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", "team2:solo")
 
 	cases := []struct {
 		name, key string
 		want      bool
 	}{
-		{"team1:g:a", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", true},
-		{"team1:g:b", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
-		{"team2:group:solo", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", true},
-		{"team2:group:solo", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", false},
-		{"team2:group:solo", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
-		{"team1:g:a", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", false},
-		{"team1:g:a", "wrong-key", false},
+		{"team1:a", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", true},
+		{"team1:b", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
+		{"team2:solo", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", true},
+		{"team2:solo", "r2paPcCLxTMRdtXBeKdFpRh95M/DWa7InZFqcPKlm0o=", false},
+		{"team2:solo", "cvmCM53nGNlSefm13tBl5HTCYplTPi2bfH8xqnz8LsA=", true},
+		{"team1:a", "iuwkbiGRttr8KBGRESD8TnYQ7pjgF8ObVDp7E5yDckI=", false},
+		{"team1:a", "wrong-key", false},
 	}
 	for _, tt := range cases {
 		configured, ok := b.MatchClientAuthKey(context.Background(), tt.name, tt.key)

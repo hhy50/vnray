@@ -543,7 +543,7 @@ func (s *AdminService) pushConfig(ctx context.Context, name string) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbTimeout)
 	defer cancel()
 	for _, e := range s.clients.ClientSessions() {
-		if e.Info().Name != name {
+		if e.Info().ClientKey() != name {
 			continue
 		}
 		if err := s.opts.Bindings.PushClientConfig(ctx, e); err != nil {

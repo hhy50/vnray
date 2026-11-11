@@ -9,8 +9,7 @@ import (
 )
 
 // LocalClientName 是服务端本机出口（server_proxy）的保留客户端名。
-// 它只有两段，不满足客户端名 namespace:group:name 的三段校验，
-// 因此任何真实客户端都无法占用它。
+// 服务端在配置上报认证时拒绝真实客户端占用它。
 const LocalClientName = "server:self"
 
 // Exit 是一个出口端点：给定目标开一条隧道，返回可双向搬运的裸字节流。

@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/hhy50/vnray/internal/inbound"
 	"io"
 	"log"
 	"net/http"
@@ -38,6 +37,7 @@ import (
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/core"
 	"github.com/hhy50/vnray/internal/dispatch"
+	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
@@ -56,6 +56,8 @@ const testAuthKey = "2It45TVRDAw7WSdVWgqPqstkV6VdTB9MtVO7IKOIY2o="
 // testClientInfo 是测试客户端随认证上报的配置与环境，供往返断言。
 func testClientInfo() protocol.ClientInfo {
 	return protocol.ClientInfo{
+		Group:    "default",
+		Name:     "c1",
 		Version:  "v-test",
 		OS:       "testos",
 		Arch:     "testarch",
@@ -188,7 +190,7 @@ func newProxyHarness(t *testing.T, dispatcher dispatch.Dispatcher, handler http.
 func newProxyHarnessWith(t *testing.T, dispatcher dispatch.Dispatcher, handler http.Handler, popts planeOptions, dopts client.DialOptions) *proxyHarness {
 	t.Helper()
 	h := &proxyHarness{}
-	dopts.Info.Name = "c1" // 用户绑定按客户端名选路，客户端必须上报同名
+	dopts.Info.Group, dopts.Info.Name = "default", "c1"
 	dopts.Muxer = popts.muxer
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +212,7 @@ func newProxyHarnessWith(t *testing.T, dispatcher dispatch.Dispatcher, handler h
 
 	// 端口交给内核分配：服务在 Start 之后回读真实端口，
 	// 不必用"先占端口再释放"那种带竞争窗口的写法。
-	plane := startPlane(t, popts, stubUserRegistry{limitedUserKey: "c1"})
+	plane := startPlane(t, popts, stubUserRegistry{limitedUserKey: "default:c1"})
 	h.sessions = plane.Sessions()
 	h.addr = plane.userAddr
 
@@ -401,10 +403,10 @@ func TestUserForwardDownload(t *testing.T) {
 	// 绑定表的键是裸 user_key；限速注册表的身份键由 ratelimit.Identity 从协议派生，
 	// 这里同样用 Identity 构造，避免两边的前缀各写一遍而漂移。
 	registry := stubUserRegistry{
-		"unlim": "c1",
-		"10m":   "c1",
-		"1m":    "c1",
-		"100k":  "c1",
+		"unlim": "default:c1",
+		"10m":   "default:c1",
+		"1m":    "default:c1",
+		"100k":  "default:c1",
 	}
 	plane := startPlane(t, planeOptions{authKey: testAuthKey, limits: limits}, registry)
 	mgr := plane.Sessions()
@@ -420,7 +422,7 @@ func TestUserForwardDownload(t *testing.T) {
 		client.DialOptions{Auth: client.AuthOptions{Key: testAuthKey},
 			Info: func() protocol.ClientInfo {
 				info := testClientInfo()
-				info.Name = "c1" // 用户绑定按客户端名选路，客户端必须上报同名
+				info.Group, info.Name = "default", "c1"
 				return info
 			}()})
 	if err != nil {

@@ -78,7 +78,7 @@ func TestPortMapEndToEnd(t *testing.T) {
 	_, echoPort, _ := net.SplitHostPort(echoAddr)
 	echoPortNum, _ := strconv.Atoi(echoPort)
 
-	const clientName = "test:default:c1"
+	const clientName = "default:c1"
 	remotePort := freePort(t)
 	m := store.PortMapping{Client: clientName, RemotePort: remotePort,
 		LocalHost: "127.0.0.1", LocalPort: echoPortNum,
@@ -123,7 +123,7 @@ func TestPortMapEndToEnd(t *testing.T) {
 	defer stopClient()
 	c, err := client.Dial(svc.Addr(), nil, client.DialOptions{
 		Auth: client.AuthOptions{Key: cfg.Server.Auth.Key},
-		Info: protocol.ClientInfo{Name: clientName},
+		Info: protocol.ClientInfo{Group: "default", Name: "c1"},
 	})
 	if err != nil {
 		t.Fatalf("client dial: %v", err)

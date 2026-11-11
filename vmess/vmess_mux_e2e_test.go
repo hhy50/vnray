@@ -64,7 +64,7 @@ func runV2RayPluginMuxEndToEnd(t *testing.T, muxer tcp.Muxer) {
 
 	agent, err := client.Dial(svc.Addr(), directDispatcher(), client.DialOptions{
 		Auth:  client.AuthOptions{Key: "p4Gz4T0rgJV9G5JYBBSPZmzIets1wUgWhqlofyf42KA="},
-		Info:  protocol.ClientInfo{Name: "test-edge", Version: "e2e", OS: "test", Arch: "test"},
+		Info:  protocol.ClientInfo{Group: "test", Name: "edge", Version: "e2e", OS: "test", Arch: "test"},
 		Muxer: muxer,
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func runV2RayPluginMuxEndToEnd(t *testing.T, muxer tcp.Muxer) {
 	}
 	if err := bindings.PutUser(context.Background(), store.UserBinding{
 		Key: e2eUUID, Protocol: store.ProtocolVMess, Name: "e2e-vmess-mux",
-		Status: store.UserEnabled, Client: "test-edge",
+		Status: store.UserEnabled, Client: "test:edge",
 	}); err != nil {
 		t.Fatalf("register uuid: %v", err)
 	}

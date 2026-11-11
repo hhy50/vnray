@@ -77,6 +77,7 @@ func newClientApp(cfg config.Client) (*clientApp, error) {
 			Info: info,
 			ReportInfo: func() protocol.ClientInfo {
 				latest := newClientInfo(cfg, reconnect)
+				latest.Group = info.Group
 				latest.Name = info.Name
 				return latest
 			},
@@ -105,10 +106,14 @@ func effectiveReconnect(cfg *config.Reconnect) config.Reconnect {
 // newClientInfo 汇总客户端要定期上报的生效配置与环境：本端标识 + 配置摘要 + 主机环境。
 func newClientInfo(cfg config.Client, reconnect config.Reconnect) protocol.ClientInfo {
 	hostname, _ := os.Hostname()
+	group := cfg.Group
+	if group == "" {
+		group = config.DefaultClientGroup
+	}
 	name := cfg.Name
 	if name == "" {
-		// 默认名 default:default:${hostname}-${ip}；拿不到 IPv4 时退化成不带 IP。
-		name = config.DefaultClientNamespace + ":" + config.DefaultClientGroup + ":" + hostname
+		// 拿不到 IPv4 时退化成不带 IP 的默认名。
+		name = hostname
 		if ip := primaryIPv4(); ip != "" {
 			name += "-" + ip
 		}
@@ -118,6 +123,7 @@ func newClientInfo(cfg config.Client, reconnect config.Reconnect) protocol.Clien
 		log = config.DefaultLog()
 	}
 	info := protocol.ClientInfo{
+		Group:      group,
 		Name:       name,
 		Version:    version,
 		OS:         runtime.GOOS,

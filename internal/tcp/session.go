@@ -89,7 +89,7 @@ type SessionInfo struct {
 	Remote string
 	// Kind 是握手判定的会话种类。
 	Kind Kind
-	// Name 是这条会话关联的名字：客户端会话是自己上报的标识（按名选路的依据），
+	// Name 是这条会话关联的绑定键：客户端会话由上报的 group 和 name 生成，
 	// 用户会话是它绑定的客户端名。
 	Name string
 	// Since 是握手通过的时刻。

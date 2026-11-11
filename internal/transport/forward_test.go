@@ -24,7 +24,7 @@ import (
 // 隧道长连接测试参数：沿用代理长连接测试的压缩 keepalive 与轮询间隔。
 const (
 	forwardTestKey = "user-alice-key-001"
-	forwardClient  = "test-edge"
+	forwardClient  = "test:edge"
 	tunnelHold     = 6 * time.Second
 )
 
@@ -78,9 +78,10 @@ func startForwardLink(t *testing.T, cfg *tcp.SessionConfig, muxer tcp.Muxer, reg
 		return plane // 不接入客户端，用于验证"客户端离线"路径
 	}
 
+	group, name, _ := strings.Cut(clientName, ":")
 	client, err := client.Dial(plane.Addr(), directDispatcher(), client.DialOptions{
 		Auth:          client.AuthOptions{Key: testAuthKey},
-		Info:          protocol.ClientInfo{Name: clientName, Version: "v-test", OS: "testos", Arch: "testarch"},
+		Info:          protocol.ClientInfo{Group: group, Name: name, Version: "v-test", OS: "testos", Arch: "testarch"},
 		SessionConfig: cfg,
 		Muxer:         muxer,
 	})
@@ -354,7 +355,7 @@ func TestForwardHubDenials(t *testing.T) {
 
 		client, derr := client.Dial(plane.Addr(), guard.Wrap(directDispatcher()), client.DialOptions{
 			Auth: client.AuthOptions{Key: testAuthKey},
-			Info: protocol.ClientInfo{Name: forwardClient},
+			Info: protocol.ClientInfo{Group: "test", Name: "edge"},
 		})
 		if derr != nil {
 			t.Fatalf("dial data plane: %v", derr)
@@ -375,7 +376,7 @@ func TestForwardHubDenials(t *testing.T) {
 }
 
 // TestUserAuthReturnsClientConfig 验证用户侧两件事：UserAuth 把用户端自报信息带到
-// 服务端并随会话登记；认证应答回带绑定客户端的配置（在线=完整上报值，离线=仅名字）。
+// 服务端并随会话登记；认证应答回带绑定客户端的配置（在线=完整上报值，离线=仅分组和名称）。
 func TestUserAuthReturnsClientConfig(t *testing.T) {
 	registry := testRegistry{forwardTestKey: forwardClient}
 
@@ -385,7 +386,7 @@ func TestUserAuthReturnsClientConfig(t *testing.T) {
 		if !res.OK {
 			t.Fatalf("user auth rejected: %s", res.Reason)
 		}
-		if res.Client == nil || res.Client.Name != forwardClient {
+		if res.Client == nil || res.Client.Group != "test" || res.Client.Name != "edge" {
 			t.Fatalf("client = %+v, want the bound client %q", res.Client, forwardClient)
 		}
 		if res.Client.Version != "v-test" || res.Client.OS != "testos" || res.Client.Arch != "testarch" {
@@ -400,7 +401,7 @@ func TestUserAuthReturnsClientConfig(t *testing.T) {
 		if !res.OK {
 			t.Fatalf("user auth rejected: %s", res.Reason)
 		}
-		if res.Client == nil || res.Client.Name != forwardClient || res.Client.Version != "" {
+		if res.Client == nil || res.Client.Group != "test" || res.Client.Name != "edge" || res.Client.Version != "" {
 			t.Fatalf("client = %+v, want only the bound client name while it is offline", res.Client)
 		}
 		assertUserInfo(t, plane)

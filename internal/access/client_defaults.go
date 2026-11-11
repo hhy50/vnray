@@ -71,7 +71,7 @@ func (b *Bindings) PushClientConfigContext(ctx context.Context, client *transpor
 	defer cancel()
 	var readErr error
 	err := client.SendPushConfigContext(ctx, func() protocol.PushConfig {
-		row, _, err := b.store.GetClient(ctx, client.Info().Name)
+		row, _, err := b.store.GetClient(ctx, client.Info().ClientKey())
 		if err != nil {
 			readErr = err
 			// 读取失败不能发布默认配置或清除已有并发上限。

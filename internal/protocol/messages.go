@@ -8,6 +8,7 @@ import (
 
 // ClientInfo 是客户端上报的自身配置与环境摘要。
 type ClientInfo struct {
+	Group    string `json:"group,omitempty"`
 	Name     string `json:"name,omitempty"`
 	Version  string `json:"version,omitempty"`
 	OS       string `json:"os,omitempty"`
@@ -23,6 +24,14 @@ type ClientInfo struct {
 	Log       *ClientLog       `json:"log,omitempty"`
 	Reconnect *ClientReconnect `json:"reconnect,omitempty"`
 	Routing   *ClientRouting   `json:"routing,omitempty"`
+}
+
+// ClientKey 返回服务端绑定键，旧快照缺少 Group 时沿用 Name。
+func (c ClientInfo) ClientKey() string {
+	if c.Group == "" {
+		return c.Name
+	}
+	return c.Group + ":" + c.Name
 }
 
 // NetInterface 是一块网卡的摘要：只保留诊断用得上的名称、MTU、MAC、状态与地址。

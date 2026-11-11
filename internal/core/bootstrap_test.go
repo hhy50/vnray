@@ -39,7 +39,7 @@ func TestInitialClientAuthKey(t *testing.T) {
 	if err := b.ReloadAuthKeys(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"default:default:edge", "other:office:edge"} {
+	for _, name := range []string{"default:edge", "office:edge"} {
 		if configured, allowed := b.MatchClientAuthKey(context.Background(), name, initialClientAuthKey); !configured || !allowed {
 			t.Fatalf("initial key does not authorize %q", name)
 		}

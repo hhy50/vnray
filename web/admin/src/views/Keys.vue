@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 认证密钥：按范围（* / namespace:* / 客户端名）决定哪些客户端能用哪把密钥。
+// 认证密钥：按范围（* / group:* / 客户端名）决定哪些客户端能用哪把密钥。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, Refresh, CopyDocument } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
@@ -20,7 +20,7 @@ const generatedKey = ref('')
 
 const scopeOptions = computed(() => [
   { value: '*', label: t('keys.scopeAll') },
-  { value: 'default:*', label: t('keys.scopeNamespace') },
+  { value: 'default:*', label: t('keys.scopeGroup') },
 ])
 
 async function load() {
@@ -142,7 +142,7 @@ onMounted(load)
 
     <p class="page-hint">
       {{ t('keys.hintBefore') }}<span class="mono">*</span>{{ t('keys.hintAll') }}
-      <span class="mono">namespace:*</span>{{ t('keys.hintNs') }}
+      <span class="mono">group:*</span>{{ t('keys.hintGroup') }}
     </p>
   </el-card>
 
@@ -169,8 +169,8 @@ onMounted(load)
       </el-form-item>
       <p class="hint-inline">{{ t('keys.generatedHint') }}</p>
       <p class="hint-inline">
-        {{ t('keys.scopeHintBefore') }}<span class="mono">*</span>{{ t('keys.scopeHintAll') }}<span class="mono">team:*</span>{{ t('keys.scopeHintNs') }}
-        <span class="mono">team:office:mac</span>{{ t('keys.scopeHintOne') }}
+        {{ t('keys.scopeHintBefore') }}<span class="mono">*</span>{{ t('keys.scopeHintAll') }}<span class="mono">office:*</span>{{ t('keys.scopeHintGroup') }}
+        <span class="mono">office:mac</span>{{ t('keys.scopeHintOne') }}
       </p>
     </el-form>
     <template #footer>

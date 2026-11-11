@@ -77,12 +77,18 @@ func TestValidateAuthScope(t *testing.T) {
 	}{
 		{"*", true},
 		{"team1:*", true},
-		{"default:default:host-192.168.0.2", true},
+		{"default:host-192.168.0.2", true},
+		{"team1:edge", true},
 		{"", false},
+		{"edge", false},
+		{"default:default:host-192.168.0.2", false},
+		{"team1:", false},
+		{":edge", false},
 		{":*", false},
 		{"a:b:*", false},
 		{"te*am:*", false},
 		{"team*", false},
+		{"team:ed*", false},
 	} {
 		err := ValidateAuthScope(tt.scope)
 		if (err == nil) != tt.valid {
@@ -91,21 +97,31 @@ func TestValidateAuthScope(t *testing.T) {
 	}
 }
 
-// TestScopeMatches 覆盖范围匹配的三种形态，包括名字缺 namespace 段的边界。
 func TestScopeMatches(t *testing.T) {
 	for _, tt := range []struct {
 		scope, name string
 		want        bool
 	}{
-		{"*", "anything", true},
-		{"*", "", true},
-		{"team1:*", "team1:group:name", true},
-		{"team1:*", "team2:group:name", false},
+		{"*", "team1:name", true},
+		{"*", "team2:name", true},
+		{"*", "anything", false},
+		{"*", "", false},
+		{"*", "team1:group:name", false},
+		{"*", "team1:", false},
+		{"*", ":name", false},
+		{"*", "team*:name", false},
+		{"*", "team1:*", false},
+		{"team1:*", "team1:name", true},
+		{"team1:*", "team2:name", false},
 		{"team1:*", "team1", false},
-		{"team1:*", "team1x:group:name", false},
-		{"team1:group:name", "team1:group:name", true},
+		{"team1:*", "team1x:name", false},
+		{"team1:*", "team1:group:name", false},
+		{"team1:name", "team1:name", true},
+		{"team1:name", "team1:other", false},
+		{"team1:name", "team2:name", false},
+		{"team1:group:name", "team1:group:name", false},
 		{"team1:group:name", "team1:group:other", false},
-		{"plain", "plain", true},
+		{"plain", "plain", false},
 		{"plain", "plain:x", false},
 	} {
 		if got := ScopeMatches(tt.scope, tt.name); got != tt.want {

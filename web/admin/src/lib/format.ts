@@ -24,7 +24,7 @@ export function clock(raw: string | null | undefined): string {
   return d.toLocaleTimeString(getLocale(), { hour12: false })
 }
 
-// 客户端名是 namespace:group:name，列表里只显示末段，完整值挂在 title 上。
+// 客户端名是 group:name，列表里只显示末段，完整值挂在 title 上。
 export function shortName(name: string | null | undefined): string {
   if (!name) return '—'
   const idx = name.lastIndexOf(':')

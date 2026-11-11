@@ -14,8 +14,9 @@ type ClientServer struct {
 
 type Client struct {
 	Server ClientServer `yaml:"server"`
-	// Name 是本客户端在服务端侧的名字，供 uuid→客户端 的转发绑定选中；留空用
-	// default:default:${hostname}-${ip}。格式为 namespace:group:name 三段。
+	// Group 是客户端分组，留空使用 default。
+	Group string `yaml:"group"`
+	// Name 是组内实例名，留空使用 ${hostname}-${ip}。
 	Name    string   `yaml:"name"`
 	Public  string   `yaml:"public"`
 	Private string   `yaml:"private"`
@@ -23,25 +24,14 @@ type Client struct {
 	Routing *Routing `yaml:"routing"`
 }
 
-// DefaultClientNamespace 是客户端名默认的 namespace/group 段。
-const (
-	DefaultClientNamespace = "default"
-	DefaultClientGroup     = "default"
-)
+// DefaultClientGroup 是未指定分组时使用的默认值。
+const DefaultClientGroup = "default"
 
-// ValidateClientName 校验客户端名的三段格式 namespace:group:name；
-// 段不允许为空，也不允许出现通配符（与服务端范围 key 的语义冲突）。
-func ValidateClientName(name string) error {
-	parts := strings.Split(name, ":")
-	if len(parts) != 3 {
-		return fmt.Errorf("name %q must be namespace:group:name (three segments)", name)
-	}
-	for i, p := range parts {
-		if p == "" {
-			return fmt.Errorf("name %q: segment %d must not be empty", name, i+1)
-		}
-		if strings.Contains(p, "*") {
-			return fmt.Errorf("name %q: wildcard '*' is not allowed in client names", name)
+// ValidateClientIdentity 校验上报的独立分组与实例名。
+func ValidateClientIdentity(group, name string) error {
+	for _, part := range []struct{ field, value string }{{"group", group}, {"name", name}} {
+		if part.value == "" || strings.ContainsAny(part.value, ":*") {
+			return fmt.Errorf("%s: must be a nonempty segment without ':' or '*'", part.field)
 		}
 	}
 	return nil
@@ -83,6 +73,7 @@ func (m Match) isEmpty() bool {
 func DefaultClient() Client {
 	reconnect := DefaultReconnect()
 	return Client{
+		Group: DefaultClientGroup,
 		Server: ClientServer{
 			Addr:      "127.0.0.1:9000",
 			Reconnect: &reconnect,
@@ -107,10 +98,11 @@ func (c Client) Validate() error {
 	if err := validateAddress("server.addr", c.Server.Addr); err != nil {
 		return err
 	}
-	if c.Name != "" {
-		if err := ValidateClientName(c.Name); err != nil {
-			return fmt.Errorf("name: %w", err)
-		}
+	if strings.ContainsAny(c.Group, ":*") {
+		return fmt.Errorf("group: must be a single segment without ':' or '*'")
+	}
+	if strings.ContainsAny(c.Name, ":*") {
+		return fmt.Errorf("name: must be a single segment without ':' or '*'; configure group separately")
 	}
 	if c.Server.AuthKey != "" {
 		if err := validateAuthKey("server.auth_key", c.Server.AuthKey); err != nil {

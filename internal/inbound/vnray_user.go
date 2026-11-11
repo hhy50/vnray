@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -108,6 +109,9 @@ func (l *vnrayUserListener) Handshake(session tcp.Session) (tcp.SessionInfo, err
 		return rejectUserAuth(stream, "user is disabled")
 	}
 	reply := protocol.Reply{OK: true, Client: &protocol.ClientInfo{Name: access.Client}}
+	if group, name, found := strings.Cut(access.Client, ":"); found {
+		reply.Client.Group, reply.Client.Name = group, name
+	}
 	if p.clients != nil {
 		if info, exists := p.clients.SessionByName(access.Client); exists {
 			if client, ok := info.Meta.(*transport.Session); ok {

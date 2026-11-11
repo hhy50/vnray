@@ -86,6 +86,8 @@ type apiIfaceDTO struct {
 
 type apiClientDTO struct {
 	ID            uint64        `json:"id"`
+	Key           string        `json:"key"`
+	Group         string        `json:"group"`
 	Name          string        `json:"name"`
 	Online        bool          `json:"online"`
 	Local         bool          `json:"local"`
@@ -120,6 +122,8 @@ func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 		}
 		row := apiClientDTO{
 			ID:          info.ID,
+			Key:         info.Client.ClientKey(),
+			Group:       info.Client.Group,
 			Name:        info.Client.Name,
 			Online:      true,
 			Remote:      info.Remote,
@@ -135,10 +139,10 @@ func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 		if !info.LastHeartbeat.IsZero() {
 			row.LastHeartbeat = timePtr(info.LastHeartbeat)
 		}
-		if info.Client.Name != "" {
-			online[info.Client.Name] = true
+		if row.Key != "" {
+			online[row.Key] = true
 		}
-		if tr, ok := clientTraffic[row.Name]; ok {
+		if tr, ok := clientTraffic[row.Key]; ok {
 			row.UpBytes, row.DownBytes = tr.Up, tr.Down
 		}
 		rows = append(rows, row)
@@ -153,8 +157,11 @@ func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 			if q != "" && !strings.Contains(strings.ToLower(cb.ClientKey), q) {
 				continue
 			}
+			group, name := splitClientKey(cb.ClientKey)
 			row := apiClientDTO{
-				Name:       cb.ClientKey,
+				Key:        cb.ClientKey,
+				Group:      group,
+				Name:       name,
 				Local:      cb.ClientType == store.ClientTypeLocal,
 				Outbounds:  []string{},
 				Interfaces: []apiIfaceDTO{},
@@ -184,6 +191,8 @@ func (s *AdminService) apiClients(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiClientDetailDTO struct {
+	Key          string                `json:"key"`
+	Group        string                `json:"group"`
 	Name         string                `json:"name"`
 	Online       bool                  `json:"online"`
 	Remote       string                `json:"remote"`
@@ -206,14 +215,17 @@ func (s *AdminService) apiClientDetail(w http.ResponseWriter, r *http.Request) {
 		apiFailKey(w, r, http.StatusBadRequest, msgClientNameEmpty)
 		return
 	}
+	group, instance := splitClientKey(name)
 	out := apiClientDetailDTO{
-		Name:         name,
+		Key:          name,
+		Group:        group,
+		Name:         instance,
 		ServerConfig: "{}",
 		Hosts:        []protocol.CustomHost{},
 		IPMaps:       []protocol.IPMap{},
 	}
 	for _, info := range s.clientsSnapshot() {
-		if info.Client.Name != name {
+		if info.Client.ClientKey() != name {
 			continue
 		}
 		out.Online, out.Remote = true, info.Remote

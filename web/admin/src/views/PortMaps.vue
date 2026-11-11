@@ -250,7 +250,7 @@ onMounted(load)
         </el-form-item>
       </div>
       <el-form-item :label="t('portmaps.colClient')">
-        <el-select v-model="form.client" filterable allow-create default-first-option placeholder="namespace:group:name">
+        <el-select v-model="form.client" filterable allow-create default-first-option placeholder="group:name">
           <el-option v-for="c in clients" :key="c.name" :label="c.label" :value="c.name" />
         </el-select>
       </el-form-item>

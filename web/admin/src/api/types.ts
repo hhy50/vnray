@@ -33,6 +33,8 @@ export interface ClientInterface {
 
 export interface Client {
   id: number
+  key: string
+  group: string
   name: string
   online: boolean
   local: boolean
@@ -67,6 +69,8 @@ export interface IPMapRow {
 }
 
 export interface ClientDetail {
+  key: string
+  group: string
   name: string
   online: boolean
   remote: string

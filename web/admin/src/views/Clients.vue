@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { Client } from '../api/types'
-import { bytes, clock, shortName } from '../lib/format'
+import { bytes, clock } from '../lib/format'
 import ClientConfigDialog from '../components/ClientConfigDialog.vue'
 import { useI18n } from '../i18n'
 
@@ -29,7 +29,7 @@ const filtered = computed(() => {
   return clients.value.filter((c) => {
     if (platform.value && c.os !== platform.value) return false
     if (!needle) return true
-    const hay = [c.name, c.remote, c.hostname, c.version, c.os, c.arch]
+    const hay = [c.group, c.name, c.key, c.remote, c.hostname, c.version, c.os, c.arch]
       .concat(c.interfaces.flatMap((i) => [i.name, i.mac, ...i.addrs]))
       .join('\u0000')
       .toLowerCase()
@@ -54,14 +54,14 @@ async function load(silent = false) {
 }
 
 function openConfig(client: Client) {
-  configName.value = client.name
+  configName.value = client.key
   configOpen.value = true
 }
 
 async function kick(client: Client) {
   try {
     await ElMessageBox.confirm(
-      t('clients.kickConfirm', { name: shortName(client.name) }),
+      t('clients.kickConfirm', { name: client.key }),
       t('clients.kickTitle'),
       { type: 'warning', confirmButtonText: t('clients.disconnect'), cancelButtonText: t('common.cancel') },
     )
@@ -157,7 +157,7 @@ function timeDetail(c: Client): string {
       v-else
       v-loading="loading"
       :data="filtered"
-      row-key="id"
+      :row-key="(row: Client) => row.online ? row.id : row.key"
       size="small"
       :empty-text="t('clients.empty')"
     >
@@ -169,10 +169,14 @@ function timeDetail(c: Client): string {
         </template>
       </el-table-column>
 
+      <el-table-column :label="t('clients.colGroup')" min-width="120" show-overflow-tooltip>
+        <template #default="{ row }"><span class="mono">{{ row.group || '—' }}</span></template>
+      </el-table-column>
+
       <el-table-column :label="t('clients.colClient')" min-width="200">
         <template #default="{ row }">
-          <div class="client-name" :title="row.name || t('clients.unnamed')">
-            <span v-if="row.name" class="client-short">{{ shortName(row.name) }}</span>
+          <div class="client-name" :title="row.key || t('clients.unnamed')">
+            <span v-if="row.name" class="client-short">{{ row.name }}</span>
             <span v-else class="faint">{{ t('clients.unnamed') }}</span>
             <span v-if="row.online && !row.local" class="faint">#{{ row.id }}</span>
           </div>
