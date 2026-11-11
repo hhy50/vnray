@@ -23,6 +23,7 @@ export interface Status {
   client_count: number
   active_tunnels: number
   traffic_bytes: number
+  metrics_enabled: boolean
 }
 
 export interface ClientInterface {
@@ -227,6 +228,7 @@ export interface ClientConfig {
 
 export interface ServiceConfig {
   transport_encryption: boolean
+  metrics_enabled: boolean
   public_host: string
   heartbeat_enabled: boolean
   heartbeat_interval: string
@@ -246,4 +248,43 @@ export interface ServiceConfig {
   server_proxy_private: string
   server_proxy_routing: string
   log_to_file: boolean
+}
+
+// MetricsBucket 是直方图单桶快照；le 为上界（秒），最后一桶为 Infinity。
+export interface MetricsBucket {
+  le: number
+  count: number
+}
+
+// MetricsSeries 是一条指标在快照时刻的读数：counter/gauge 带 value，
+// histogram 带 count/sum/buckets。
+export interface MetricsSeries {
+  name: string
+  type: 'counter' | 'gauge' | 'histogram'
+  value?: number
+  count?: number
+  sum?: number
+  buckets?: MetricsBucket[]
+}
+
+// MetricsRuntime 是进程 runtime 的即时读数。
+export interface MetricsRuntime {
+  goroutines: number
+  gomaxprocs: number
+  threads: number
+  heap_alloc: number
+  heap_objects: number
+  heap_sys: number
+  sys_mem: number
+  next_gc: number
+  gc_count: number
+  gc_pause_last_ns: number
+  gc_cpu_fraction: number
+}
+
+// MetricsSnapshot 是 /api/metrics 的完整快照。
+export interface MetricsSnapshot {
+  uptime_seconds: number
+  runtime: MetricsRuntime
+  metrics: MetricsSeries[]
 }

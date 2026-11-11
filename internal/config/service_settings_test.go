@@ -10,6 +10,7 @@ import (
 func TestServiceSettingsRoundTrip(t *testing.T) {
 	in := DefaultServiceSettings()
 	in.TransportEncryption = false
+	in.MetricsEnabled = true
 	in.PublicHost = "vpn.example.com"
 	in.GlobalClient = GlobalClientSettings{
 		CustomHosts: []CustomHost{{Domain: "youyuevpn4.route", IP: "192.168.60.1"}},
@@ -30,8 +31,8 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if len(kv) != 10 {
-		t.Fatalf("kv has %d sections, want 10: %v", len(kv), kv)
+	if len(kv) != 11 {
+		t.Fatalf("kv has %d sections, want 11: %v", len(kv), kv)
 	}
 	if kv[SettingPublicHost] != "vpn.example.com" || kv[SettingTrafficFlush] != "3s" {
 		t.Fatalf("scalar sections should be stored as plain text: %v", kv)
@@ -52,7 +53,21 @@ func TestDecodeServiceSettingsKeepsDefaults(t *testing.T) {
 	if !base.TransportEncryption {
 		t.Fatal("transport encryption must default to enabled")
 	}
-	out, err := DecodeServiceSettings(map[string]string{SettingLogLevel: "warn"}, base)
+	if base.MetricsEnabled {
+		t.Fatal("metrics must default to disabled")
+	}
+	// 只带 metrics 段的旧记录：其余段保留基线。
+	out, err := DecodeServiceSettings(map[string]string{SettingMetricsEnabled: "true"}, base)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.MetricsEnabled {
+		t.Fatal("metrics_enabled section should apply")
+	}
+	if out.TransportEncryption != base.TransportEncryption {
+		t.Fatal("other sections must keep baseline values")
+	}
+	out, err = DecodeServiceSettings(map[string]string{SettingLogLevel: "warn"}, base)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

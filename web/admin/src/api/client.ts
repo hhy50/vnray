@@ -7,6 +7,7 @@ import type {
   IPMapRow,
   KeyRow,
   Logs,
+  MetricsSnapshot,
   PortMapList,
   PluginList,
   RuleList,
@@ -184,6 +185,8 @@ export const api = {
   serviceConfig: () => request<ServiceConfig>('/api/service-config'),
   serviceConfigSave: (body: ServiceConfig) =>
     request('/api/service-config', json('PUT', body)),
+
+  metrics: () => request<MetricsSnapshot>('/api/metrics'),
 
   clientConfig: () => request<ClientConfig>('/api/client-config'),
   clientConfigSave: (body: ClientConfig) =>

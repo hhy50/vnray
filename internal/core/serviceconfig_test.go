@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/config"
+	"github.com/hhy50/vnray/internal/metrics"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
@@ -204,5 +205,43 @@ func TestServiceConfigApplyRejectsInvalid(t *testing.T) {
 	}
 	if kv, _ := st.GetServiceSettings(context.Background()); len(kv) != 0 {
 		t.Fatalf("invalid settings must not be persisted: %v", kv)
+	}
+}
+
+// TestServiceConfigMetricsToggle 断言指标开关随 Apply 热生效并落库，且重新构造的
+// 实例按库里的值初始化。metrics.Enabled 是进程级状态，测试自己控制并负责恢复默认。
+func TestServiceConfigMetricsToggle(t *testing.T) {
+	defer metrics.SetEnabled(false)
+	ctx := context.Background()
+	st := testStore(t)
+	limits := ratelimit.NewRegistry()
+	meter := traffic.NewMeter(limits)
+	cfg := config.DefaultServer()
+	svc := NewConnectorService(&cfg, transport.NewSessionManager(), nil, limits)
+	initial := config.DefaultServiceSettings()
+	initial.MetricsEnabled = true
+	sc := newServiceConfig(st, svc, meter, nil, nil, initial)
+	if !metrics.Enabled() {
+		t.Fatal("metrics should be enabled after constructing with metrics_enabled=true")
+	}
+
+	next := sc.Current()
+	next.MetricsEnabled = false
+	if err := sc.Apply(ctx, next); err != nil {
+		t.Fatalf("apply disabled: %v", err)
+	}
+	if metrics.Enabled() {
+		t.Fatal("metrics should be disabled after apply")
+	}
+
+	// 落库的值在新实例上生效：模拟重启后按库里的配置初始化。
+	svc2 := NewConnectorService(&cfg, transport.NewSessionManager(), nil, limits)
+	loaded := loadServiceSettings(ctx, st, &cfg)
+	if loaded.MetricsEnabled {
+		t.Fatal("stored settings should carry metrics_enabled=false")
+	}
+	_ = newServiceConfig(st, svc2, meter, nil, nil, loaded)
+	if metrics.Enabled() {
+		t.Fatal("metrics should stay disabled after reload from store")
 	}
 }

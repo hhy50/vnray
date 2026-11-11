@@ -242,3 +242,73 @@ func TestPipeEmptyOperationsDoNotBlock(t *testing.T) {
 		}
 	})
 }
+
+func TestBufferObserverDeltas(t *testing.T) {
+	var mu sync.Mutex
+	var buffered int64
+	SetBufferObserver(func(delta int64) {
+		mu.Lock()
+		buffered += delta
+		mu.Unlock()
+	})
+	t.Cleanup(func() { bufferObserver.Store(nil) })
+
+	r, w := New()
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mu.Lock()
+	if buffered != 5 {
+		mu.Unlock()
+		t.Fatalf("buffered after write = %d, want 5", buffered)
+	}
+	mu.Unlock()
+
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	mu.Lock()
+	if buffered != 0 {
+		mu.Unlock()
+		t.Fatalf("buffered after read = %d, want 0", buffered)
+	}
+	mu.Unlock()
+}
+
+func TestBufferObserverDiscardOnInterrupt(t *testing.T) {
+	var buffered int64
+	var mu sync.Mutex
+	SetBufferObserver(func(delta int64) {
+		mu.Lock()
+		buffered += delta
+		mu.Unlock()
+	})
+	t.Cleanup(func() { bufferObserver.Store(nil) })
+
+	r, w := New()
+	_, _ = w.Write([]byte("residual"))
+	w.Interrupt()
+
+	buf := make([]byte, 4)
+	if _, err := r.Read(buf); err != io.ErrClosedPipe {
+		t.Fatalf("read after interrupt = %v, want io.ErrClosedPipe", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if buffered != 0 {
+		t.Fatalf("buffered after interrupt = %d, want 0 (discarded bytes decremented)", buffered)
+	}
+}
+
+func TestNoObserverIsNoop(t *testing.T) {
+	bufferObserver.Store(nil)
+	r, w := New()
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := r.Read(buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+}

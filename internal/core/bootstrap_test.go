@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 
@@ -173,6 +175,51 @@ func TestDatabaseBootstrapAndReadOnlyLoaders(t *testing.T) {
 	p, _, err = restarted.GetPlugin(ctx, "v2ray")
 	if err != nil || p.Status != store.PluginDisabled {
 		t.Fatal("disabled plugin reset")
+	}
+}
+
+func TestInitialVLESSTLS(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.DefaultServer()
+	cfg.Storage.Driver = "sqlite"
+	cfg.Storage.DSN = filepath.Join(t.TempDir(), "bindings.db")
+	open := func() store.Store {
+		t.Helper()
+		st, err := newBindingStore(ctx, &cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	st := open()
+	defer st.Close()
+	kv, err := st.GetServiceSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seeded config.VLESSSettings
+	if err := json.Unmarshal([]byte(kv[config.SettingVLESS]), &seeded); err != nil {
+		t.Fatalf("decode initial vless settings: %v", err)
+	}
+	if seeded.TLS == nil || !seeded.TLS.Enabled || seeded.TLS.CertPEM == "" || seeded.TLS.KeyPEM == "" {
+		t.Fatalf("initial vless tls not seeded: %+v", seeded)
+	}
+	pair, err := tls.X509KeyPair([]byte(seeded.TLS.CertPEM), []byte(seeded.TLS.KeyPEM))
+	if err != nil {
+		t.Fatalf("seeded pem is not a valid key pair: %v", err)
+	}
+	if len(pair.Certificate) == 0 {
+		t.Fatal("seeded pem has no certificate")
+	}
+	_ = st.Close()
+	st = open()
+	defer st.Close()
+	again, err := st.GetServiceSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again[config.SettingVLESS] != kv[config.SettingVLESS] {
+		t.Fatal("restart re-signed the seeded vless certificate")
 	}
 }
 

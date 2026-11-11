@@ -154,6 +154,16 @@ onMounted(load)
 
           <el-card shadow="never" class="config-card">
             <template #header>
+              <div class="card-title">{{ t('serviceConfig.cardMetrics') }}</div>
+            </template>
+            <el-form-item :label="t('serviceConfig.metricsEnabled')" class="switch-item">
+              <el-switch v-model="form.metrics_enabled" />
+            </el-form-item>
+            <p class="field-tip">{{ t('serviceConfig.metricsTip') }}</p>
+          </el-card>
+
+          <el-card shadow="never" class="config-card">
+            <template #header>
               <div class="card-title">{{ t('serviceConfig.cardLog') }}</div>
             </template>
             <div class="form-row">

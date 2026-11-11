@@ -181,7 +181,6 @@ onMounted(load)
             <el-button link type="primary" @click="openDialog(row, 'port')">{{ t('plugins.changePort') }}</el-button>
           </template>
           <el-button v-else link type="primary" @click="openDialog(row, 'start')">{{ t('plugins.enable') }}</el-button>
-          <el-button v-if="row.tls" link type="primary" @click="openDialog(row, 'tls')">TLS</el-button>
         </template>
       </el-table-column>
     </el-table>

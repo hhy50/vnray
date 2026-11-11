@@ -4,9 +4,29 @@ package pipe
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/smallnest/ringbuffer"
 )
+
+// bufferObserver 由装配层在启动前注入（pipe 不依赖项目内任何包），
+// 记录进出缓冲的字节数；nil 时不统计。
+var bufferObserver atomic.Pointer[func(int64)]
+
+// SetBufferObserver 注册缓冲字节观察者：delta 为本次进入（正）或离开（负）
+// 缓冲的字节数。必须在服务启动前调用，运行期不可替换。
+func SetBufferObserver(f func(int64)) {
+	if f == nil {
+		return
+	}
+	bufferObserver.Store(&f)
+}
+
+func observeBuffer(delta int64) {
+	if f := bufferObserver.Load(); f != nil {
+		(*f)(delta)
+	}
+}
 
 // pipeLimit 是默认缓冲上限。写满后写端阻塞，形成背压。
 const pipeLimit = 64 * 1024
@@ -43,6 +63,9 @@ func (r *Reader) Read(p []byte) (int, error) {
 	for {
 		if q.buf != nil && !q.buf.IsEmpty() {
 			n, err := q.buf.Read(p)
+			if n > 0 {
+				observeBuffer(-int64(n))
+			}
 			q.cond.Broadcast()
 			return n, err
 		}
@@ -75,6 +98,7 @@ func (w *Writer) Write(b []byte) (int, error) {
 		n, err := q.buf.Write(b[written:])
 		written += n
 		if n > 0 {
+			observeBuffer(int64(n))
 			q.cond.Broadcast()
 		}
 		switch err {
@@ -120,7 +144,10 @@ func (p *pipe) close(err error, discard bool) {
 		return
 	}
 	p.err = err
-	if discard {
+	if discard && p.buf != nil {
+		if n := p.buf.Length(); n > 0 {
+			observeBuffer(-int64(n))
+		}
 		p.buf = nil
 	}
 	p.cond.Broadcast()

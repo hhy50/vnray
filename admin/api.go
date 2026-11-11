@@ -55,24 +55,26 @@ func (s *AdminService) apiSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiStatusDTO struct {
-	Version       string `json:"version"`
-	StartedAt     string `json:"started_at"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	ClientCount   int    `json:"client_count"`
-	ActiveTunnels int64  `json:"active_tunnels"`
-	TrafficBytes  int64  `json:"traffic_bytes"`
+	Version        string `json:"version"`
+	StartedAt      string `json:"started_at"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	ClientCount    int    `json:"client_count"`
+	ActiveTunnels  int64  `json:"active_tunnels"`
+	TrafficBytes   int64  `json:"traffic_bytes"`
+	MetricsEnabled bool   `json:"metrics_enabled"`
 }
 
-// apiStatus 是顶栏用的运行态快照。
+// apiStatus 是顶栏用的运行态快照；metrics_enabled 驱动指标页菜单的显隐。
 func (s *AdminService) apiStatus(w http.ResponseWriter, r *http.Request) {
 	traffic, active := transport.TunnelStats()
 	apiOK(w, apiStatusDTO{
-		Version:       s.opts.Version,
-		StartedAt:     s.started.Format(time.RFC3339),
-		UptimeSeconds: int64(time.Since(s.started).Seconds()),
-		ClientCount:   s.clients.ClientCount(),
-		ActiveTunnels: active,
-		TrafficBytes:  traffic,
+		Version:        s.opts.Version,
+		StartedAt:      s.started.Format(time.RFC3339),
+		UptimeSeconds:  int64(time.Since(s.started).Seconds()),
+		ClientCount:    s.clients.ClientCount(),
+		ActiveTunnels:  active,
+		TrafficBytes:   traffic,
+		MetricsEnabled: s.currentServiceSettings().MetricsEnabled,
 	})
 }
 

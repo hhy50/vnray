@@ -10,6 +10,7 @@ import (
 	"github.com/hhy50/vnray/internal/access"
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
@@ -102,6 +103,7 @@ type sessionConfigApplier interface {
 // newServiceConfig 构造分发中心；initial 是启动解析出的生效值。
 func newServiceConfig(st store.Store, svc *ConnectorService, meter *traffic.Meter, resolver *exitResolver, bindings *access.Bindings, initial config.ServiceSettings) *serviceConfig {
 	svc.ApplyTransportEncryption(initial.TransportEncryption)
+	metrics.SetEnabled(initial.MetricsEnabled)
 	initial = cloneServiceSettings(initial)
 	if bindings != nil {
 		bindings.SetGlobalClientConfig(initial.GlobalClient)
@@ -234,6 +236,7 @@ func (c *serviceConfig) apply(ctx context.Context, next config.ServiceSettings) 
 // dispatch 把生效值推给各运行时组件并更新本地快照。日志级别非法不可能发生（已被校验）。
 func (c *serviceConfig) dispatch(ctx context.Context, next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
 	c.svc.ApplyTransportEncryption(next.TransportEncryption)
+	metrics.SetEnabled(next.MetricsEnabled)
 	globalChanged := !reflect.DeepEqual(c.Current().GlobalClient, next.GlobalClient)
 	c.svc.ApplyHeartbeat(heartbeatIntervalOf(next.Heartbeat), next.Heartbeat.Timeout.Std())
 	c.svc.ApplySessionConfig(sess)

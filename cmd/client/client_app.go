@@ -12,6 +12,8 @@ import (
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
+	"github.com/hhy50/vnray/internal/pipe"
 	"github.com/hhy50/vnray/internal/protocol"
 )
 
@@ -50,6 +52,8 @@ func (a *clientApp) serveOnce(ctx context.Context) error {
 
 // newClientApp 装配客户端：ACL 守卫包装配置翻译出的路由，并挂上自定义域名表。
 func newClientApp(cfg config.Client) (*clientApp, error) {
+	// pipe 保持零项目内依赖，缓冲指标经观察者注入；须在数据面启动前设置。
+	pipe.SetBufferObserver(metrics.GaugeFor("pipe_buffered_bytes").Add)
 	if _, err := authkey.Parse(cfg.Server.AuthKey); err != nil {
 		return nil, err
 	}

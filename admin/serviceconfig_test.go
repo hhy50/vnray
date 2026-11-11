@@ -10,6 +10,30 @@ import (
 	"github.com/hhy50/vnray/internal/config"
 )
 
+// TestServiceConfigMetricsEnabled 断言指标开关的保存与回读。
+func TestServiceConfigMetricsEnabled(t *testing.T) {
+	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
+	service := &AdminService{opts: AdminOptions{Settings: fake}}
+	for _, enabled := range []bool{false, true} {
+		w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{MetricsEnabled: enabled}, nil)
+		service.apiServiceConfigSave(w, r)
+		if w.Code != http.StatusOK || fake.cur.MetricsEnabled != enabled {
+			t.Fatalf("save metrics=%v: status=%d, settings=%+v", enabled, w.Code, fake.cur)
+		}
+		w, r = apiContext(http.MethodGet, "/admin/ops/api/service-config", nil, nil)
+		service.apiServiceConfig(w, r)
+		var response struct {
+			Data apiDurationFields `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Data.MetricsEnabled != enabled {
+			t.Fatalf("get metrics=%v: %s", enabled, w.Body.String())
+		}
+	}
+}
+
 func TestServiceConfigTransportEncryption(t *testing.T) {
 	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
 	service := &AdminService{opts: AdminOptions{Settings: fake}}

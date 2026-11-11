@@ -600,6 +600,7 @@ func queryInt(raw url.Values, key string, def int) int {
 // apiDurationFields 不包含 global_client：那一段由 clientconfig.go 独占读写。
 type apiDurationFields struct {
 	TransportEncryption  *bool  `json:"transport_encryption,omitempty"`
+	MetricsEnabled       bool   `json:"metrics_enabled"`
 	HeartbeatInterval    string `json:"heartbeat_interval"`
 	HeartbeatTimeout     string `json:"heartbeat_timeout"`
 	TrafficFlushInterval string `json:"traffic_flush_interval"`
@@ -630,6 +631,7 @@ func (s *AdminService) apiServiceConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	apiOK(w, apiDurationFields{
 		TransportEncryption:  &cur.TransportEncryption,
+		MetricsEnabled:       cur.MetricsEnabled,
 		PublicHost:           cur.PublicHost,
 		HeartbeatEnabled:     cur.Heartbeat.Enabled,
 		HeartbeatInterval:    cur.Heartbeat.Interval.String(),
@@ -666,6 +668,7 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 		if in.TransportEncryption != nil {
 			next.TransportEncryption = *in.TransportEncryption
 		}
+		next.MetricsEnabled = in.MetricsEnabled
 		next.PublicHost = strings.TrimSpace(in.PublicHost)
 		next.Heartbeat.Enabled = in.HeartbeatEnabled
 		next.ServerProxy.Enabled = in.ServerProxyEnabled

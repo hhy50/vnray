@@ -164,6 +164,7 @@ func (s *AdminService) opsRoutes() []opsRoute {
 	return []opsRoute{
 		{"GET", "api/session", s.apiSession},
 		{"GET", "api/status", s.apiStatus},
+		{"GET", "api/metrics", s.apiMetrics},
 
 		{"GET", "api/clients", s.apiClients},
 		{"GET", "api/clients/{name}", s.apiClientDetail},

@@ -12,6 +12,7 @@ import {
   UserFilled,
   Refresh,
   Monitor,
+  Odometer,
   User,
   Connection,
   Grid,
@@ -33,7 +34,7 @@ const appStore = useAppStore()
 const userStore = useUserStore()
 const { t, locale, setLocale, availableLocales } = useI18n()
 
-const status = ref({ version: '', uptime: 0, clients: 0 })
+const status = ref({ version: '', uptime: 0, clients: 0, metrics: false })
 
 // 菜单与 router.ts 一一对应；图标用组件引用，避免运行时按字符串解析。
 const menuItems: { titleKey: MessageKey; icon: Component; path: string }[] = [
@@ -44,8 +45,14 @@ const menuItems: { titleKey: MessageKey; icon: Component; path: string }[] = [
   { titleKey: 'nav.keys', icon: Key, path: '/keys' },
   { titleKey: 'nav.serviceConfig', icon: Setting, path: '/service-config' },
   { titleKey: 'nav.clientConfig', icon: SetUp, path: '/client-config' },
+  { titleKey: 'nav.metrics', icon: Odometer, path: '/metrics' },
   { titleKey: 'nav.logs', icon: Document, path: '/logs' },
 ]
+
+// 指标页随服务端开关显隐：status 每 30s 轮询一次，开关打开后菜单自动出现。
+const visibleMenuItems = computed(() =>
+  menuItems.filter((item) => item.path !== '/metrics' || status.value.metrics),
+)
 
 const activePath = computed(() => {
   const hit = menuItems.find((item) => route.path === item.path || route.path.startsWith(item.path + '/'))
@@ -77,7 +84,12 @@ function onLocaleCommand(code: LocaleCode) {
 async function refreshStatus() {
   try {
     const s = await api.status()
-    status.value = { version: s.version, uptime: s.uptime_seconds, clients: s.client_count }
+    status.value = {
+      version: s.version,
+      uptime: s.uptime_seconds,
+      clients: s.client_count,
+      metrics: !!s.metrics_enabled,
+    }
   } catch {
     /* 顶栏状态失败不打扰用户 */
   }
@@ -164,7 +176,7 @@ onUnmounted(() => {
         class="sidebar-menu"
         @select="onMenuSelect"
       >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+        <el-menu-item v-for="item in visibleMenuItems" :key="item.path" :index="item.path">
           <el-icon><component :is="item.icon" /></el-icon>
           <template #title>{{ t(item.titleKey) }}</template>
         </el-menu-item>

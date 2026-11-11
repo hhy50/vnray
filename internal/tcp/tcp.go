@@ -9,7 +9,17 @@ import (
 	"sync/atomic"
 
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
 	"github.com/hhy50/vnray/internal/routine"
+)
+
+// 会话与流指标按进程聚合：所有 tcp.Server 实例共用一组序列。
+var (
+	activeSessions    = metrics.NewGauge("tcp_active_sessions")
+	activeStreams     = metrics.NewGauge("tcp_active_streams")
+	sessionsTotal     = metrics.NewCounter("tcp_sessions_total")
+	streamsTotal      = metrics.NewCounter("tcp_streams_total")
+	handshakeFailures = metrics.NewCounter("tcp_handshake_failures_total")
 )
 
 // Server 是事件驱动的多路复用监听器：打开监听、为每条连接建立会话并派发成对事件；
@@ -265,6 +275,7 @@ func (s *Server) serveSession(ctx, handshakeCtx context.Context, conn net.Conn) 
 	if s.connHandshake != nil {
 		upgraded, err := s.connHandshake(handshakeCtx, conn)
 		if err != nil {
+			handshakeFailures.Inc()
 			_ = conn.Close()
 			logging.Warn("tcp: connection handshake rejected", "remote", r, "err", err)
 			return
@@ -273,6 +284,7 @@ func (s *Server) serveSession(ctx, handshakeCtx context.Context, conn net.Conn) 
 	}
 	session, err := s.muxer.Server(conn, s.cfg.Load())
 	if err != nil {
+		handshakeFailures.Inc()
 		logging.Errorf("tcp: create %s session remote=%s, error: %v", s.muxer.Name(), r, err)
 		_ = conn.Close()
 		return
@@ -281,12 +293,16 @@ func (s *Server) serveSession(ctx, handshakeCtx context.Context, conn net.Conn) 
 	session = &connectionSession{Session: session, conn: conn, cancel: cancel}
 	info, err := listener.Handshake(session)
 	if err != nil {
+		handshakeFailures.Inc()
 		logging.Warnf("tcp: handshake failed, remote=%s: %v", r, err)
 		_ = session.Close()
 		return
 	}
 	info.Context = ctx
+	activeSessions.Add(1)
+	sessionsTotal.Inc()
 	defer func() {
+		activeSessions.Add(-1)
 		cancel()
 		// 先等在途流事件派发完再发 session.close：保证关闭事件排在所有流事件之后。
 		logging.Warnf("tcp session closed, remote=%s", r)
@@ -336,7 +352,10 @@ func serveStream(listener EventListener, info *SessionInfo, stream Stream) {
 		_ = stream.Close()
 		return
 	}
+	activeStreams.Add(1)
+	streamsTotal.Inc()
 	defer func() {
+		activeStreams.Add(-1)
 		listener.OnStreamClose(info, stream)
 		_ = stream.Close()
 	}()

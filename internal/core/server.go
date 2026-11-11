@@ -12,6 +12,8 @@ import (
 	"github.com/hhy50/vnray/internal/extension"
 	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/metrics"
+	"github.com/hhy50/vnray/internal/pipe"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/portmap"
 	"github.com/hhy50/vnray/internal/ratelimit"
@@ -111,6 +113,8 @@ func newUserRegistry(userBindings *access.Bindings) transport.UserRegistry {
 // initServerApp 手写组装服务端进程：绑定表存储 → 绑定表 → 会话管理器 →
 // 数据面服务（+ 管理面，可选）→ Instance；字段间依赖关系一目了然，
 func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, error) {
+	// pipe 保持零项目内依赖，缓冲指标经观察者注入；须在数据面启动前设置。
+	pipe.SetBufferObserver(metrics.GaugeFor("pipe_buffered_bytes").Add)
 	st, err := newBindingStore(appctx, cfg)
 	if err != nil {
 		return nil, err
@@ -124,6 +128,8 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	sessions := transport.NewSessionManager()
 	// 运行时服务配置（管理台可在线改）先于组件构造解析：会话参数与心跳在此定基线。
 	settings := loadServiceSettings(appctx, st, cfg)
+	// 指标采集开关来自运行时配置：须在数据面开工前生效。
+	metrics.SetEnabled(settings.MetricsEnabled)
 	// 用户出站规则同样先解析：数据面按规则名判定，管理台经同一实例读写。
 	rules := loadRuleSet(appctx, st)
 	bindings := newBindings(st)

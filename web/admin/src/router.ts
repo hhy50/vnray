@@ -81,6 +81,12 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.clientConfig' },
       },
       {
+        path: 'metrics',
+        name: 'metrics',
+        component: () => import('./views/Metrics.vue'),
+        meta: { titleKey: 'nav.metrics' },
+      },
+      {
         path: 'logs',
         name: 'logs',
         component: () => import('./views/Logs.vue'),

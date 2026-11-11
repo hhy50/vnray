@@ -15,8 +15,11 @@ import (
 // 这里只放**运行期可热改**的参数；监听地址、管理端口、存储等需重启的配置不在其中。
 type ServiceSettings struct {
 	// TransportEncryption 只影响新连接，缺省开启。
-	TransportEncryption bool                 `json:"transport_encryption"`
-	GlobalClient        GlobalClientSettings `json:"global_client"`
+	TransportEncryption bool `json:"transport_encryption"`
+	// MetricsEnabled 是进程性能指标的采集总开关：默认关闭；开启后采集指标并
+	// 暴露管理台指标接口。热改即时生效。
+	MetricsEnabled bool                 `json:"metrics_enabled"`
+	GlobalClient   GlobalClientSettings `json:"global_client"`
 	// PublicHost 同 Server.PublicHost：vmess:// 分享链接对外暴露的裸主机。
 	PublicHost string    `json:"public_host"`
 	Heartbeat  Heartbeat `json:"heartbeat"`
@@ -117,6 +120,7 @@ func DefaultSessionSettings() SessionSettings {
 func DefaultServiceSettings() ServiceSettings {
 	return ServiceSettings{
 		TransportEncryption:  true,
+		MetricsEnabled:       false,
 		Heartbeat:            DefaultHeartbeat(),
 		LogLevel:             DefaultLogLevel,
 		TrafficFlushInterval: Duration(DefaultTrafficFlushInterval),
@@ -194,6 +198,8 @@ func (l LogRotation) Validate() error {
 const (
 	// SettingTransportEncryption 保存客户端握手后的传输加密开关。
 	SettingTransportEncryption = "transport_encryption"
+	// SettingMetricsEnabled 保存性能指标的采集总开关。
+	SettingMetricsEnabled = "metrics_enabled"
 	// SettingGlobalClient 保存全局客户端的 Host 与 IP 段映射。
 	SettingGlobalClient = "global_client"
 	SettingPublicHost   = "public_host"
@@ -215,6 +221,7 @@ func EncodeServiceSettings(s ServiceSettings) (map[string]string, error) {
 	}
 	sections := map[string]any{
 		SettingTransportEncryption: s.TransportEncryption,
+		SettingMetricsEnabled:      s.MetricsEnabled,
 		SettingGlobalClient:        s.GlobalClient,
 		SettingHeartbeat:           s.Heartbeat,
 		SettingSession:             s.Session,
@@ -241,6 +248,8 @@ func DecodeServiceSettings(kv map[string]string, base ServiceSettings) (ServiceS
 		switch key {
 		case SettingTransportEncryption:
 			err = json.Unmarshal([]byte(raw), &out.TransportEncryption)
+		case SettingMetricsEnabled:
+			err = json.Unmarshal([]byte(raw), &out.MetricsEnabled)
 		case SettingGlobalClient:
 			err = json.Unmarshal([]byte(raw), &out.GlobalClient)
 		case SettingPublicHost:
