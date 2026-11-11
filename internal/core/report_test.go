@@ -52,8 +52,20 @@ func TestClientReportIdentityFields(t *testing.T) {
 					before, existed := b.LookupClient(context.Background(), info.ClientKey())
 					session := newReportSession(t, svc, key)
 					reply, err := exchangeReport(t, session, info)
-					if err != nil || reply.OK != tc.allow {
+					allowed := err == nil && reply.OK
+					if allowed != tc.allow {
 						t.Fatalf("report name %q: reply=%+v, err=%v, want allowed=%v", tc.name, reply, err, tc.allow)
+					}
+					if !tc.allow {
+						// 拒绝后立即关闭会话，可能抢先于 yamux 的写完成通知或应答读取。
+						if err == nil && reply.Reason == "" {
+							t.Fatal("rejected report has no reason")
+						}
+						select {
+						case <-session.CloseChan():
+						case <-time.After(2 * time.Second):
+							t.Fatal("rejected report did not close session")
+						}
 					}
 					after, found := b.LookupClient(context.Background(), info.ClientKey())
 					if tc.allow {
