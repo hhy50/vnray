@@ -17,10 +17,8 @@
 .workbuddy/
 .workbuddy-ai/
 docs/*
-!docs/PROTOCOL.md
+!docs/GUIDE.md
 !docs/adr/
-docs/adr/*
-docs/
 logs/
 log/
 .DS_Store

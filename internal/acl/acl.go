@@ -2,6 +2,7 @@ package acl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -113,4 +114,18 @@ func (d *guardDispatcher) Dispatch(ctx context.Context, dest dispatch.Destinatio
 		return nil, err
 	}
 	return d.next.Dispatch(ctx, dest)
+}
+
+// DialTCP 保留底层分发器的直拨能力，且不能绕过 ACL。
+func (d *guardDispatcher) DialTCP(ctx context.Context, dest dispatch.Destination) (net.Conn, error) {
+	dialer, ok := d.next.(interface {
+		DialTCP(context.Context, dispatch.Destination) (net.Conn, error)
+	})
+	if !ok {
+		return nil, errors.ErrUnsupported
+	}
+	if err := d.guard.Check(ctx, dest.Host); err != nil {
+		return nil, err
+	}
+	return dialer.DialTCP(ctx, dest)
 }

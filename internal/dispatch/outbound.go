@@ -93,6 +93,19 @@ func (d *DirectOutbound) Tag() string {
 	return "direct"
 }
 
+// DialContext 按目标直接建立 TCP 连接（应用 hosts/ipMaps 改写）。给自行搬运字节流
+// 的调用方用：绕过管道与派发协程，一条隧道只留调用方自己的双向泵。
+func (d *DirectOutbound) DialContext(ctx context.Context, dest Destination) (net.Conn, error) {
+	if dest.netName() != "tcp" {
+		return nil, fmt.Errorf("direct: dial %s: unsupported network %q", dest, dest.netName())
+	}
+	conn, err := d.dial(ctx, dest.String())
+	if err != nil {
+		return nil, fmt.Errorf("direct: dial %s: %w", dest, err)
+	}
+	return conn, nil
+}
+
 // Process 按目标网络类型分流出站：TCP 走字节流半关闭搬运，UDP 走数据报出站（见 processUDP）。
 func (d *DirectOutbound) Process(ctx context.Context, link *Link, dest Destination) error {
 	if dest.netName() == "udp" {

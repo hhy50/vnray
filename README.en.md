@@ -35,25 +35,6 @@ The server does not need to enter the private network. It only authenticates use
 
 Architecturally, this may look like installing a V2Ray server inside the client network and exposing it through a public port mapping. That is not how vnray works internally: the client maintains an outbound tunnel to vnray, and the public server routes user traffic through that tunnel.
 
-> vnray is not a traditional layer-2 VPN that places two machines on the same LAN. It is better suited to request-level routing: **user request → selected client → destination service**.
-
-## Core capabilities
-
-- **Configuration reports** — Immediately after the secure handshake and every 5 minutes, clients report their current configuration and receive the full server configuration. The client Auth frame has been retired.
-- **vnray-user inbound** — Native users connect to a separate plugin port configured and enabled in the admin console; internal clients keep using the main port.
-- **Client-initiated tunnels** — The server does not need inbound access to the private network, which works well with NAT and outbound-only networks.
-- **VLESS / VMess access** — Connect with standard V2Ray clients; the two inbound protocols can be configured with separate ports in the admin console.
-- **Shadowsocks access** — Provides an AEAD TCP inbound; the default cipher is `aes-256-gcm`.
-- **Port mapping** — Expose a TCP service reachable by the client on a public port, such as SSH, a database, or an internal web service.
-  Each mapping tracks cumulative upload (visitor → local service) and download (local service → visitor), also included in client totals. Counts cover forwarded payload only, excluding TLS, tunnel, and encryption overhead. Totals are persisted at the traffic flush interval (10 seconds by default); refresh the mapping list to view them. Editing, disabling, or restarting preserves persisted totals; deleting a mapping removes its totals. An unexpected exit may lose pending increments.
-- **Per-client egress selection** — Connect multiple clients to one server and bind different users to different clients.
-- **Routing and host mapping** — Configure direct or reject rules, and map custom domains to specific IP addresses on the client side.
-- **User egress rules** — The server enforces account rules for vn-v1, VMess, VLESS, and Shadowsocks, with accounts identified by protocol and credential. Rejected destinations never open an exit tunnel. Direct destinations use the bound exit while bypassing its local routing. Mux TCP checks each sub-connection target; mux UDP checks every datagram target. Rule definitions stay on the server.
-- **Mux UDP / XUDP** — Supports per-datagram destinations and response source addresses, with up to 64 target/routing combinations per UDP sub-connection. GlobalID does not restore UDP exits across connections; reconnecting may change the NAT source port.
-- **Bandwidth and concurrency controls** — Limit upload/download bandwidth and concurrent connections per user.
-- **Admin console** — View client online status, latency, traffic, and configuration; manage users, plugins, keys, and port mappings online.
-- **Persistent storage** — Supports SQLite and MySQL; the example configuration uses SQLite.
-
 ## How it works
 
 ```text
@@ -70,176 +51,103 @@ Architecturally, this may look like installing a V2Ray server inside the client 
 | **Client** | A private or target network | Connects to the server proactively and accesses services on the local machine or its surrounding network |
 | **User client** | The user's device | Connects to the server with VLESS, VMess, or Shadowsocks |
 
-Each in-memory pipe allocates a reusable 64 KiB buffer on its first write. Writers wait when the buffer is full, including writes larger than the capacity. Graceful close preserves buffered tail data. See [ADR 0061](docs/adr/0061-ringbuffer-pipe.md) for the implementation decision.
+## Core capabilities
+
+- **Client-initiated tunnels** — The server does not need inbound access to the private network, which works well with NAT and outbound-only networks.
+- **Multiple client egresses** — Connect several clients to one server and bind different users to different clients; `server:self` is reserved for local server egress.
+- **VLESS / VMess / Shadowsocks access** — Connect with standard clients; mux and XUDP are supported.
+- **Port mapping** — Expose a TCP service reachable by the client on a public port, with per-mapping upload/download traffic accounting.
+- **Link encryption** — The tunnel between client and server defaults to ChaCha20-Poly1305 AEAD and can be turned off in the admin console.
+- **User egress rules** — Reject/direct lists are enforced by the server and apply to all inbound protocols.
+- **Routing and host mapping** — Client-side direct rules and domain-to-IP mappings, pushed hot from the admin console.
+- **Bandwidth and concurrency controls** — Limit upload/download bandwidth and concurrent connections per user.
+- **Admin console** — Manage users, plugins, keys, and port mappings online, with live logs and performance metrics in English and Chinese.
+- **Persistent storage** — SQLite (default) or MySQL.
 
 ## Quick start
 
-The steps below use the example configuration included in the repository. For a minimal test, the server and client can run on the same machine. In a real deployment, place the client on a private-network machine that can reach the target service.
+Download `vnserver` (server) and `vnclient` (client) for your platform from the [Releases](https://github.com/hhy50/vnray/releases) page, and grab the example configuration from the repository's [`configs/`](configs/) directory.
 
-Alternatively, download prebuilt binaries from the [GitHub Releases page](https://github.com/hhy50/vnray/releases).
+### 1. Start the server
 
-For OpenWrt, [`openwrt/`](openwrt/README.md) provides a client package and LuCI settings with startup management and system logging. Build multi-architecture `.ipk` packages for opkg, or use the matching OpenWrt SDK for apk-based firmware.
-
-### 1. Prepare the binaries
-
-Go `1.26+` is required. The server embeds the Vue admin console, so build the frontend assets before the first Go build:
-
-```bash
-cd web/admin
-npm install
-npm run build
-cd ../..
-```
-
-Client command handling, configuration assembly, and reconnect logic live in `cmd/client`; the communication runtime lives in `internal/client`. The server entry point is in `cmd/server`, with assembly and service logic in `internal/core`.
-
-`core.initServerApp` explicitly constructs plugins, and `PluginManager` coordinates their state and lifecycle. User bindings, credential caches, and client configuration pushes live in `internal/access`; `admin` provides HTTP management and compatibility aliases for the original binding API. Failed startup rolls back created services. Shutdown stops management writes and new connections, waits for relays, flushes final traffic increments, then closes the database. See [ADR 0051](docs/adr/0051-server-lifecycle-and-control-boundaries.md).
-
-Then build the server and client from the repository root:
-
-```bash
-go build -o vnserver ./cmd/server
-go build -o vnclient ./cmd/client
-```
-
-> `web/admin/dist` contains the embedded admin console assets and is not committed to the repository by default. Run the frontend build again after cloning a fresh copy.
-
-If you prefer to run the source directly, complete the frontend build above first and then run:
-
-```bash
-go run ./cmd/server -c configs/server.yaml
-go run ./cmd/client -c configs/client.yaml
-```
-
-### 2. Start the server
-
-The example server configuration is [`configs/server.yaml`](configs/server.yaml). It uses:
-
-- `9000` for client connections;
-- `8080` for the admin console;
-- `bindings.db` as the SQLite database;
-- `admin/admin` as the example admin credentials.
-
-Start the server:
+The example [`configs/server.yaml`](configs/server.yaml) uses: `9000` for client tunnels, `8080` for the admin console (credentials `admin/admin`), and `bindings.db` as the SQLite database.
 
 ```bash
 ./vnserver -c configs/server.yaml
 ```
 
-### 3. Start the client
+On first startup the database is initialized automatically and a bootstrap key `2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=` with scope `default:*` is inserted (matching the example client configuration). Regenerate keys in the admin console for production use.
 
-On its first database initialization, the server inserts the fixed initial key `2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=` with scope `*` (all clients). The client example uses the same key. Restarts do not duplicate it, overwrite edits, or restore a deleted key. Databases with existing server settings or keys do not receive this default.
+### 2. Start the client
 
-Database startup prepares the schema, then writes the initial key, service settings, default rules, plugin states, and initialization version in one transaction. Any failure rolls back the data and stops startup; the next startup can retry. Existing edits and deletions are preserved, and legacy markers and rule keys are migrated within the same transaction. MySQL schema statements are repeatable but cannot participate in the data transaction. Once initialized, changes to `plugin.enabled` do not seed new records; use the admin console.
-
-For additional keys, sign in at `http://<server-address>:8080`, choose a scope on the **Authentication keys** page, and generate a key to copy into the client configuration. The creation API does not accept manually supplied keys.
-
-Configure `group` and `name` separately; the client reports independent JSON fields, for example `{"group":"office","name":"desktop-01"}`. The server retains `office:desktop-01` as its internal binding key. The admin client list displays group and name separately. An omitted or empty `group` uses `default`. An omitted or empty `name` generates `<hostname>-<IPv4>`; the IP suffix is omitted if no IPv4 address is available. Neither field may contain `:` or `*`. Key scopes accept `*` for all clients, `office:*` for the office group, or `office:desktop-01` for one client. `server:self` is reserved for local server egress.
-
-**Client name upgrade (BREAKING):** The namespace layer has been removed, and legacy `namespace:group:name` names are rejected. Upgrade both ends together and update client names, user bindings, port mappings, per-client settings, and key scopes. Resolve duplicate names across former namespaces before merging groups. Database records are not rewritten automatically. Existing `*` scopes still apply; `X:*` now means group X. Replace legacy three-segment exact scopes with two-segment scopes; the admin console can generate replacement keys for the clients. Split an existing `name: office:desktop-01` into `group: office` and `name: desktop-01`; preserving the full identity requires no server binding or key changes. See [ADR 0062](docs/adr/0062-client-groups.md), [ADR 0063](docs/adr/0063-client-group-config.md), and [ADR 0064](docs/adr/0064-client-report-identity-fields.md). Clients that report only a combined name must also upgrade together with the server; see the [report protocol](docs/PROTOCOL.md).
-
-Edit [`configs/client.yaml`](configs/client.yaml):
+On a machine that can reach the target service, edit [`configs/client.yaml`](configs/client.yaml) and start:
 
 ```yaml
 server:
   addr: <public-server-address>:9000
   auth_key: 2nC7NBBcutpkJg0cPkyQgkzXqtWrri/JB4QyXI5N258=
-group: office
-name: desktop-01
+group: default        # group; omitted means default
+name: desktop-01      # instance name; omitted generates <hostname>-<IPv4>
 ```
-
-The initial key also works without the admin console. A nonempty managed key table takes precedence over the configuration key. After clearing that table, run `./vnserver keygen` and copy its output into both the server's `server.auth.key` and the client's `server.auth_key` to use the configuration fallback. Keys encode 32 random bytes in standard Base64, and clients are rejected when no valid key is available. Start the client on a machine that can reach the target service:
 
 ```bash
 ./vnclient -c configs/client.yaml
 ```
 
-The client maintains a long-lived connection and reconnects automatically after a disconnection by default.
+The client maintains a long-lived connection and reconnects automatically after a disconnection.
 
-The server indexes client keys in memory at startup. Handshake lookup and scope authorization take average O(1) time. Admin changes update the local index immediately; direct database edits or changes made by another server sharing the database require restarting the affected servers to synchronize their indexes.
+### 3. Open the admin console and create a user
 
-**BREAKING upgrade:** Update the server and internal clients together. Plaintext internal clients, old passwords, and manually supplied keys in the admin creation API are no longer supported. Generate new managed keys, update clients, and remove old keys; stored credentials are not silently rewritten. Deleting a key rejects future connections. Disconnect existing sessions in the client list to revoke them immediately.
+Open `http://<server-address>:8080`:
 
-The admin console's **Service configuration → Encrypted transport** switch controls communication after the handshake and defaults to enabled. Enabled connections use ChaCha20-Poly1305 AEAD between TCP and yamux for authentication, heartbeat, configuration and tunneled data. Disabled connections carry plaintext after the handshake, without confidentiality or integrity protection for business data. Both modes require auth_key proof and scope authorization. Clients follow the server automatically. Changes persist and apply to new connections; existing connections adopt the setting after reconnecting.
+1. Confirm the client is online under **Clients**.
+2. Enable the inbound protocol and set its listening port under **Plugins**.
+3. Create a user under **Users**, pick the protocol and egress client, then copy the connection info into your V2Ray / Shadowsocks client.
+4. To expose a TCP service in the client's network, create a mapping under **Port Mappings**.
 
-Both peers contribute random challenges. HKDF-SHA256 and HMAC-SHA256 authenticate the selected mode, and the handshake sends only the public key identifier, never the PSK. Configuration reports carry no key. This PSK design has no forward secrecy, and holders of a shared key belong to the same trust domain. Transport v2 is incompatible with the previous AEAD v1 handshake: update both peers together; existing generated keys remain valid. VLESS/VMess/SS and admin HTTP retain their own protocols. Native `vn-v1` users now use the separate `vnray-user` port; the main port accepts only internal clients. See the [protocol](docs/PROTOCOL.md) and [ADR 0045](docs/adr/0045-negotiated-transport-encryption.md). The report protocol and separate user listener also require both peers to be updated together.
-
-### 4. Open the admin console and create a user
-
-Open:
-
-```text
-http://<server-address>:8080
-```
-
-Sign in with the configured admin account, then:
-
-1. Open **Clients** and confirm that the client is online.
-2. Open **Plugins**, enable the inbound protocol you need, and set its listening port.
-3. Open **Users**, create a user, and select the protocol and egress client.
-4. Copy the generated connection information and import it into the corresponding V2Ray or Shadowsocks client.
-5. If you need to expose a TCP service in the client's network, create a mapping in **Port Mappings**.
-
-<div align="center">
-  <img src="admin_client_tab.png" alt="vnray admin console showing connected clients" width="900">
-</div>
+For OpenWrt, [`openwrt/`](openwrt/README.md) provides a client package with a LuCI settings page, startup management, and multi-architecture packaging.
 
 ## Ports and protocols
 
-| Purpose | Default port / configuration | Description |
+| Purpose | Default / configuration | Description |
 | --- | --- | --- |
-| Client tunnel | `9000`, `server.listen` | The port that clients use to connect proactively; it does not directly carry user protocol traffic |
-| vnray-user inbound | Set in the plugin page, e.g. `9001` | Separate native user port; disabled until configured |
-| Admin console | `8080`, `admin.listen` | Manage clients, users, plugins, and port mappings after signing in |
-| VMess inbound | Configured in the admin console; defaults to `11120` | For VMess client connections |
-| VLESS inbound | Configured in the admin console; defaults to `11121` | For VLESS client connections |
-| Shadowsocks inbound | Configured in the admin console | For Shadowsocks client connections |
-
-The `vnray-user` plugin starts disabled with no preset port. Configure and enable it under **Plugins**, then point native `vn-v1` users to that port. Existing user bindings, internal client addresses, and generated keys remain valid. Revoked keys are rejected on the next periodic report; disconnect sessions in the admin console for immediate revocation.
+| Client tunnel | `9000`, `server.listen` | The port clients connect to proactively; it does not carry user protocol traffic |
+| vnray-user inbound | Set in the plugin page, e.g. `9001` | Separate port for `vn-v1` users; disabled until configured |
+| Admin console | `8080`, `admin.listen` | Manage clients, users, plugins, and port mappings |
+| VMess / VLESS / SS inbound | Configured in the admin console | For standard client connections |
 
 ## Configuration files
 
-- [`configs/server.yaml`](configs/server.yaml): server listener, authentication key, admin console, storage, plugin, and logging settings.
-- [`configs/client.yaml`](configs/client.yaml): server address, authentication key, reconnect policy, access controls, and outbound routing settings.
-
-Command-line option:
+- [`configs/server.yaml`](configs/server.yaml): listener, authentication, admin console, storage, plugin, and logging settings.
+- [`configs/client.yaml`](configs/client.yaml): server address, authentication key, reconnect policy, access controls, and routing.
 
 ```text
 -c, --config  YAML configuration file; use built-in defaults when omitted
 ```
 
-The client also supports temporarily overriding the server address from the command line:
-
-```bash
-./vnclient -c configs/client.yaml --server <server-address>:9000
-```
+The client also supports temporarily overriding the server address with `--server <address>:9000`.
 
 ## Port mapping or protocol access?
 
-- **You want multiple users to connect with standard proxy clients**: create VLESS, VMess, or Shadowsocks users in the admin console.
-- **You only need to expose one internal TCP service**: use port mapping, for example to expose an internal SSH service on a public port.
-- **You want traffic to leave through a specific network**: bind the user to the corresponding client; one server can connect multiple clients.
+- **Multiple users connecting with standard proxy clients**: create VLESS, VMess, or Shadowsocks users in the admin console.
+- **Only one internal TCP service to expose**: use port mapping, for example to expose internal SSH on a public port.
+- **Traffic must leave through a specific network**: bind the user to the corresponding client.
 
 ## Security
 
-The example configuration is intended for local verification and contains public default admin credentials. Before exposing the service to the public Internet:
+The example configuration is intended for local verification and contains public default admin credentials and a public bootstrap key. Before exposing the service to the public Internet:
 
 - Change the admin username and password.
-- Generate client keys and restrict their authorization scope to the intended clients or groups.
+- Generate new client keys with per-client or per-group scopes and remove the bootstrap key.
 - Open only the ports you actually need and restrict access to the admin console.
 - Set reasonable bandwidth, concurrency, and client access limits for each user.
-- For production use, prefer VLESS with TLS and protect the certificates and private keys carefully.
+- For production use, prefer VLESS with TLS and protect certificates and private keys carefully.
+
+## Documentation
+
+- **Operations guide** (key management, encryption switch, client config push, log page, metrics, upgrade notes): [docs/GUIDE.md](docs/GUIDE.md) (Chinese)
+- **Architecture decisions**: [docs/adr/](docs/adr/)
 
 ## Project status
 
-Admin configuration changes are not serialized across requests. Concurrent saves may overwrite one another, and inbound configuration changes may affect or disconnect existing connections. Shared account, authentication, and connection tables use concurrent containers; individual table operations do not make an entire admin operation transactional.
-
-vnray is under active development. Protocols, configuration, and admin console APIs may change. Issues and improvement suggestions are welcome.
-
-## Performance metrics
-
-The admin dashboard groups metrics into **Server, Process, and Operations**. When enabled, one background task samples every 2 seconds. The authenticated `/admin/ops/api/metrics` endpoint serves pre-encoded snapshots without database scans or request-time `ReadMemStats`.
-
-Linux / OpenWrt with procfs provides host CPU/memory/network rates and process CPU/RSS. Host values are OS-visible resources, not container quotas; process CPU uses 100% per core. Go heap, goroutines and GC are separate from physical memory and OS CPU. Operational metrics cover buffered payload, cumulative allocations, secure handshakes, heartbeat probes, requests entering transfer, and directional payload bytes.
-
-Disabling pauses resource sampling and event counters, but lifecycle gauges remain balanced across toggles. Transfer and allocation totals span the process lifetime. Unsupported or not-yet-sampled fields are `—`, never substituted with misleading zeros. macOS currently provides process CPU, host total memory and Go runtime data; other platforms retain Go runtime and operational metrics. See [ADR 0066](docs/adr/0066-background-metrics.md).
+vnray is under active development. Protocols, configuration, and admin console APIs may change. Admin configuration changes are not serialized across requests; concurrent saves may overwrite one another. Issues and improvement suggestions are welcome.

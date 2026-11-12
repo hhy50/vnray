@@ -2,7 +2,9 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
@@ -78,10 +80,11 @@ func (d *DefaultDispatcher) getLink() (inbound *Link, outbound *Link) {
 	return
 }
 
-// routedDispatch 按顺序匹配规则选出站，找不到就走默认出站。
-func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *Link, dest Destination) {
-	tag := d.defaultTag
-	var via string = "default"
+// Pick 按顺序匹配规则选出该目标的出站，未命中回落默认出站；tag/via 只用于日志。
+// 调用方拿到的 handler 在 dispatcher 构造后不再变化。
+func (d *DefaultDispatcher) Pick(dest Destination) (handler OutboundHandler, tag, via string, ok bool) {
+	tag = d.defaultTag
+	via = "default"
 	for _, r := range d.rules {
 		if r.Match(dest) {
 			tag = r.Tag
@@ -89,7 +92,36 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *Link, dest
 			break
 		}
 	}
-	handler, ok := d.outbounds[tag]
+	handler, ok = d.outbounds[tag]
+	return handler, tag, via, ok
+}
+
+// DialTCP 同步选路并直拨 TCP；非直连出站返回 errors.ErrUnsupported，调用方可回退 Dispatch。
+func (d *DefaultDispatcher) DialTCP(ctx context.Context, dest Destination) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !dest.IsValid() {
+		return nil, fmt.Errorf("dispatcher: invalid destination %v", dest)
+	}
+	if dest.netName() != "tcp" {
+		return nil, errors.ErrUnsupported
+	}
+	handler, tag, via, ok := d.Pick(dest)
+	if !ok {
+		return nil, &OutboundError{Reason: "outbound " + tag + " not registered"}
+	}
+	direct, ok := handler.(*DirectOutbound)
+	if !ok {
+		return nil, errors.ErrUnsupported
+	}
+	logging.Info("dispatcher: route selected", "destination", dest.String(), "outbound", tag, "route", via)
+	return direct.DialContext(ctx, dest)
+}
+
+// routedDispatch 按顺序匹配规则选出站，找不到就走默认出站。
+func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *Link, dest Destination) {
+	handler, tag, via, ok := d.Pick(dest)
 	if !ok {
 		logging.Error("dispatcher: outbound not found", "outbound", tag, "destination", dest.String())
 		link.Reader.Interrupt()

@@ -17,6 +17,7 @@ import (
 
 	"github.com/hhy50/vnray/internal/dispatch"
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/netlimit"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
@@ -124,6 +125,9 @@ func NewAdminService(addr string, clients *transport.SessionManager, opts AdminO
 		Addr:              addr,
 		Handler:           s.trackRequests(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		// 客户端异常断开不会再发 FIN，没有空闲超时的话每条僵尸连接会一直占一个
+		// 协程；管理台轮询间隔是秒级，90s 足够区分「空闲」与「还会回来」。
+		IdleTimeout: 90 * time.Second,
 	}
 	return s, nil
 }
@@ -240,7 +244,7 @@ func (s *AdminService) Start(ctx context.Context) error {
 	}
 	routine.Go("admin.service.serve", func() {
 		defer close(done)
-		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.srv.Serve(netlimit.New(ln, netlimit.DefaultMaxConns)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.Error("admin: web admin stopped", "err", err)
 		}
 	})

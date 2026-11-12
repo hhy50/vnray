@@ -23,19 +23,21 @@ import (
 	"github.com/hhy50/vnray/internal/transport"
 )
 
-// localExit 是服务端本机出口，实现 transport.Exit。
+// localExit 是服务端本机出口，实现 transport.Exit。guard 与 dispatcher 分开持有：
+// ACL 必须在选路前同步判掉，dispatcher 只用来选路和 UDP 的管道出站。
 type localExit struct {
-	dispatcher dispatch.Dispatcher
+	guard      *acl.Guard
+	dispatcher *dispatch.DefaultDispatcher
 }
 
-// buildLocalExit 按运行期配置构造本机出口：ACL 守卫包装路由 dispatcher，
+// buildLocalExit 按运行期配置构造本机出口：ACL 守卫 + 路由 dispatcher，
 // public/private 均为空时不设网段限制。构建即校验（ACL 网段解析失败返回错误）。
 func buildLocalExit(sp config.ServerProxySettings) (*localExit, error) {
 	guard, err := acl.NewGuard(sp.Public, sp.Private)
 	if err != nil {
 		return nil, fmt.Errorf("server proxy: build acl guard: %w", err)
 	}
-	return &localExit{dispatcher: guard.Wrap(routing.NewDispatcher(&sp.Routing))}, nil
+	return &localExit{guard: guard, dispatcher: routing.NewDispatcher(&sp.Routing)}, nil
 }
 
 // OpenTunnel 校验目标并出站：ACL/目标校验同步返回错误，拨号异步（与远程客户端一致，
@@ -44,7 +46,8 @@ func (e *localExit) OpenTunnel(dest dispatch.Destination, req protocol.TunnelReq
 	return e.OpenTunnelContext(context.Background(), dest, req)
 }
 
-// OpenTunnelContext 将请求取消传给本机出站。
+// OpenTunnelContext 将请求取消传给本机出站。TCP 直连出站直接拨号并把真实连接交给
+// 调用方搬运：不建管道、不起派发协程，一条隧道只需调用方的双向泵两个协程。
 func (e *localExit) OpenTunnelContext(ctx context.Context, dest dispatch.Destination, _ protocol.TunnelRequest) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -52,6 +55,42 @@ func (e *localExit) OpenTunnelContext(ctx context.Context, dest dispatch.Destina
 	if !dest.IsValid() {
 		return nil, fmt.Errorf("server proxy: invalid destination %s", dest)
 	}
+	if e.guard != nil {
+		if err := e.guard.Check(ctx, dest.Host); err != nil {
+			return nil, err
+		}
+	}
+	// UDP 没有可直拨的字节流，数据报语义仍由管道出站的 processUDP 处理。
+	if dest.Network != "udp" {
+		return e.openDirect(ctx, dest)
+	}
+	return e.openRelayed(ctx, dest)
+}
+
+// openDirect 在调用方协程里同步拨号：持有入站连接的那个协程本来就要等隧道建立
+// 才能开始搬运，多起一个拨号协程只会让拨号期的协程数翻倍。
+func (e *localExit) openDirect(ctx context.Context, dest dispatch.Destination) (net.Conn, error) {
+	handler, tag, via, ok := e.dispatcher.Pick(dest)
+	if !ok {
+		return nil, &dispatch.OutboundError{Reason: "outbound " + tag + " not registered"}
+	}
+	direct, isDirect := handler.(*dispatch.DirectOutbound)
+	if !isDirect {
+		return e.openRelayed(ctx, dest)
+	}
+	logging.Info("dispatcher: route selected",
+		"destination", dest.String(), "outbound", tag, "route", via)
+	conn, err := direct.DialContext(ctx, dest)
+	if err != nil {
+		logging.Warn("dispatcher: outbound failed",
+			"destination", dest.String(), "outbound", tag, "route", via, "err", err)
+		return nil, err
+	}
+	return conn, nil
+}
+
+// openRelayed 是管道出站路径：异步派发，返回的 linkConn 在关闭时取消出站。
+func (e *localExit) openRelayed(ctx context.Context, dest dispatch.Destination) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	link, err := e.dispatcher.Dispatch(ctx, dest)
 	if err != nil {

@@ -240,6 +240,9 @@ func (c *Client) handleStream(ctx context.Context, stream tcp.Stream) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer stream.Close()
+	// 握手应答也可能阻塞，不能等进入搬运后才监听取消。
+	stopWatch := watchCancellation(ctx, func() { _ = stream.SetDeadline(time.Now()) })
+	defer stopWatch()
 	remote := stream.RemoteAddr().String()
 	sid := stream.ID()
 	dec := protocol.NewDecoder(stream)
@@ -305,63 +308,21 @@ func (c *Client) handleTunnel(ctx context.Context, stream tcp.Stream, first *pro
 	if req.Direct && c.direct != nil {
 		dispatcher = c.direct
 	}
-	link, err := dispatcher.Dispatch(ctx, dest)
+	outbound, err := openOutbound(ctx, dispatcher, dest)
 	if err != nil {
 		logging.Warn("client: tunnel dispatch failed",
 			"remote", remote, "stream_id", sid, "destination", dest.String(), "err", err)
 		protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: false, Reason: errorReason(err)})
 		return
 	}
-	defer link.Reader.Interrupt()
-	defer link.Writer.Interrupt()
-	var watcher sync.WaitGroup
-	watcher.Add(1)
-	defer func() { cancel(); watcher.Wait() }()
-	routine.Go("client.tunnel.cancel", func() {
-		defer watcher.Done()
-		<-ctx.Done()
-		link.Reader.Interrupt()
-		link.Writer.Interrupt()
-		_ = stream.Close()
-	})
+	defer func() { _ = outbound.Close() }()
 
-	protocol.WriteReply(stream, protocol.TunnelResult, protocol.Reply{OK: true})
+	if err := writeTunnelSuccess(stream); err != nil {
+		return
+	}
 	logging.Info("client: tunnel established", "remote", remote, "stream_id", sid, "destination", dest.String())
 
-	// 方向分离：上行读尽（服务端对隧道 Close 发 FIN = 用户请求方向结束）只优雅关闭
-	// link.Writer，把 FIN 传播成目标出站的上行 EOF，下载方向保留；对隧道流的 Close
-	// （半关闭 FIN）只在服务端转发侧使用，客户端不对隧道流发 FIN。下行结束（响应搬完）
-	// 才整体断开。
-	var once sync.Once
-	teardown := func() {
-		once.Do(func() {
-			_ = stream.Close()
-			_ = link.Writer.Close()
-			link.Reader.Interrupt()
-		})
-	}
-	// UDP 无半关闭：任一方向读完即整体收尾（TCP 依赖半关闭，只在下行结束时收尾）。
-	udp := dest.Network == "udp"
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	// 上行：外部客户端 → 目标。读尽（服务端对隧道发 FIN）只优雅关闭 link.Writer，
-	// 把请求方向结束传播给出站，下行继续下载。
-	routine.Go("client.tunnel.up", func() {
-		defer wg.Done()
-		_, _ = io.Copy(link.Writer, stream)
-		_ = link.Writer.Close()
-		if udp {
-			teardown()
-		}
-	})
-	// 下行：目标 → 外部客户端。响应搬完（真实连接结束）才整体断开。
-	routine.Go("client.tunnel.down", func() {
-		defer wg.Done()
-		_, _ = io.Copy(stream, link.Reader)
-		teardown()
-	})
-	wg.Wait()
+	relayStream(ctx, stream, outbound, dest.Network == "udp")
 	logging.Info("client: tunnel closed", "remote", remote, "stream_id", sid, "destination", dest.String())
 }
 

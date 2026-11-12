@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/logging"
+	"github.com/hhy50/vnray/internal/netlimit"
 	"github.com/hhy50/vnray/internal/routine"
 )
 
@@ -46,7 +47,14 @@ func newPprofService(addr string) *pprofService {
 			"last_gc_delta_ms": time.Since(time.Unix(0, int64(m.LastGC))).Milliseconds(),
 		})
 	})
-	return &pprofService{srv: &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}}
+	return &pprofService{srv: &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		// 诊断端点常被暴露在公网：没有空闲超时 + 连接上限时，刷连接就能把协程数
+		// 推高，且这些连接本身不会自己消失。
+		IdleTimeout: 60 * time.Second,
+	}}
 }
 
 // Name 返回诊断服务名。
@@ -63,7 +71,7 @@ func (s *pprofService) Start(ctx context.Context) error {
 
 	routine.Go("core.pprof.serve", func() {
 		defer close(s.done)
-		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.srv.Serve(netlimit.New(ln, netlimit.DefaultMaxConns)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.Error("pprof: serve stopped", "err", err)
 		}
 	})
