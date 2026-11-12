@@ -131,6 +131,9 @@ func (s *Session) openRelayStream(ctx context.Context, frame *protocol.Frame) (n
 	}
 	if err := opened.SetDeadline(time.Now().Add(TunnelTimeout)); err != nil {
 		abortConnection(opened)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("transport: set tunnel deadline: %w", err)
 	}
 	stream := opened
@@ -141,11 +144,17 @@ func (s *Session) openRelayStream(ctx context.Context, frame *protocol.Frame) (n
 	}
 	if err := protocol.NewEncoder(stream).WriteFrame(frame); err != nil {
 		abortConnection(stream)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("transport: write tunnel frame: %w", err)
 	}
 
 	if err := awaitTunnelResult(stream); err != nil {
 		abortConnection(stream)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	finish()

@@ -22,6 +22,7 @@ var (
 	_ plugin.TLSSetter             = (*V2RayPlugin)(nil)
 	_ plugin.TrafficConsumer       = (*V2RayPlugin)(nil)
 	_ plugin.TrafficConsumer       = (*SSPlugin)(nil)
+	_ plugin.TrafficConsumer       = (*VNRayUserPlugin)(nil)
 	_ plugin.VLESSTLSConsumer      = (*V2RayPlugin)(nil)
 	_ plugin.SessionConfigConsumer = (*VNRayUserPlugin)(nil)
 	_ plugin.DrainGateBinder       = (*V2RayPlugin)(nil)

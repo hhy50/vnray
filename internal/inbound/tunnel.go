@@ -31,6 +31,7 @@ type relayDeps struct {
 	exits   transport.ExitResolver
 	limits  *ratelimit.Registry
 	traffic *traffic.Meter
+	stats   *transport.PumpStats
 	proto   store.Protocol
 }
 
@@ -69,7 +70,7 @@ func (d relayDeps) options(user, client string) transport.ProxyOptions {
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats
 	}
 	if d.traffic != nil {
-		o.Stats = d.traffic.UserStats(d.proto, user)
+		o.Stats = d.stats
 		o.ClientStats = d.traffic.ClientStats(client)
 	}
 	return o
@@ -82,6 +83,8 @@ const udpIdle = 2 * time.Minute
 // proto、network 与 origin 都取自入站解析结果，pump 用固定路径常量，只传这次连接
 // 真正不同的参数。UDP 隧道按数据报搬运（无半关闭），TCP 沿用字节流半关闭泵。
 func relaySingle(d relayDeps, log *logging.Scoped, id identity.Identity, target dispatch.Destination, network string, conn net.Conn) {
+	defer d.stats.OpenStream().CloseStream()
+	d.stats.Request()
 	proto := string(d.proto)
 	tgt := target.String()
 	policy := userPolicy{users: d.users, rules: d.rules, proto: d.proto, key: id.Key}
@@ -172,6 +175,8 @@ type muxTunnel struct {
 // Open 开隧道并双向搬运；返回时子连接结束，mux.Conn 随之发出 End 帧。
 // 建连失败时以带 OptionError 的 End 收尾，对端立即知道该子连接未成立。
 func (m *muxTunnel) Open(target mux.Target, conn *mux.Conn) {
+	defer m.opts.Stats.OpenStream().CloseStream()
+	m.opts.Stats.Request()
 	ctx, cancel := context.WithCancel(conn.Context())
 	defer cancel()
 	if target.Network == "udp" {

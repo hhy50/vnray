@@ -8,6 +8,7 @@ import type {
   KeyRow,
   Logs,
   MetricsSnapshot,
+  Monitoring,
   PortMapList,
   PluginList,
   RuleList,
@@ -90,6 +91,7 @@ const json = (method: string, body?: unknown): RequestInit => ({
 })
 
 export const api = {
+  monitoring: (window: string, signal?: AbortSignal, history = false) => request<Monitoring>('/api/monitoring' + query({ window, history: history ? 1 : undefined }), { signal }),
   session: () => request<Session>('/api/session'),
   status: () => request<Status>('/api/status'),
 
@@ -188,7 +190,7 @@ export const api = {
 
   metrics: (signal?: AbortSignal) => request<MetricsSnapshot>('/api/metrics', { signal }),
 
-  clientConfig: () => request<ClientConfig>('/api/client-config'),
-  clientConfigSave: (body: ClientConfig) =>
+  globalClientConfig: () => request<ClientConfig>('/api/client-config'),
+  globalClientConfigSave: (body: ClientConfig) =>
     request('/api/client-config', json('PUT', body)),
 }

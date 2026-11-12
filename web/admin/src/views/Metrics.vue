@@ -25,7 +25,7 @@ function schedule() {
   if (autoRefresh.value && !disabled.value && !disposed) timer = setTimeout(() => {
     if (document.hidden) schedule()
     else void load()
-  }, 2000)
+  }, Math.max(1000, (snap.value?.interval_seconds ?? 2) * 1000))
 }
 
 async function load() {
@@ -35,9 +35,17 @@ async function load() {
   controller = new AbortController()
   const timeout = setTimeout(() => controller?.abort(), 10000)
   try {
-    const next = await api.metrics(controller.signal)
+    const [next, monitoring] = await Promise.all([
+      api.metrics(controller.signal),
+      api.monitoring('1h', controller.signal, true).catch(() => null),
+    ])
     if (disposed) return
-    if (next.sampled_at !== snap.value?.sampled_at) {
+    if (monitoring) {
+      history.value = {
+        rx: monitoring.history.map(s => s.server.receive_bytes_per_second).filter((v): v is number => v != null),
+        tx: monitoring.history.map(s => s.server.transmit_bytes_per_second).filter((v): v is number => v != null),
+      }
+    } else if (next.sampled_at !== snap.value?.sampled_at) {
       for (const [key, value] of [['rx', next.server.receive_bytes_per_second], ['tx', next.server.transmit_bytes_per_second]] as const) {
         history.value[key] = value == null ? [] : [...history.value[key], value].slice(-60)
       }
@@ -103,7 +111,7 @@ const allocatedBytes = computed(() => snap.value ? snap.value.pipe_allocated_byt
       <div class="sample-strip">
         <span class="sample-status"><i />{{ t('metrics.sampledAt', { value: sampledAt }) }}</span>
         <span>{{ t('metrics.uptime', { value: uptime(snap.uptime_seconds) }) }}</span>
-        <span>{{ t('metrics.interval') }}</span>
+        <span>{{ t('monitoring.cadence', { n: snap.interval_seconds }) }}</span>
       </div>
 
       <section class="metric-section">

@@ -86,7 +86,7 @@ func (m *Meter) SetFlushInterval(d time.Duration) {
 
 // UserStats 返回已登记用户的共享字节计数器；未登记或已删除的用户不计账。
 func (m *Meter) UserStats(p store.Protocol, key string) *transport.PumpStats {
-	if key == "" {
+	if m == nil || key == "" {
 		return nil
 	}
 	k := userKey{Protocol: p, Key: key}

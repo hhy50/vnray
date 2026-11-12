@@ -18,7 +18,6 @@ import {
   Grid,
   Key,
   Setting,
-  SetUp,
   Document,
 } from '@element-plus/icons-vue'
 import { useAppStore } from '../stores/app'
@@ -41,18 +40,14 @@ const menuItems: { titleKey: MessageKey; icon: Component; path: string }[] = [
   { titleKey: 'nav.clients', icon: Monitor, path: '/clients' },
   { titleKey: 'nav.users', icon: User, path: '/users' },
   { titleKey: 'nav.portmaps', icon: Connection, path: '/portmaps' },
-  { titleKey: 'nav.plugins', icon: Grid, path: '/plugins' },
   { titleKey: 'nav.keys', icon: Key, path: '/keys' },
+  { titleKey: 'nav.plugins', icon: Grid, path: '/plugins' },
+  { titleKey: 'monitoring.title', icon: Odometer, path: '/monitoring' },
   { titleKey: 'nav.serviceConfig', icon: Setting, path: '/service-config' },
-  { titleKey: 'nav.clientConfig', icon: SetUp, path: '/client-config' },
-  { titleKey: 'nav.metrics', icon: Odometer, path: '/metrics' },
   { titleKey: 'nav.logs', icon: Document, path: '/logs' },
 ]
 
-// 指标页随服务端开关显隐：status 每 30s 轮询一次，开关打开后菜单自动出现。
-const visibleMenuItems = computed(() =>
-  menuItems.filter((item) => item.path !== '/metrics' || status.value.metrics),
-)
+const visibleMenuItems = computed(() => menuItems)
 
 const activePath = computed(() => {
   const hit = menuItems.find((item) => route.path === item.path || route.path.startsWith(item.path + '/'))

@@ -24,6 +24,7 @@ import (
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
+	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
 	"github.com/hhy50/vnray/internal/userclient"
 )
@@ -52,12 +53,16 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 	cfg.Server.Auth.Key = authkey.Generate()
 	sessions := transport.NewSessionManager()
 	svc := core.NewConnectorService(&cfg, sessions, b, nil)
+	meter := traffic.NewMeter(nil)
+	meter.RestoreUser(store.ProtocolVNV1, "alice")
+	svc.SetTraffic(meter)
 	svc.ApplyHeartbeat(0, 0)
 	if err := svc.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = svc.Drain(ctx) })
 	p := inbound.NewVNRayUserPlugin(st, inbound.VNRayUserDependencies{Events: sessions, Users: b, UserConfig: b, Clients: sessions})
+	p.SetTraffic(meter)
 	t.Cleanup(p.Stop)
 	port := freePort(t)
 	requestCtx, cancel := context.WithCancel(ctx)
@@ -140,6 +145,10 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer conn.Close()
+		stats := meter.UserStats(store.ProtocolVNV1, "alice")
+		if stats.TCP.Load() < 1 || stats.Streams.Load() < 1 || stats.Requests.Load() < 1 {
+			t.Fatal("forward not counted while active")
+		}
 		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 		_, _ = io.WriteString(conn, "GET / HTTP/1.0\r\nHost: test\r\n\r\n")
 		body, err := io.ReadAll(conn)
@@ -186,6 +195,7 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 	}
 	p.Stop()
 	restored := inbound.NewVNRayUserPlugin(st, inbound.VNRayUserDependencies{Events: sessions, Users: b, UserConfig: b, Clients: sessions})
+	restored.SetTraffic(meter)
 	restored.Restore(ctx)
 	defer restored.Stop()
 	if !restored.Status().Enabled || restored.Status().Ports[0].Port != nextPort {
@@ -209,5 +219,15 @@ func TestVNRayUserSeparatePortLifecycle(t *testing.T) {
 	if conn, err := net.DialTimeout("tcp", userAddr, time.Second); err == nil {
 		_ = conn.Close()
 		t.Fatal("disabled listener still open")
+	}
+	if err := p.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats := meter.UserStats(store.ProtocolVNV1, "alice")
+	if stats.TCP.Load() != 0 || stats.Streams.Load() != 0 || stats.Requests.Load() != 6 || stats.UpWrite.Load() == 0 || stats.DownWrite.Load() == 0 {
+		t.Fatalf("drained tcp/streams/requests/up/down = %d/%d/%d/%d/%d", stats.TCP.Load(), stats.Streams.Load(), stats.Requests.Load(), stats.UpWrite.Load(), stats.DownWrite.Load())
 	}
 }

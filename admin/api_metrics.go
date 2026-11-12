@@ -1,80 +1,66 @@
 package admin
 
 import (
-	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
-	"github.com/hhy50/vnray/internal/logging"
-	"github.com/hhy50/vnray/internal/metrics"
-	"github.com/hhy50/vnray/internal/pipe"
-	"github.com/hhy50/vnray/internal/transport"
+	"github.com/hhy50/vnray/internal/monitor"
 )
 
-const metricsInterval = 2 * time.Second
-
-type metricsSnapshot struct {
-	encoded []byte
-	metrics.Sample
-	UptimeSeconds      int64                  `json:"uptime_seconds"`
-	Transfer           transport.TransferInfo `json:"transfer"`
-	PipeAllocations    uint64                 `json:"pipe_allocations"`
-	PipeAllocatedBytes uint64                 `json:"pipe_allocated_bytes"`
-}
-
-func (s *AdminService) collectMetrics(sampler *metrics.Sampler) {
-	sample := sampler.Collect()
-	allocations, allocated := pipe.BufferAllocations()
-	snapshot := &metricsSnapshot{
-		Sample: sample, UptimeSeconds: int64(time.Since(s.started).Seconds()),
-		Transfer: transport.TransferSnapshot(), PipeAllocations: allocations, PipeAllocatedBytes: allocated,
-	}
-	encoded, err := json.Marshal(apiEnvelope{Data: snapshot})
-	if err != nil {
-		s.metricsCache.Store(nil)
-		logging.Warn("metrics: encode sample", "err", err)
-		return
-	}
-	snapshot.encoded = encoded
-	s.metricsCache.Store(snapshot)
-}
-
-func (s *AdminService) runMetrics(ctx context.Context) {
-	sampler := metrics.NewSampler()
-	ticker := time.NewTicker(metricsInterval)
-	defer ticker.Stop()
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if metrics.Enabled() {
-			s.collectMetrics(sampler)
-		} else {
-			sampler.Reset()
-			s.metricsCache.Store(nil)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 func (s *AdminService) apiMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Monitor == nil {
+		s.writeMonitoring(w, r, nil, monitor.ErrDisabled)
+		return
+	}
+	data, err := s.opts.Monitor.HostJSON()
+	s.writeMonitoring(w, r, data, err)
+}
+
+func (s *AdminService) apiMonitoring(w http.ResponseWriter, r *http.Request) {
+	query := monitor.Query{Window: 7 * 24 * time.Hour}
+	if r.URL.Query().Get("history") == "1" {
+		query.Points = 120
+	}
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		window, err := time.ParseDuration(raw)
+		if err != nil || window <= 0 || window > 7*24*time.Hour {
+			apiFail(w, http.StatusBadRequest, "invalid monitoring window")
+			return
+		}
+		query.Window = window
+	}
+	if raw := r.URL.Query().Get("points"); raw != "" {
+		points, err := strconv.Atoi(raw)
+		if err != nil || points < 2 || points > 120 {
+			apiFail(w, http.StatusBadRequest, "points must be 2..120")
+			return
+		}
+		query.Points = points
+	}
+	if s.opts.Monitor == nil {
+		s.writeMonitoring(w, r, nil, monitor.ErrDisabled)
+		return
+	}
+	data, err := s.opts.Monitor.UsersJSON(r.Context(), query)
+	s.writeMonitoring(w, r, data, err)
+}
+
+func (s *AdminService) writeMonitoring(w http.ResponseWriter, r *http.Request, data []byte, err error) {
 	w.Header().Set("Cache-Control", "no-store")
-	if !metrics.Enabled() {
+	switch {
+	case errors.Is(err, monitor.ErrDisabled):
 		http.NotFound(w, r)
-		return
-	}
-	snapshot := s.metricsCache.Load()
-	if snapshot == nil || !snapshot.Sample.Current() || time.Since(snapshot.SampledAt) > 3*metricsInterval {
+	case errors.Is(err, monitor.ErrWarming):
 		w.Header().Set("Retry-After", "2")
-		apiFail(w, http.StatusServiceUnavailable, "metrics sample is warming up")
-		return
+		apiFail(w, http.StatusServiceUnavailable, err.Error())
+	case err != nil:
+		apiFail(w, http.StatusServiceUnavailable, "monitoring history unavailable")
+	default:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"code":0,"data":`))
+		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(`}`))
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	// 慢管理台连接只占用自己的 HTTP handler，不持有采样器或业务锁。
-	_, _ = w.Write(snapshot.encoded)
 }

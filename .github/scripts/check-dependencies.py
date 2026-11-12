@@ -7,6 +7,11 @@ allowed = {
     "internal/pipe": set(),
     "internal/extension": set(),
     "internal/config": set(),
+    "internal/stats": set(),
+    "internal/monitor": {
+        "internal/logging", "internal/metrics", "internal/pipe", "internal/routine",
+        "internal/stats", "internal/transport",
+    },
     "internal/dispatch": {
         "internal/logging", "internal/pipe", "internal/protocol", "internal/routine",
     },

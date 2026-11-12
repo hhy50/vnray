@@ -16,6 +16,7 @@ import (
 	"github.com/hhy50/vnray/internal/routine"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
+	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
 )
 
@@ -23,6 +24,7 @@ const pluginVNRayUser = "vnray-user"
 
 // VNRayUserPlugin 提供独立的 vnray 用户入站。
 type VNRayUserPlugin struct {
+	traffic  *traffic.Meter
 	runtime  plugin.Runtime
 	servers  sync.Map
 	store    store.Store
@@ -34,6 +36,9 @@ type VNRayUserPlugin struct {
 	server   *tcp.Server
 	port     int
 }
+
+// SetTraffic 注入用户计数器，须在启动前调用。
+func (p *VNRayUserPlugin) SetTraffic(m *traffic.Meter) { p.traffic = m }
 
 // VNRayUserDependencies 声明独立用户入站的运行依赖。
 type VNRayUserDependencies struct {
@@ -129,7 +134,20 @@ func (l *vnrayUserListener) Handshake(session tcp.Session) (tcp.SessionInfo, err
 	}
 	return tcp.SessionInfo{Session: session, Remote: session.RemoteAddr().String(), Kind: tcp.KindUser,
 		Name: access.Client, Log: logging.NewScoped(level, "user", req.Key),
-		Meta: transport.UserMeta{Key: req.Key, Name: access.Name, Rule: userRule, Info: req.Info}}, nil
+		Meta: transport.UserMeta{Key: req.Key, Name: access.Name, Rule: userRule, Info: req.Info,
+			Stats: p.traffic.UserStats(store.ProtocolVNV1, req.Key)}}, nil
+}
+
+func (l *vnrayUserListener) OnSessionOpen(info *tcp.SessionInfo) error {
+	meta, _ := info.Meta.(transport.UserMeta)
+	meta.Stats.AddTCP(1)
+	return l.EventListener.OnSessionOpen(info)
+}
+
+func (l *vnrayUserListener) OnSessionClose(info *tcp.SessionInfo) {
+	meta, _ := info.Meta.(transport.UserMeta)
+	meta.Stats.AddTCP(-1)
+	l.EventListener.OnSessionClose(info)
 }
 
 // NewVNRayUserListener creates the protocol listener for the vnray-user inbound.

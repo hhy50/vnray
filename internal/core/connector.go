@@ -202,6 +202,7 @@ func (s *ConnectorService) onStreamOpen(info *tcp.SessionInfo, stream tcp.Stream
 	// 用户会话的 Meta 是握手时记下的 UserMeta：限速与审计按 user_key 标识用户，
 	// 出站规则按其中记下的规则名判定。
 	meta, _ := info.Meta.(transport.UserMeta)
-	s.hub.handleUserStream(info.Context, info.Log, meta.Key, meta.Rule, info.Name, stream)
+	defer meta.Stats.OpenStream().CloseStream()
+	s.hub.handleUserStream(info.Context, info.Log, meta, info.Name, stream)
 	return nil
 }

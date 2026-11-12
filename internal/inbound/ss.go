@@ -328,6 +328,10 @@ func (p *SSPlugin) AccountLimits(account string) (up, down int64) {
 
 // handle 把解码完成的 Shadowsocks 连接经绑定客户端的隧道送达目标。
 func (p *SSPlugin) handle(ctx context.Context, password, client string, target shadowsocks.Target, conn *shadowsocks.Conn) {
+	stats := p.traffic.UserStats(store.ProtocolSS, password)
+	defer stats.OpenTCP().CloseTCP()
+	defer stats.OpenStream().CloseStream()
+	stats.Request()
 	log := p.userLog(password)
 	policy := userPolicy{users: p.users, rules: p.rules, proto: store.ProtocolSS, key: password}
 	direct, err := policy.check(ctx, target.Host)
@@ -377,7 +381,7 @@ func (p *SSPlugin) handle(ctx context.Context, password, client string, target s
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats
 	}
 	if p.traffic != nil {
-		o.Stats = p.traffic.UserStats(store.ProtocolSS, password)
+		o.Stats = stats
 		o.ClientStats = p.traffic.ClientStats(client)
 	}
 	transport.ProxyBidirectional(conn, tunnel, "plugin.ss.tunnel", o)

@@ -601,6 +601,8 @@ func queryInt(raw url.Values, key string, def int) int {
 type apiDurationFields struct {
 	TransportEncryption  *bool  `json:"transport_encryption,omitempty"`
 	MetricsEnabled       bool   `json:"metrics_enabled"`
+	MetricsInterval      string `json:"metrics_interval"`
+	MetricsRetention     string `json:"metrics_retention"`
 	HeartbeatInterval    string `json:"heartbeat_interval"`
 	HeartbeatTimeout     string `json:"heartbeat_timeout"`
 	TrafficFlushInterval string `json:"traffic_flush_interval"`
@@ -632,6 +634,8 @@ func (s *AdminService) apiServiceConfig(w http.ResponseWriter, r *http.Request) 
 	apiOK(w, apiDurationFields{
 		TransportEncryption:  &cur.TransportEncryption,
 		MetricsEnabled:       cur.MetricsEnabled,
+		MetricsInterval:      cur.MetricsInterval.String(),
+		MetricsRetention:     cur.MetricsRetention.String(),
 		PublicHost:           cur.PublicHost,
 		HeartbeatEnabled:     cur.Heartbeat.Enabled,
 		HeartbeatInterval:    cur.Heartbeat.Interval.String(),
@@ -692,6 +696,8 @@ func (s *AdminService) apiServiceConfigSave(w http.ResponseWriter, r *http.Reque
 			{"heartbeat_interval", in.HeartbeatInterval, &next.Heartbeat.Interval},
 			{"heartbeat_timeout", in.HeartbeatTimeout, &next.Heartbeat.Timeout},
 			{"traffic_flush_interval", in.TrafficFlushInterval, &next.TrafficFlushInterval},
+			{"metrics_interval", in.MetricsInterval, &next.MetricsInterval},
+			{"metrics_retention", in.MetricsRetention, &next.MetricsRetention},
 			{"keepalive_interval", in.KeepAliveInterval, &next.Session.KeepAliveInterval},
 			{"keepalive_timeout", in.KeepAliveTimeout, &next.Session.KeepAliveTimeout},
 			{"stream_open_timeout", in.StreamOpenTimeout, &next.Session.StreamOpenTimeout},

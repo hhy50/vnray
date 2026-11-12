@@ -216,7 +216,7 @@ export interface Logs {
   truncated: boolean
 }
 
-// GlobalClientConfig 是下发给所有远程客户端的全局继承规则，独立页「客户端配置」维护。
+// GlobalClientConfig 是下发给所有远程客户端的全局继承规则，在「服务端配置」页下方维护。
 export interface GlobalClientConfig {
   custom_hosts: HostRow[]
   ip_maps: IPMapRow[]
@@ -227,6 +227,8 @@ export interface ClientConfig {
 }
 
 export interface ServiceConfig {
+  metrics_interval: string
+  metrics_retention: string
   transport_encryption: boolean
   metrics_enabled: boolean
   public_host: string
@@ -300,6 +302,7 @@ export interface MetricsTransfer {
 }
 
 export interface MetricsSnapshot {
+  interval_seconds: number
   sampled_at: string
   uptime_seconds: number
   server: MetricsServer
@@ -308,4 +311,31 @@ export interface MetricsSnapshot {
   pipe_allocations: number
   pipe_allocated_bytes: number
   metrics: MetricsSeries[]
+}
+
+export interface MonitorUser {
+  id: number
+  name: string
+  protocol: string
+  tcp: number
+  streams: number
+  requests: number
+  up: number
+  down: number
+  up_rate: number | null
+  down_rate: number | null
+}
+
+export interface MonitorSample {
+  sampled_at: string
+  users: MonitorUser[]
+  server: MetricsServer
+  process: MetricsProcess
+}
+
+export interface Monitoring extends MonitorSample {
+  interval_seconds: number
+  retention_seconds: number
+  history_stored: boolean
+  history: MonitorSample[]
 }

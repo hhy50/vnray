@@ -34,6 +34,42 @@ func TestServiceConfigMetricsEnabled(t *testing.T) {
 	}
 }
 
+func TestServiceConfigMonitoringIntervals(t *testing.T) {
+	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
+	s := &AdminService{opts: AdminOptions{Settings: fake}}
+	for _, tc := range []struct {
+		interval, retention string
+		status              int
+	}{
+		{"5s", "6h", http.StatusOK},
+		{"", "", http.StatusOK},
+		{"0s", "1h", http.StatusBadRequest},
+		{"bad", "1h", http.StatusBadRequest},
+		{"5s", "1s", http.StatusBadRequest},
+		{"1s", "168h", http.StatusBadRequest},
+	} {
+		w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{MetricsInterval: tc.interval, MetricsRetention: tc.retention}, nil)
+		s.apiServiceConfigSave(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s/%s: %d %s", tc.interval, tc.retention, w.Code, w.Body.String())
+		}
+		if fake.cur.MetricsInterval.Std() != 5*time.Second || fake.cur.MetricsRetention.Std() != 6*time.Hour {
+			t.Fatal("omitted or invalid values changed saved settings")
+		}
+	}
+	w, r := apiContext(http.MethodGet, "/admin/ops/api/service-config", nil, nil)
+	s.apiServiceConfig(w, r)
+	var response struct {
+		Data apiDurationFields `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.MetricsInterval != "5s" || response.Data.MetricsRetention != "6h0m0s" {
+		t.Fatalf("read: %s", w.Body.String())
+	}
+}
+
 func TestServiceConfigTransportEncryption(t *testing.T) {
 	fake := &fakeSettings{cur: config.DefaultServiceSettings()}
 	service := &AdminService{opts: AdminOptions{Settings: fake}}

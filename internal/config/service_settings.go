@@ -17,8 +17,10 @@ type ServiceSettings struct {
 	// TransportEncryption 只影响新连接，缺省开启。
 	TransportEncryption bool `json:"transport_encryption"`
 	// MetricsEnabled 控制后台采样、事件累计与指标接口；状态量不受开关影响。
-	MetricsEnabled bool                 `json:"metrics_enabled"`
-	GlobalClient   GlobalClientSettings `json:"global_client"`
+	MetricsEnabled   bool                 `json:"metrics_enabled"`
+	MetricsInterval  Duration             `json:"metrics_interval"`
+	MetricsRetention Duration             `json:"metrics_retention"`
+	GlobalClient     GlobalClientSettings `json:"global_client"`
 	// PublicHost 同 Server.PublicHost：vmess:// 分享链接对外暴露的裸主机。
 	PublicHost string    `json:"public_host"`
 	Heartbeat  Heartbeat `json:"heartbeat"`
@@ -120,6 +122,8 @@ func DefaultServiceSettings() ServiceSettings {
 	return ServiceSettings{
 		TransportEncryption:  true,
 		MetricsEnabled:       false,
+		MetricsInterval:      Duration(2 * time.Second),
+		MetricsRetention:     Duration(time.Hour),
 		Heartbeat:            DefaultHeartbeat(),
 		LogLevel:             DefaultLogLevel,
 		TrafficFlushInterval: Duration(DefaultTrafficFlushInterval),
@@ -135,6 +139,12 @@ func DefaultServiceSettings() ServiceSettings {
 
 // Validate 校验全部运行时配置项。
 func (s ServiceSettings) Validate() error {
+	if s.MetricsInterval.Std() < time.Second || s.MetricsInterval.Std() > time.Hour {
+		return fmt.Errorf("metrics_interval: must be between 1s and 1h")
+	}
+	if s.MetricsRetention < s.MetricsInterval || s.MetricsRetention.Std() > 7*24*time.Hour || s.MetricsRetention > 10000*s.MetricsInterval {
+		return fmt.Errorf("metrics_retention: must be >= interval, <= 168h and at most 10000 samples")
+	}
 	if err := s.GlobalClient.Validate(); err != nil {
 		return err
 	}
@@ -199,6 +209,10 @@ const (
 	SettingTransportEncryption = "transport_encryption"
 	// SettingMetricsEnabled 保存性能指标的采集总开关。
 	SettingMetricsEnabled = "metrics_enabled"
+	// SettingMetricsInterval 保存监控采样周期。
+	SettingMetricsInterval = "metrics_interval"
+	// SettingMetricsRetention 保存监控历史保留时间。
+	SettingMetricsRetention = "metrics_retention"
 	// SettingGlobalClient 保存全局客户端的 Host 与 IP 段映射。
 	SettingGlobalClient = "global_client"
 	SettingPublicHost   = "public_host"
@@ -214,9 +228,11 @@ const (
 // EncodeServiceSettings 把整份运行时配置摊成按段的 KV。
 func EncodeServiceSettings(s ServiceSettings) (map[string]string, error) {
 	out := map[string]string{
-		SettingPublicHost:   s.PublicHost,
-		SettingLogLevel:     s.LogLevel,
-		SettingTrafficFlush: s.TrafficFlushInterval.String(),
+		SettingPublicHost:       s.PublicHost,
+		SettingLogLevel:         s.LogLevel,
+		SettingTrafficFlush:     s.TrafficFlushInterval.String(),
+		SettingMetricsInterval:  s.MetricsInterval.String(),
+		SettingMetricsRetention: s.MetricsRetention.String(),
 	}
 	sections := map[string]any{
 		SettingTransportEncryption: s.TransportEncryption,
@@ -249,6 +265,10 @@ func DecodeServiceSettings(kv map[string]string, base ServiceSettings) (ServiceS
 			err = json.Unmarshal([]byte(raw), &out.TransportEncryption)
 		case SettingMetricsEnabled:
 			err = json.Unmarshal([]byte(raw), &out.MetricsEnabled)
+		case SettingMetricsInterval:
+			out.MetricsInterval, err = parseDurationText(key, raw)
+		case SettingMetricsRetention:
+			out.MetricsRetention, err = parseDurationText(key, raw)
 		case SettingGlobalClient:
 			err = json.Unmarshal([]byte(raw), &out.GlobalClient)
 		case SettingPublicHost:

@@ -11,6 +11,7 @@ import (
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/metrics"
+	"github.com/hhy50/vnray/internal/monitor"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/tcp"
 	"github.com/hhy50/vnray/internal/traffic"
@@ -86,6 +87,7 @@ func sessionConfigFromSettings(s config.SessionSettings) *tcp.SessionConfig {
 // serviceConfig 是运行时服务配置的持有者与分发中心，实现 admin.ServiceSettings。
 // 它是管理台与运行时组件之间的唯一写口：管理台提交 → 校验 → 落库 → 热分发。
 type serviceConfig struct {
+	monitor  *monitor.Service
 	cur      atomic.Pointer[config.ServiceSettings]
 	settings store.Store
 	svc      *ConnectorService
@@ -236,7 +238,11 @@ func (c *serviceConfig) apply(ctx context.Context, next config.ServiceSettings) 
 // dispatch 把生效值推给各运行时组件并更新本地快照。日志级别非法不可能发生（已被校验）。
 func (c *serviceConfig) dispatch(ctx context.Context, next config.ServiceSettings, sess *tcp.SessionConfig, local *localExit) {
 	c.svc.ApplyTransportEncryption(next.TransportEncryption)
-	metrics.SetEnabled(next.MetricsEnabled)
+	if c.monitor != nil {
+		c.monitor.Configure(monitoringSettings(next))
+	} else {
+		metrics.SetEnabled(next.MetricsEnabled)
+	}
 	globalChanged := !reflect.DeepEqual(c.Current().GlobalClient, next.GlobalClient)
 	c.svc.ApplyHeartbeat(heartbeatIntervalOf(next.Heartbeat), next.Heartbeat.Timeout.Std())
 	c.svc.ApplySessionConfig(sess)

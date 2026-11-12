@@ -31,12 +31,9 @@ type forwardHub struct {
 	rules *ruleSet
 }
 
-// handleUserStream 处理一条用户流：按帧类型分发——Ping 回 Pong 并续期等待上限后
-// 继续读，Forward 校验目标、经绑定客户端开隧道并双向搬运，其余类型拒绝并结束流。
-// 它在 OnStreamOpen 事件里被调用，阻塞该流的整个生命周期。
-// log 是该会话的日志器（级别取自用户配置）；userKey 是握手时出示的用户密钥：
-// 限速与统计都按它取桶（同一用户的所有隧道共享配额）；userRule 是该用户的出站规则名。
-func (h *forwardHub) handleUserStream(ctx context.Context, log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream) {
+// 用户身份与计数器来自已认证会话，不能在开流时重新绑定到同名的新用户。
+func (h *forwardHub) handleUserStream(ctx context.Context, log *logging.Scoped, user transport.UserMeta, clientName string, stream tcp.Stream) {
+	userKey := user.Key
 	remote := stream.RemoteAddr().String()
 
 	dec := protocol.NewDecoder(stream)
@@ -55,7 +52,7 @@ func (h *forwardHub) handleUserStream(ctx context.Context, log *logging.Scoped, 
 	case protocol.Ping:
 		replyHeartbeat(log, remote, enc, frame)
 	case protocol.Forward:
-		h.handleForward(ctx, log, userKey, userRule, clientName, stream, frame)
+		h.handleForward(ctx, log, user, clientName, stream, frame)
 		return
 	default:
 		_ = frame.CloseBody()
@@ -80,7 +77,9 @@ func replyHeartbeat(log *logging.Scoped, remote string, enc *protocol.Encoder, p
 
 // handleForward 处理 Forward 帧：目标在载荷开头的地址块里，先按用户出站规则判定，
 // 再经绑定客户端开隧道，随后该流承载裸字节直至任一侧关闭。
-func (h *forwardHub) handleForward(ctx context.Context, log *logging.Scoped, userKey, userRule, clientName string, stream tcp.Stream, frame *protocol.Frame) {
+func (h *forwardHub) handleForward(ctx context.Context, log *logging.Scoped, user transport.UserMeta, clientName string, stream tcp.Stream, frame *protocol.Frame) {
+	userKey, userRule := user.Key, user.Rule
+	user.Stats.Request()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	remote := stream.RemoteAddr().String()
@@ -171,7 +170,7 @@ func (h *forwardHub) handleForward(ctx context.Context, log *logging.Scoped, use
 		o.UpLimit, o.DownLimit, o.Stats = pair.Up, pair.Down, pair.Stats
 	}
 	if h.traffic != nil {
-		o.Stats = h.traffic.UserStats(store.ProtocolVNV1, userKey)
+		o.Stats = user.Stats
 		o.ClientStats = h.traffic.ClientStats(clientName)
 	}
 	transport.ProxyBidirectional(stream, tunnel, "core.forward.pump", o)

@@ -11,6 +11,8 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	in := DefaultServiceSettings()
 	in.TransportEncryption = false
 	in.MetricsEnabled = true
+	in.MetricsInterval = Duration(5 * time.Second)
+	in.MetricsRetention = Duration(6 * time.Hour)
 	in.PublicHost = "vpn.example.com"
 	in.GlobalClient = GlobalClientSettings{
 		CustomHosts: []CustomHost{{Domain: "youyuevpn4.route", IP: "192.168.60.1"}},
@@ -31,8 +33,8 @@ func TestServiceSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if len(kv) != 11 {
-		t.Fatalf("kv has %d sections, want 11: %v", len(kv), kv)
+	if len(kv) != 13 {
+		t.Fatalf("kv has %d sections, want 13: %v", len(kv), kv)
 	}
 	if kv[SettingPublicHost] != "vpn.example.com" || kv[SettingTrafficFlush] != "3s" {
 		t.Fatalf("scalar sections should be stored as plain text: %v", kv)

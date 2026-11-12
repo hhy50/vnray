@@ -564,12 +564,16 @@ func (p *V2RayPlugin) deps(ctx context.Context, proto store.Protocol) relayDeps 
 // 交给 mux 服务端，复用到多条隧道；普通请求开一条隧道直接搬运。network 是隧道数据
 // 类型（tcp/udp）。两条路径的数据面装配见 tunnel.go。
 func (p *V2RayPlugin) serveConn(ctx context.Context, proto store.Protocol, id identity.Identity, host string, port int, network string, conn net.Conn) {
+	stats := p.traffic.UserStats(proto, id.Key)
+	defer stats.OpenTCP().CloseTCP()
+	deps := p.deps(ctx, proto)
+	deps.stats = stats
 	log := p.userLog(proto, id.Key)
 	if host == vmess.MuxCoolHost {
-		serveMuxConn(p.deps(ctx, proto), log, id, conn)
+		serveMuxConn(deps, log, id, conn)
 		return
 	}
-	relaySingle(p.deps(ctx, proto), log, id,
+	relaySingle(deps, log, id,
 		dispatch.Destination{Host: host, Port: port, Network: network}, network, conn)
 }
 

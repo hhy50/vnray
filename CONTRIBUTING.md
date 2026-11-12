@@ -43,6 +43,7 @@ internal/routine/   基础原语：统一协程启动（routine.Go，带 panic r
 internal/extension/ 进程级 Service 契约与可选 Drainer；由 core.Instance 编排，不依赖数据面包
 internal/config/    配置结构：YAML 加载与校验；不依赖 core/transport
 internal/logging/   横切设施：日志
+internal/monitor/   用户与主机监控：采样生命周期、快照与历史查询；不依赖 Admin/Store，适配在 internal/core
 configs/            随仓库发布的示例配置，由测试加载校验
 ```
 

@@ -12,6 +12,7 @@ import (
 	"github.com/hhy50/vnray/internal/concurrency"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/routine"
+	"github.com/hhy50/vnray/internal/stats"
 	"github.com/hhy50/vnray/internal/tcp"
 )
 
@@ -27,7 +28,8 @@ type SessionEvents interface {
 
 // UserMeta 是用户会话的元数据：user_key 供限速与审计标识用户，Info 是用户随认证上报的自信息。
 type UserMeta struct {
-	Key string
+	Stats *stats.PumpStats
+	Key   string
 	// Name 是用户的管理台显示名（非空），会话建立日志里带上它便于对认人。
 	Name string
 	// Rule 是该用户使用的出站规则名（空按服务端内置 default 处理）。

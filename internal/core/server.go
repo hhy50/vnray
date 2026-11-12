@@ -13,6 +13,7 @@ import (
 	"github.com/hhy50/vnray/internal/inbound"
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/metrics"
+	"github.com/hhy50/vnray/internal/monitor"
 	"github.com/hhy50/vnray/internal/pipe"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/portmap"
@@ -29,6 +30,7 @@ type serverApp struct {
 	instance     *Instance
 	bindingStore store.Store
 	admin        *admin.AdminService
+	monitor      *monitor.Service
 }
 
 // Run 按序启动全部服务，阻塞到 app ctx 取消（SIGINT/SIGTERM）后逆序收尾，最后释放存储。
@@ -37,6 +39,14 @@ func (app *serverApp) Run() error {
 	if app.admin != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		waitErr := app.admin.WaitDrained(ctx)
+		cancel()
+		if waitErr != nil {
+			return errors.Join(err, waitErr)
+		}
+	}
+	if app.monitor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		waitErr := app.monitor.Drain(ctx)
 		cancel()
 		if waitErr != nil {
 			return errors.Join(err, waitErr)
@@ -58,7 +68,7 @@ func newBindings(st store.Store) *access.Bindings {
 
 // newAdminService 管理面服务；admin.enabled 为 false 时返回 nil（装配时跳过）。
 // 管理库打不开视为装配失败：管理台是运维入口，带病启动不如显式报错。
-func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *access.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings, rules admin.RuleSettings) (*admin.AdminService, error) {
+func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bindings *access.Bindings, plugins *plugin.Manager, st store.Store, pm *portmap.Manager, settings admin.ServiceSettings, rules admin.RuleSettings, monitoring admin.MonitoringReader) (*admin.AdminService, error) {
 	if !cfg.Admin.Enabled {
 		return nil, nil
 	}
@@ -71,6 +81,7 @@ func newAdminService(cfg *config.Server, sessions *transport.SessionManager, bin
 		Username: cfg.Admin.ResolvedUsername(),
 		Password: cfg.Admin.Password,
 		Store:    st,
+		Monitor:  monitoring,
 		Mappings: portmap.NewControl(st, pm),
 		LogPath:  logFilePath(cfg),
 		Settings: settings,
@@ -171,6 +182,8 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	if err := seedLimits(appctx, st, limits, meter); err != nil {
 		return nil, err
 	}
+	monitoring := newMonitoring(st, meter, settings)
+	bindings.Watch(func(access.UserChange) { monitoring.InvalidateUsers() })
 	svc := NewConnectorServiceWith(cfg, sessions, newUserRegistry(bindings), limits,
 		tcp.WithSessionConfig(sessionConfigFromSettings(settings.Session)))
 	svc.ApplyHeartbeat(heartbeatIntervalOf(settings.Heartbeat), settings.Heartbeat.Timeout.Std())
@@ -183,14 +196,15 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	meter.SetFlushInterval(settings.TrafficFlushInterval.Std())
 	applyStartupLogging(cfg, settings)
 	runtimeCfg := newServiceConfig(st, svc, meter, exits, bindings, settings)
+	runtimeCfg.monitor = monitoring
 	runtimeCfg.setSessionConfigApplier(plugins)
 	// vless 的 TLS 参数存在服务端配置表里，插件经这一个写口读写。
 	plugins.SetVLESSTLS(runtimeCfg)
-	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg, rules)
+	webAdmin, err := newAdminService(cfg, sessions, bindings, plugins, st, portmaps, runtimeCfg, rules, monitoring)
 	if err != nil {
 		return nil, err
 	}
-	services := []extension.Service{traffic.NewService(meter, st), svc, plugins, portmaps}
+	services := []extension.Service{traffic.NewService(meter, st), svc, plugins, portmaps, monitoring}
 	if cfg.Diagnostics.PprofListen != "" {
 		services = append(services, newPprofService(cfg.Diagnostics.PprofListen))
 	}
@@ -202,6 +216,7 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	assembled = true
 	app := newServerApp(instance, st)
 	app.admin = webAdmin
+	app.monitor = monitoring
 	return app, nil
 }
 

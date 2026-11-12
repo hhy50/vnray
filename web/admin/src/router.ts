@@ -57,16 +57,27 @@ const routes: RouteRecordRaw[] = [
         redirect: { name: 'users' },
       },
       {
+        path: 'keys',
+        name: 'keys',
+        component: () => import('./views/Keys.vue'),
+        meta: { titleKey: 'nav.keys' },
+      },
+      {
         path: 'plugins',
         name: 'plugins',
         component: () => import('./views/Plugins.vue'),
         meta: { titleKey: 'nav.plugins' },
       },
       {
-        path: 'keys',
-        name: 'keys',
-        component: () => import('./views/Keys.vue'),
-        meta: { titleKey: 'nav.keys' },
+        path: 'metrics',
+        name: 'metrics',
+        redirect: { name: 'monitoring', query: { tab: 'host' } },
+      },
+      {
+        path: 'monitoring',
+        name: 'monitoring',
+        component: () => import('./views/Monitoring.vue'),
+        meta: { titleKey: 'monitoring.title' },
       },
       {
         path: 'service-config',
@@ -75,16 +86,9 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.serviceConfig' },
       },
       {
+        // 全局客户端配置已并入服务端配置页，旧深链兜底过去。
         path: 'client-config',
-        name: 'client-config',
-        component: () => import('./views/ClientConfig.vue'),
-        meta: { titleKey: 'nav.clientConfig' },
-      },
-      {
-        path: 'metrics',
-        name: 'metrics',
-        component: () => import('./views/Metrics.vue'),
-        meta: { titleKey: 'nav.metrics' },
+        redirect: { name: 'service-config' },
       },
       {
         path: 'logs',

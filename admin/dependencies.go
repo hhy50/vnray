@@ -3,10 +3,17 @@ package admin
 import (
 	"context"
 
+	"github.com/hhy50/vnray/internal/monitor"
 	"github.com/hhy50/vnray/internal/plugin"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/transport"
 )
+
+// MonitoringReader 只暴露监控查询，不管理采样与持久化生命周期。
+type MonitoringReader interface {
+	HostJSON() ([]byte, error)
+	UsersJSON(context.Context, monitor.Query) ([]byte, error)
+}
 
 // TrafficReader 提供管理面展示所需的流量快照。
 type TrafficReader interface {

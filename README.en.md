@@ -61,7 +61,7 @@ Architecturally, this may look like installing a V2Ray server inside the client 
 - **User egress rules** — Reject/direct lists are enforced by the server and apply to all inbound protocols.
 - **Routing and host mapping** — Client-side direct rules and domain-to-IP mappings, pushed hot from the admin console.
 - **Bandwidth and concurrency controls** — Limit upload/download bandwidth and concurrent connections per user.
-- **Admin console** — Manage users, plugins, keys, and port mappings online, with live logs and performance metrics in English and Chinese.
+- **Admin console** — Manage users, plugins, keys, and port mappings online, with live logs and user/host monitoring in English and Chinese. Monitoring offers a list, per-user charts and expanded dialogs, with configurable sampling and history retention.
 - **Persistent storage** — SQLite (default) or MySQL.
 
 ## Quick start

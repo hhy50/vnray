@@ -17,6 +17,7 @@ import (
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/rule"
 	"github.com/hhy50/vnray/internal/store"
+	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
 	"github.com/hhy50/vnray/shadowsocks"
 	"github.com/hhy50/vnray/vmess"
@@ -116,16 +117,24 @@ func TestInboundUserRules(t *testing.T) {
 						exits := &stubExitResolver{local: exit}
 						conn, peer := net.Pipe()
 						defer peer.Close()
+						meter := traffic.NewMeter(nil)
+						meter.RestoreUser(proto, key)
 						if proto == store.ProtocolSS {
 							p := NewSSPlugin(st, users, exits, nil)
+							p.SetTraffic(meter)
 							defer drainPlugin(t, p)
 							p.SetRules(rules)
 							p.handle(p.runtime.Context(), key, transport.LocalClientName, shadowsocks.Target{Host: tc.host, Port: 443}, &shadowsocks.Conn{Conn: conn})
 						} else {
 							p := NewV2RayPlugin(st, users, exits, nil)
+							p.SetTraffic(meter)
 							defer drainPlugin(t, p)
 							p.SetRules(rules)
 							p.serveConn(p.runtime.Context(), proto, identity.Identity{Key: key, Client: transport.LocalClientName}, tc.host, 443, network, conn)
+						}
+						stats := meter.UserStats(proto, key)
+						if stats.Requests.Load() != 1 || stats.Streams.Load() != 0 || stats.TCP.Load() != 0 {
+							t.Fatalf("request/stream/tcp = %d/%d/%d", stats.Requests.Load(), stats.Streams.Load(), stats.TCP.Load())
 						}
 						requests := exit.snapshot()
 						if tc.denied {
@@ -158,6 +167,9 @@ func TestMuxUserRulesPerTarget(t *testing.T) {
 			}
 			exit := &policyExit{}
 			p := NewV2RayPlugin(st, users, &stubExitResolver{local: exit}, nil)
+			meter := traffic.NewMeter(nil)
+			meter.RestoreUser(proto, key)
+			p.SetTraffic(meter)
 			p.SetRules(inboundTestRules(t))
 			defer drainPlugin(t, p)
 			conn, peer := net.Pipe()
@@ -170,6 +182,10 @@ func TestMuxUserRulesPerTarget(t *testing.T) {
 				_ = peer.Close()
 				select {
 				case <-done:
+					stats := meter.UserStats(proto, key)
+					if stats.TCP.Load() != 0 || stats.Streams.Load() != 0 || stats.Requests.Load() == 0 {
+						t.Errorf("mux counters: tcp=%d streams=%d requests=%d", stats.TCP.Load(), stats.Streams.Load(), stats.Requests.Load())
+					}
 				case <-time.After(3 * time.Second):
 					t.Error("mux handler did not exit")
 				}
