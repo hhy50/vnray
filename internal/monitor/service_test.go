@@ -73,7 +73,7 @@ func TestSamplesDirectoryCacheRatesAndHistory(t *testing.T) {
 	counters.DownWrite.Add(200)
 	usersAt := s.sampleUsers(first.users.SampledAt.Add(2 * time.Second))
 	active := usersAt[0]
-	if active.TCP != 1 || active.Streams != 1 || active.Requests != 1 || *active.UpRate != 50 || *active.DownRate != 100 {
+	if active.TCP != 1 || active.Requests != 1 || *active.UpRate != 50 || *active.DownRate != 100 {
 		t.Fatalf("active: %+v", active)
 	}
 	counters.CloseTCP()

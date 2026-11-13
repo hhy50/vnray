@@ -45,7 +45,6 @@ type User struct {
 	Name     string   `json:"name"`
 	Protocol string   `json:"protocol"`
 	TCP      int64    `json:"tcp"`
-	Streams  int64    `json:"streams"`
 	Requests int64    `json:"requests"`
 	Up       int64    `json:"up"`
 	Down     int64    `json:"down"`

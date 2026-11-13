@@ -121,7 +121,6 @@ func (c *seriesCodec) host(s *Snapshot) {
 
 func (c *seriesCodec) user(u *User) {
 	u.TCP = c.integer("tcp", u.TCP)
-	u.Streams = c.integer("streams", u.Streams)
 	u.Requests = c.integer("requests", u.Requests)
 	u.Up = c.integer("up", u.Up)
 	u.Down = c.integer("down", u.Down)
@@ -134,7 +133,7 @@ func userLabels(id uint64) []tstorage.Label {
 }
 
 func snapshotRows(s Snapshot) ([]tstorage.Row, error) {
-	rows := make([]tstorage.Row, 0, 27+12*len(s.Users))
+	rows := make([]tstorage.Row, 0, 27+10*len(s.Users))
 	writer := func(prefix string, labels []tstorage.Label) *seriesCodec {
 		return &seriesCodec{value: func(name string, value float64) (float64, error) {
 			rows = append(rows, tstorage.Row{Metric: prefix + name, Labels: labels, DataPoint: tstorage.DataPoint{Timestamp: s.SampledAt.UnixNano(), Value: value}})

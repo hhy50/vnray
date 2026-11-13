@@ -13,7 +13,8 @@ import (
 	"github.com/hhy50/vnray/internal/logging"
 )
 
-const historyPartitionDuration = 30 * time.Minute
+// 分区 10 分钟落盘一次；WAL 已关闭，进程崩溃会丢失未刷盘的尾部（最多两个分区）。
+const historyPartitionDuration = 10 * time.Minute
 
 // History 管理独立的 tstorage 指标目录及串行读写生命周期。
 type History struct {
@@ -54,7 +55,7 @@ func openHistory(dir string, retention time.Duration) (tstorage.Storage, error) 
 		tstorage.WithPartitionDuration(historyPartitionDuration),
 		tstorage.WithRetention(retention),
 		tstorage.WithTimestampPrecision(tstorage.Nanoseconds),
-		tstorage.WithWALBufferedSize(0),
+		tstorage.WithWALBufferedSize(-1),
 		tstorage.WithWriteTimeout(storageTimeout),
 		tstorage.WithLogger(historyLogger{}),
 	)

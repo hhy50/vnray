@@ -33,7 +33,7 @@ func testSnapshot() Snapshot {
 			GCPauseP99Seconds: testPointer(0.000123), GCCPUPercent: nil,
 		},
 		Users: []User{
-			{ID: math.MaxUint64, Name: "alice", Protocol: "vmess", TCP: math.MinInt64, Streams: 3, Requests: math.MaxInt64, Up: 1<<53 + 1, Down: 45678, UpRate: testPointer(0.0), DownRate: nil},
+			{ID: math.MaxUint64, Name: "alice", Protocol: "vmess", TCP: math.MinInt64, Requests: math.MaxInt64, Up: 1<<53 + 1, Down: 45678, UpRate: testPointer(0.0), DownRate: nil},
 			{ID: 2, Name: "bob", Protocol: "ss", Requests: 12, UpRate: testPointer(0.25), DownRate: testPointer(4096.5)},
 		},
 	}
@@ -245,6 +245,9 @@ func TestHistoryDiskPersistenceAndAbruptExit(t *testing.T) {
 			if mode == "partitions" {
 				readAction = "partition-read"
 			}
+			if mode == "crash" {
+				readAction = "crash-read"
+			}
 			for _, action := range []string{mode, readAction} {
 				cmd := exec.Command(os.Args[0], "-test.run=^TestHistoryDiskHelper$")
 				cmd.Env = append(os.Environ(), "VNRAY_TSTORAGE_TEST_DIR="+dir, "VNRAY_TSTORAGE_TEST_ACTION="+action, "VNRAY_TSTORAGE_TEST_AT="+at)
@@ -296,8 +299,13 @@ func TestHistoryDiskHelper(t *testing.T) {
 			os.Exit(0)
 		}
 	} else {
+		wantRows := len(offsets)
+		if action == "crash-read" {
+			// WAL 已关闭，未刷盘的内存分区随进程退出丢失。
+			wantRows = 0
+		}
 		rows, err := h.Read(ctx, sample.SampledAt, sample.SampledAt.Add(offsets[len(offsets)-1]), 120, []uint64{sample.Users[0].ID, sample.Users[1].ID})
-		if err != nil || len(rows) != len(offsets) {
+		if err != nil || len(rows) != wantRows {
 			t.Fatalf("reopen read: %d rows, %v", len(rows), err)
 		}
 		for i, row := range rows {
@@ -338,12 +346,12 @@ func TestHistoryDiskHelper(t *testing.T) {
 					continue
 				}
 				partitions++
-				if meta.Max-meta.Min > int64(30*time.Minute)+1 {
-					t.Fatal("partition exceeds 30-minute boundary")
+				if meta.Max-meta.Min > int64(historyPartitionDuration)+1 {
+					t.Fatal("partition exceeds boundary")
 				}
 			}
-			if partitions != 2 {
-				t.Fatalf("partitions: %d, want 2", partitions)
+			if partitions != 3 {
+				t.Fatalf("partitions: %d, want 3", partitions)
 			}
 		}
 		if err := h.Configure(ctx, 2*time.Hour); err != nil {

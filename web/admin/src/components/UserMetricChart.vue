@@ -10,20 +10,23 @@ import { useI18n } from '../i18n'
 import { bytes } from '../lib/format'
 
 use([LineChart, CanvasRenderer, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent])
-const props = defineProps<{ user: MonitorUser; history: MonitorSample[]; large?: boolean }>()
+const props = defineProps<{ user: MonitorUser; history: MonitorSample[]; large?: boolean; metrics?: string[] }>()
 const { t } = useI18n()
-const definitions = computed(() => [
-  { key: 'tcp' as const, name: t('monitoring.tcp'), axis: 0 },
-  { key: 'streams' as const, name: t('monitoring.streams'), axis: 0 },
-  { key: 'requests' as const, name: t('monitoring.requests'), axis: 1 },
-  { key: 'up_rate' as const, name: t('monitoring.upRate'), axis: 2 },
-  { key: 'down_rate' as const, name: t('monitoring.downRate'), axis: 2 },
-])
+const definitions = computed(() => {
+  const all = [
+    { key: 'tcp' as const, name: t('monitoring.tcp'), axis: 0, color: '#3b82f6' },
+    { key: 'requests' as const, name: t('monitoring.requests'), axis: 1, color: '#f59e0b' },
+    { key: 'up_rate' as const, name: t('monitoring.upRate'), axis: 2, color: '#10b981' },
+    { key: 'down_rate' as const, name: t('monitoring.downRate'), axis: 2, color: '#ef6464' },
+  ]
+  const picked = props.metrics
+  return picked ? all.filter(d => picked.includes(d.key)) : all
+})
 const option = computed(() => {
   const samples = props.history.map(s => ({ at: s.sampled_at, user: s.users.find(u => u.id === props.user.id) }))
   return {
     animation: false,
-    color: ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981', '#ef6464'],
+    color: definitions.value.map(d => d.color),
     textStyle: { color: '#8290a6' },
     legend: { top: 0, type: 'scroll', textStyle: { color: '#8290a6', fontSize: 11 } },
     tooltip: { trigger: 'axis', confine: true, renderMode: 'richText' },

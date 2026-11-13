@@ -318,7 +318,6 @@ export interface MonitorUser {
   name: string
   protocol: string
   tcp: number
-  streams: number
   requests: number
   up: number
   down: number

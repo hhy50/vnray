@@ -239,7 +239,7 @@ func (s *Service) sampleUsers(at time.Time) []User {
 	for _, source := range s.users {
 		u := User{ID: source.ID, Name: source.Name, Protocol: source.Protocol}
 		if stats := source.Stats; stats != nil {
-			u.TCP, u.Streams, u.Requests = stats.TCP.Load(), stats.Streams.Load(), stats.Requests.Load()
+			u.TCP, u.Requests = stats.TCP.Load(), stats.Requests.Load()
 			u.Up, u.Down = stats.UpWrite.Load(), stats.DownWrite.Load()
 		}
 		if old, ok := baseline[u.ID]; ok && seconds > 0 && u.Up >= old.Up && u.Down >= old.Down {

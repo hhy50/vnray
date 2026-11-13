@@ -215,10 +215,9 @@ func (g *capacityGenerator) next(index int) Snapshot {
 			upBytes = int64(1024 + g.random.IntN(256*1024))
 			downBytes = int64(4096 + g.random.IntN(2*1024*1024))
 			u.TCP = int64(1 + g.random.IntN(5))
-			u.Streams = u.TCP + int64(g.random.IntN(20))
 			u.Requests += int64(g.random.IntN(8))
 		} else {
-			u.TCP, u.Streams = 0, 0
+			u.TCP = 0
 		}
 		u.Up += upBytes
 		u.Down += downBytes
