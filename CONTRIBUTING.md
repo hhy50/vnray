@@ -213,7 +213,7 @@ scope: core | server | pipe | cmd | app | acl | manager | logging | ci（可省�
 
 ## 12. 开发环境
 
-- Go 版本：以 `go.mod` 声明为准（当前 1.26.3）；本地开发与 CI 均使用兼容的工具链。
+- Go 版本：以 `go.mod` 声明为准（当前 1.26.7）；本地开发与 CI 均使用兼容的工具链。
 - 提交前最小命令集（后续会由 Makefile 封装）：
 
 ```sh

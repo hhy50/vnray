@@ -69,11 +69,6 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.plugins' },
       },
       {
-        path: 'metrics',
-        name: 'metrics',
-        redirect: { name: 'monitoring', query: { tab: 'host' } },
-      },
-      {
         path: 'monitoring',
         name: 'monitoring',
         component: () => import('./views/Monitoring.vue'),

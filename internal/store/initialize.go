@@ -44,7 +44,7 @@ func (s *sqlStore) initialize(ctx context.Context, data *InitialData) error {
 	// MySQL DDL 会隐式提交；先完成可重入建表，再开始数据事务。
 	if err := s.db.WithContext(ctx).AutoMigrate(&UserBinding{}, &ClientBinding{}, &authKeyModel{},
 		&PluginState{}, &userTrafficModel{}, &clientTrafficModel{}, &PortMapping{},
-		&serviceSettingsModel{}, &initializationModel{}, &MonitoringSample{}); err != nil {
+		&serviceSettingsModel{}, &initializationModel{}); err != nil {
 		return fmt.Errorf("store: migrate tables: %w", err)
 	}
 	if data == nil {

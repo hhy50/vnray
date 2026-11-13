@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"time"
 
 	"github.com/hhy50/vnray/internal/config"
 	"github.com/hhy50/vnray/internal/monitor"
@@ -10,7 +9,11 @@ import (
 	"github.com/hhy50/vnray/internal/traffic"
 )
 
-func newMonitoring(st store.Store, meter *traffic.Meter, settings config.ServiceSettings) *monitor.Service {
+func newMonitoring(st store.Store, meter *traffic.Meter, settings config.ServiceSettings, storage config.StorageConfig) (*monitor.Service, error) {
+	history, err := monitor.NewHistory(storage.ResolvedMonitoringDir(), settings.MetricsRetention.Std())
+	if err != nil {
+		return nil, err
+	}
 	s := monitor.New(monitor.Options{
 		Users: func(ctx context.Context) ([]monitor.UserSource, error) {
 			users, err := st.ListUsers(ctx)
@@ -23,34 +26,12 @@ func newMonitoring(st store.Store, meter *traffic.Meter, settings config.Service
 			}
 			return out, nil
 		},
-		History: monitoringHistory{st},
+		History: history,
 	})
 	s.Configure(monitoringSettings(settings))
-	return s
+	return s, nil
 }
 
 func monitoringSettings(settings config.ServiceSettings) monitor.Settings {
 	return monitor.Settings{Enabled: settings.MetricsEnabled, Interval: settings.MetricsInterval.Std(), Retention: settings.MetricsRetention.Std()}
-}
-
-type monitoringHistory struct{ store.Store }
-
-func (h monitoringHistory) Save(ctx context.Context, at time.Time, data []byte, cutoff time.Time) error {
-	var sample *store.MonitoringSample
-	if data != nil {
-		sample = &store.MonitoringSample{Timestamp: at.UnixMilli(), Payload: string(data)}
-	}
-	return h.SaveMonitoring(ctx, sample, cutoff)
-}
-
-func (h monitoringHistory) Read(ctx context.Context, since, until time.Time, limit int) ([][]byte, error) {
-	rows, err := h.MonitoringHistory(ctx, since, until, limit)
-	if err != nil {
-		return nil, err
-	}
-	out := make([][]byte, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, []byte(row.Payload))
-	}
-	return out, nil
 }

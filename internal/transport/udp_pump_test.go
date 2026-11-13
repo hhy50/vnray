@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hhy50/vnray/internal/protocol"
+	"github.com/hhy50/vnray/internal/stats"
 )
 
 // TestProxyDatagramBidirectional 双向搬运、上行限速计费、两侧统计与收尾。
@@ -25,7 +26,7 @@ func TestProxyDatagramBidirectional(t *testing.T) {
 	defer aPeer.Close()
 
 	lim := &countingLimiter{}
-	stats := &PumpStats{}
+	stats := &stats.PumpStats{}
 	done := make(chan struct{})
 	go func() {
 		ProxyDatagramBidirectional(aD, bD, "t", 0, ProxyOptions{UpLimit: lim, Stats: stats})

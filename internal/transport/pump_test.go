@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hhy50/vnray/internal/stats"
 )
 
 // countingLimiter 记录被等待的字节总量；不真正睡眠。
@@ -49,7 +51,7 @@ type rwCloser struct {
 func TestProxyBidirectionalLimitedAndStats(t *testing.T) {
 	const total = 200 * 1024
 	lim := &countingLimiter{}
-	stats := &PumpStats{}
+	stats := &stats.PumpStats{}
 
 	a := rwCloser{
 		Reader: strings.NewReader(strings.Repeat("x", total)),

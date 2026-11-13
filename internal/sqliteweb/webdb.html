@@ -23,12 +23,16 @@
   .sub .spacer { flex:1; }
   button { background:var(--accent); border:0; color:#fff; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
   button.ghost { background:transparent; border:1px solid var(--border); color:var(--muted); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
   button.tint { background:transparent; border:1px solid var(--accent); color:var(--accent); }
   button.tint:hover { background:rgba(79,140,255,.12); color:var(--text); }
   textarea { width:100%; height:110px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:10px; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; resize:vertical; }
   .console-box { padding:14px 18px; border-bottom:1px solid var(--border); }
   .console-box .row { display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap; }
   .grid { flex:1; overflow:auto; padding:12px 18px 18px; }
+  .pagination { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; padding:12px 18px; border-top:1px solid var(--border); background:var(--panel); }
+  .pagination[hidden] { display:none; }
+  .pagination .muted { margin-right:auto; }
   table.data { border-collapse:collapse; width:100%; font-size:13px; }
   .data th, .data td { border:1px solid var(--border); padding:5px 9px; text-align:left; white-space:nowrap; max-width:340px; overflow:hidden; text-overflow:ellipsis; }
   .data th { background:var(--panel); position:sticky; top:0; color:var(--muted); font-weight:500; }
@@ -76,6 +80,13 @@
     <div class="grid" id="grid-data">
       <p class="hint">点击左侧任意表浏览数据；悬停单元格看全文，点右侧 ⤢ 展开完整内容。</p>
     </div>
+    <nav class="pagination" id="pagination" aria-label="表数据分页" hidden>
+      <span class="muted" id="page-info" aria-live="polite"></span>
+      <button class="ghost" id="first" disabled>首页</button>
+      <button class="ghost" id="prev" disabled>上一页</button>
+      <button class="ghost" id="next" disabled>下一页</button>
+      <button class="ghost" id="last" disabled>最后一页</button>
+    </nav>
   </div>
 
   <div class="view" id="view-console" hidden>
@@ -109,12 +120,15 @@
 const $ = s => document.querySelector(s);
 const esc = v => v == null ? 'NULL' : String(v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let curTable = null;
+let curOffset = 0, totalRows = 0;
+let tableController;
 const LIMIT = 50;
 
 function switchView(name) {
   $('#view-data').hidden = name !== 'data';
   $('#view-console').hidden = name !== 'console';
   $('#nav-console').classList.toggle('active', name === 'console');
+  $('#meta').hidden = name !== 'console';
 }
 
 async function api(url, opts) {
@@ -199,25 +213,37 @@ async function loadTables() {
 }
 
 async function loadTable(name, offset) {
+  tableController?.abort();
+  const controller = tableController = new AbortController();
   curTable = name;
+  curOffset = offset;
   switchView('data');
   $('#cur').textContent = name;
+  for (const el of document.querySelectorAll('.tbl[data-name]'))
+    el.classList.toggle('active', el.dataset.name === name);
+  $('#pagination').hidden = false;
+  $('#page-info').textContent = '加载中…';
+  for (const id of ['first', 'prev', 'next', 'last']) $('#' + id).disabled = true;
   try {
-    const data = await api('/api/table?name=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + LIMIT);
+    const data = await api('/api/table?name=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + LIMIT, { signal: controller.signal });
+    if (controller !== tableController) return;
+    totalRows = data.total;
+    if (offset > lastOffset()) return loadTable(name, lastOffset());
     renderGrid($('#grid-data'), data.columns, data.rows);
+    $('#grid-data').scrollTop = 0;
     const from = data.total === 0 ? 0 : offset + 1, to = offset + data.rows.length;
-    let nav = '';
-    if (offset > 0) nav += '<button class="ghost" id="prev">上一页</button> ';
-    if (to < data.total) nav += '<button class="ghost" id="next">下一页</button>';
-    $('#meta').innerHTML = '共 ' + data.total + ' 行，显示 ' + from + '-' + to + ' ' + nav;
-    const prev = $('#prev'), next = $('#next');
-    if (prev) prev.onclick = () => loadTable(name, Math.max(0, offset - LIMIT));
-    if (next) next.onclick = () => loadTable(name, offset + LIMIT);
+    const pages = Math.max(1, Math.ceil(data.total / LIMIT));
+    $('#page-info').textContent = '共 ' + data.total + ' 行，显示 ' + from + '-' + to + ' · 第 ' + (Math.floor(offset / LIMIT) + 1) + ' / ' + pages + ' 页';
+    $('#first').disabled = $('#prev').disabled = offset === 0;
+    $('#next').disabled = $('#last').disabled = offset >= lastOffset();
   } catch (e) {
-    $('#meta').textContent = '';
+    if (controller !== tableController) return;
+    $('#page-info').textContent = '加载失败，请刷新重试';
     $('#grid-data').innerHTML = '<p class="err" style="padding:14px 0">' + esc(e.message) + '</p>';
   }
 }
+
+function lastOffset() { return Math.max(0, Math.ceil(totalRows / LIMIT) - 1) * LIMIT; }
 
 async function runSQL() {
   const text = $('#sql').value.trim();
@@ -244,7 +270,11 @@ async function runSQL() {
 
 $('#nav-console').onclick = () => switchView('console');
 $('#run').onclick = runSQL;
-$('#reload').onclick = loadTables;
+$('#reload').onclick = () => { loadTables(); if (curTable) loadTable(curTable, curOffset); };
+$('#first').onclick = () => loadTable(curTable, 0);
+$('#prev').onclick = () => loadTable(curTable, Math.max(0, curOffset - LIMIT));
+$('#next').onclick = () => loadTable(curTable, Math.min(lastOffset(), curOffset + LIMIT));
+$('#last').onclick = () => loadTable(curTable, lastOffset());
 $('#sql').addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runSQL(); });
 $('#dlg-close').onclick = closeDialog;
 $('#dlg-copy').onclick = () => copyText(dlgValue).then(() => showToast('已复制到剪贴板'));

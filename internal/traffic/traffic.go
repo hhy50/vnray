@@ -11,12 +11,12 @@ import (
 	"github.com/hhy50/vnray/internal/logging"
 	"github.com/hhy50/vnray/internal/ratelimit"
 	"github.com/hhy50/vnray/internal/routine"
+	"github.com/hhy50/vnray/internal/stats"
 	"github.com/hhy50/vnray/internal/store"
-	"github.com/hhy50/vnray/internal/transport"
 )
 
 // FlushInterval 是流量增量落库的默认周期；进程退出时另补一次。
-const FlushInterval = 10 * time.Second
+const FlushInterval = 2 * time.Second
 
 // flushTimeout 防止慢库长期占住用户删除所需的落库锁。
 const flushTimeout = 5 * time.Second
@@ -29,7 +29,7 @@ type userKey struct {
 
 // entry 是一份计数器与上次成功落库时的读数，两者之差就是要写库的增量。
 type entry struct {
-	stats    *transport.PumpStats
+	stats    *stats.PumpStats
 	seenUp   int64
 	seenDown int64
 }
@@ -85,7 +85,7 @@ func (m *Meter) SetFlushInterval(d time.Duration) {
 }
 
 // UserStats 返回已登记用户的共享字节计数器；未登记或已删除的用户不计账。
-func (m *Meter) UserStats(p store.Protocol, key string) *transport.PumpStats {
+func (m *Meter) UserStats(p store.Protocol, key string) *stats.PumpStats {
 	if m == nil || key == "" {
 		return nil
 	}
@@ -104,7 +104,7 @@ func (m *Meter) UserStats(p store.Protocol, key string) *transport.PumpStats {
 }
 
 // ClientStats 返回客户端维度的共享字节计数器（同一客户端的全部隧道合计）；空名不计账。
-func (m *Meter) ClientStats(name string) *transport.PumpStats {
+func (m *Meter) ClientStats(name string) *stats.PumpStats {
 	if name == "" {
 		return nil
 	}
@@ -112,19 +112,19 @@ func (m *Meter) ClientStats(name string) *transport.PumpStats {
 	defer m.mu.Unlock()
 	e, ok := m.clients[name]
 	if !ok {
-		e = &entry{stats: &transport.PumpStats{}}
+		e = &entry{stats: &stats.PumpStats{}}
 		m.clients[name] = e
 	}
 	return e.stats
 }
 
 // PortMappingStats 返回映射维度的共享字节计数器。
-func (m *Meter) PortMappingStats(id uint64) *transport.PumpStats {
+func (m *Meter) PortMappingStats(id uint64) *stats.PumpStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.portMappings[id]
 	if !ok {
-		e = &entry{stats: &transport.PumpStats{}}
+		e = &entry{stats: &stats.PumpStats{}}
 		m.portMappings[id] = e
 	}
 	return e.stats

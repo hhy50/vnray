@@ -356,7 +356,7 @@ onMounted(load)
                     </el-select>
                   </el-form-item>
                   <el-form-item :label="t('serviceConfig.flushInterval')">
-                    <el-input v-model="form.traffic_flush_interval" placeholder="10s" class="mono" />
+                    <el-input v-model="form.traffic_flush_interval" placeholder="2s" class="mono" />
                   </el-form-item>
                 </div>
                 <div class="form-row">

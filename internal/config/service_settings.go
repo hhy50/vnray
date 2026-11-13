@@ -95,7 +95,7 @@ type LogRotation struct {
 
 const (
 	// DefaultTrafficFlushInterval 是流量增量落库的默认周期，与 traffic.FlushInterval 一致。
-	DefaultTrafficFlushInterval = 10 * time.Second
+	DefaultTrafficFlushInterval = 2 * time.Second
 	// DefaultLogRotateMaxSizeMB/DefaultLogRotateMaxBackups/DefaultLogRotateMaxAgeDays
 	// 是日志文件轮转的默认参数。
 	DefaultLogRotateMaxSizeMB  = 10
@@ -142,8 +142,8 @@ func (s ServiceSettings) Validate() error {
 	if s.MetricsInterval.Std() < time.Second || s.MetricsInterval.Std() > time.Hour {
 		return fmt.Errorf("metrics_interval: must be between 1s and 1h")
 	}
-	if s.MetricsRetention < s.MetricsInterval || s.MetricsRetention.Std() > 7*24*time.Hour || s.MetricsRetention > 10000*s.MetricsInterval {
-		return fmt.Errorf("metrics_retention: must be >= interval, <= 168h and at most 10000 samples")
+	if s.MetricsRetention < s.MetricsInterval || s.MetricsRetention.Std() > 7*24*time.Hour {
+		return fmt.Errorf("metrics_retention: must be >= interval and <= 168h")
 	}
 	if err := s.GlobalClient.Validate(); err != nil {
 		return err

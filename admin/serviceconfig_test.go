@@ -46,7 +46,7 @@ func TestServiceConfigMonitoringIntervals(t *testing.T) {
 		{"0s", "1h", http.StatusBadRequest},
 		{"bad", "1h", http.StatusBadRequest},
 		{"5s", "1s", http.StatusBadRequest},
-		{"1s", "168h", http.StatusBadRequest},
+		{"1s", "169h", http.StatusBadRequest},
 	} {
 		w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{MetricsInterval: tc.interval, MetricsRetention: tc.retention}, nil)
 		s.apiServiceConfigSave(w, r)
@@ -67,6 +67,23 @@ func TestServiceConfigMonitoringIntervals(t *testing.T) {
 	}
 	if response.Data.MetricsInterval != "5s" || response.Data.MetricsRetention != "6h0m0s" {
 		t.Fatalf("read: %s", w.Body.String())
+	}
+	for _, interval := range []string{"1s", "2s"} {
+		t.Run("seven days at "+interval, func(t *testing.T) {
+			w, r := apiContext(http.MethodPut, "/admin/ops/api/service-config", apiDurationFields{MetricsInterval: interval, MetricsRetention: "168h"}, nil)
+			s.apiServiceConfigSave(w, r)
+			if w.Code != http.StatusOK || fake.cur.MetricsInterval.String() != interval || fake.cur.MetricsRetention.Std() != 7*24*time.Hour {
+				t.Fatalf("save %s/168h: status=%d, body=%s", interval, w.Code, w.Body.String())
+			}
+			w, r = apiContext(http.MethodGet, "/admin/ops/api/service-config", nil, nil)
+			s.apiServiceConfig(w, r)
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || response.Data.MetricsInterval != interval || response.Data.MetricsRetention != "168h0m0s" {
+				t.Fatalf("read %s/168h: status=%d, body=%s", interval, w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

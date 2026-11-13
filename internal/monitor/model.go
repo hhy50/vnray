@@ -25,10 +25,12 @@ type UserSource struct {
 	Stats    *stats.PumpStats
 }
 
-// HistoryStore 提供按时间索引的监控历史；实现不接触业务计数器。
+// HistoryStore 保存数值时序并重建快照，由 Service 配置和关闭。
 type HistoryStore interface {
-	Save(context.Context, time.Time, []byte, time.Time) error
-	Read(context.Context, time.Time, time.Time, int) ([][]byte, error)
+	Save(context.Context, Snapshot) error
+	Read(context.Context, time.Time, time.Time, int, []uint64) ([]Snapshot, error)
+	Configure(context.Context, time.Duration) error
+	Close() error
 }
 
 // Options 注入用户目录与历史存储，缺省时仍提供主机监控。

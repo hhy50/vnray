@@ -221,10 +221,6 @@ type Limiter interface {
 	Wait(ctx context.Context, n int) error
 }
 
-// PumpStats 是泵的字节统计；类型定义在叶子包 stats，因为限速注册表也要持有它，
-// 而 ratelimit 反向依赖 transport 会把依赖方向带偏。
-type PumpStats = stats.PumpStats
-
 // ProxyOptions 是双向泵的可选参数：两个方向的限速器与字节统计。
 // 限速按用户要求挂在各方向的**读端**：上行限用户侧 reader（用户发多快），
 // 下行限客户端侧 reader（客户端送多快）——不读，TCP 背压才会真正传回源头。
@@ -235,8 +231,8 @@ type ProxyOptions struct {
 	Context     context.Context
 	UpLimit     Limiter
 	DownLimit   Limiter
-	Stats       *PumpStats
-	ClientStats *PumpStats
+	Stats       *stats.PumpStats
+	ClientStats *stats.PumpStats
 }
 
 // 隧道转发量与并发数：管理台图表的采样数据源，atomic 免锁、热路径只付一次加法。

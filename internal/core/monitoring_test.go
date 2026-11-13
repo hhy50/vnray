@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +17,23 @@ import (
 )
 
 func TestMonitoringAssemblyPersistenceAndConfiguration(t *testing.T) {
+	dir := os.Getenv("VNRAY_MONITOR_ASSEMBLY_DIR")
+	if dir == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMonitoringAssemblyPersistenceAndConfiguration$")
+		cmd.Env = append(os.Environ(), "VNRAY_MONITOR_ASSEMBLY_DIR="+t.TempDir())
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("assembly: %v\n%s", err, output)
+		}
+		return
+	}
+	dataPath := filepath.Join(dir, "bindings.db")
+	storage := config.StorageConfig{MonitoringDir: filepath.Join(dir, "history")}
 	ctx := context.Background()
-	st := testStore(t)
+	st, err := store.Open(ctx, "sqlite", dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
 	meter := traffic.NewMeter(nil)
 	for _, proto := range []store.Protocol{store.ProtocolSS, store.ProtocolVMess} {
 		if err := st.SetUser(ctx, store.UserBinding{Protocol: proto, Key: "private-user-credential", Name: "same-name", Client: "edge", Status: store.UserEnabled}); err != nil {
@@ -26,7 +44,10 @@ func TestMonitoringAssemblyPersistenceAndConfiguration(t *testing.T) {
 	meter.UserStats(store.ProtocolVMess, "private-user-credential").Request()
 	settings := config.DefaultServiceSettings()
 	settings.MetricsEnabled = true
-	s := newMonitoring(st, meter, settings)
+	s, err := newMonitoring(st, meter, settings, storage)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -60,12 +81,15 @@ func TestMonitoringAssemblyPersistenceAndConfiguration(t *testing.T) {
 	if response.Users[1].Requests != 1 {
 		t.Fatal("wrong protocol counter")
 	}
+	if response.History[0].Users[1].Requests != 1 || response.History[0].Users[1].Name != "same-name" {
+		t.Fatal("history lost user counters or directory metadata")
+	}
 	sc := newTestServiceConfig(st, settings)
 	sc.monitor = s
 	next := sc.Current()
 	next.MetricsEnabled = false
-	next.MetricsInterval = config.Duration(5 * time.Second)
-	next.MetricsRetention = config.Duration(6 * time.Hour)
+	next.MetricsInterval = config.Duration(2 * time.Second)
+	next.MetricsRetention = config.Duration(7 * 24 * time.Hour)
 	if err := sc.Apply(ctx, next); err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +100,30 @@ func TestMonitoringAssemblyPersistenceAndConfiguration(t *testing.T) {
 	if loaded.MetricsInterval != next.MetricsInterval || loaded.MetricsRetention != next.MetricsRetention {
 		t.Fatal("monitoring settings not persisted")
 	}
-	rows, err := st.MonitoringHistory(ctx, time.Now().Add(-time.Hour), time.Now(), 120)
+	if err := s.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Open(ctx, "sqlite", dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	history, err := monitor.NewHistory(storage.MonitoringDir, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer history.Close()
+	rows, err := history.Read(ctx, time.Now().Add(-time.Hour), time.Now(), 120, []uint64{response.Users[0].ID, response.Users[1].ID})
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("history: %v, %v", rows, err)
+	}
+	if rows[0].Users[1].Requests != 1 {
+		t.Fatal("tstorage did not preserve counters across reopen")
+	}
+	if users, err := reopened.ListUsers(ctx); err != nil || len(users) != 2 {
+		t.Fatalf("business data: %d users, %v", len(users), err)
 	}
 }

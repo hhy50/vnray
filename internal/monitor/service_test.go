@@ -15,29 +15,38 @@ import (
 )
 
 type memoryHistory struct {
-	rows          [][]byte
+	rows          []Snapshot
 	reads, writes int
-	prunes        atomic.Int64
+	maintenance   atomic.Int64
+	closes        atomic.Int64
 	err           error
 }
 
-func (h *memoryHistory) Save(_ context.Context, _ time.Time, data []byte, _ time.Time) error {
+func (h *memoryHistory) Save(_ context.Context, data Snapshot) error {
 	if h.err != nil {
 		return h.err
 	}
-	if data == nil {
-		h.prunes.Add(1)
-	} else {
-		h.writes++
-		h.rows = append(h.rows, append([]byte(nil), data...))
-	}
+	h.writes++
+	data.Users = append([]User(nil), data.Users...)
+	h.rows = append(h.rows, data)
 	return nil
 }
 
-func (h *memoryHistory) Read(context.Context, time.Time, time.Time, int) ([][]byte, error) {
+func (h *memoryHistory) Read(context.Context, time.Time, time.Time, int, []uint64) ([]Snapshot, error) {
 	h.reads++
-	return h.rows, h.err
+	rows := append([]Snapshot(nil), h.rows...)
+	for i := range rows {
+		rows[i].Users = append([]User(nil), rows[i].Users...)
+	}
+	return rows, h.err
 }
+
+func (h *memoryHistory) Configure(context.Context, time.Duration) error {
+	h.maintenance.Add(1)
+	return h.err
+}
+
+func (h *memoryHistory) Close() error { h.closes.Add(1); return nil }
 
 func testSettings() Settings {
 	return Settings{Enabled: true, Interval: 2 * time.Second, Retention: time.Hour}
@@ -171,11 +180,11 @@ func TestLifecycleReloadAndCancellation(t *testing.T) {
 		if s.current.Load() != nil {
 			t.Fatal("disabled sampler retained snapshot")
 		}
-		pruned := history.prunes.Load()
+		maintained := history.maintenance.Load()
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if history.prunes.Load() <= pruned {
-			t.Fatal("disabled history did not expire")
+		if history.maintenance.Load() <= maintained {
+			t.Fatal("disabled history did not receive configuration maintenance")
 		}
 		settings.Enabled = true
 		s.Configure(settings)
@@ -192,6 +201,9 @@ func TestLifecycleReloadAndCancellation(t *testing.T) {
 		}
 		if err := s.Start(context.Background()); err == nil {
 			t.Fatal("restarted stopped service")
+		}
+		if history.closes.Load() != 1 {
+			t.Fatal("history was not closed exactly once")
 		}
 	})
 }
@@ -218,6 +230,19 @@ func TestStorageFailureAndCancellation(t *testing.T) {
 	defer cancel()
 	if err := s.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDrainClosesUnstartedHistory(t *testing.T) {
+	history := &memoryHistory{}
+	s := New(Options{History: history})
+	for range 2 {
+		if err := s.Drain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if history.closes.Load() != 1 {
+		t.Fatal("unstarted history was not closed exactly once")
 	}
 }
 

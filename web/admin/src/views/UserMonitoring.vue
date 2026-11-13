@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
-import { FullScreen, Refresh, Search } from '@element-plus/icons-vue'
+import { FullScreen, Grid, List, Refresh, Search } from '@element-plus/icons-vue'
 import { api, ApiError } from '../api/client'
 import type { Monitoring } from '../api/types'
 import { bytes } from '../lib/format'
@@ -112,9 +112,19 @@ onUnmounted(() => { disposed = true; clearTimeout(timer); controller?.abort(); d
           <el-select v-model="window" :aria-label="t('monitoring.window')" style="width: 140px">
             <el-option v-for="item in ['5m', '15m', '1h', '6h', '24h', '168h']" :key="item" :value="item" :label="item" />
           </el-select>
-          <el-radio-group v-model="mode" :aria-label="t('monitoring.layout')">
-            <el-radio-button value="list">{{ t('monitoring.list') }}</el-radio-button>
-            <el-radio-button value="grid">{{ t('monitoring.grid') }}</el-radio-button>
+          <el-radio-group v-model="mode" :aria-label="t('monitoring.layout')" class="layout-switch">
+            <el-tooltip :content="t('monitoring.list')" placement="top">
+              <el-radio-button value="list">
+                <el-icon :size="18" aria-hidden="true"><List /></el-icon>
+                <span class="visually-hidden">{{ t('monitoring.list') }}</span>
+              </el-radio-button>
+            </el-tooltip>
+            <el-tooltip :content="t('monitoring.grid')" placement="top">
+              <el-radio-button value="grid">
+                <el-icon :size="18" aria-hidden="true"><Grid /></el-icon>
+                <span class="visually-hidden">{{ t('monitoring.grid') }}</span>
+              </el-radio-button>
+            </el-tooltip>
           </el-radio-group>
         </div>
       </div>
@@ -160,6 +170,8 @@ h2 { margin: 0; font-size: 20px; }
 .sample-strip, .card-values { display: flex; flex-wrap: wrap; gap: 20px; font-size: 12px; color: var(--el-text-color-secondary); }
 .sample-strip { padding: 12px 16px; border-radius: 8px; background: var(--el-fill-color-light); }
 .search { max-width: 300px; }
+.layout-switch :deep(.el-radio-button__inner) { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 32px; padding: 0; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .chart-card { min-width: 0; padding: 18px 14px 8px; border: 1px solid var(--el-border-color-lighter); border-radius: 12px; background: var(--el-bg-color); }
 .chart-card header { margin: 0 6px 14px; }

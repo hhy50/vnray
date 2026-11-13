@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           go list -buildvcs=false -deps -f '{{.ImportPath}}' ./cmd/client > /tmp/client-imports.txt
-          if grep -E '^(github.com/hhy50/vnray/(admin|internal/(core|store|plugin|inbound|sqliteweb))(/|$)|gorm.io/|github.com/glebarez/sqlite|modernc.org/sqlite)' /tmp/client-imports.txt; then
+          if grep -E '^(github.com/hhy50/vnray/(admin|internal/(core|store|plugin|inbound|sqliteweb|monitor))(/|$)|gorm.io/|github.com/glebarez/sqlite|modernc.org/sqlite)' /tmp/client-imports.txt; then
             echo 'client imports server-only packages' >&2
             exit 1
           fi

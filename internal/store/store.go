@@ -315,10 +315,6 @@ func validatePortMapping(m PortMapping) error {
 
 // Store 是用户绑定与客户端注册两张表的持久化契约；实现必须并发安全，Close 可重复调用。
 type Store interface {
-	// SaveMonitoring 保存采样并删除过期记录；nil 仅清理。
-	SaveMonitoring(context.Context, *MonitoringSample, time.Time) error
-	// MonitoringHistory 返回时间范围内均匀选取的有限样本。
-	MonitoringHistory(context.Context, time.Time, time.Time, int) ([]MonitoringSample, error)
 	// SetUser 新增或按 (Protocol, Key) 覆盖一条用户记录；覆盖时保留 ID 与 CreatedAt。
 	SetUser(ctx context.Context, b UserBinding) error
 	// GetUser 按 (Protocol, Key) 读取一条用户记录；不存在时 ok 为 false。

@@ -16,6 +16,7 @@ import (
 	"github.com/hhy50/vnray/internal/mux"
 	"github.com/hhy50/vnray/internal/protocol"
 	"github.com/hhy50/vnray/internal/ratelimit"
+	"github.com/hhy50/vnray/internal/stats"
 	"github.com/hhy50/vnray/internal/store"
 	"github.com/hhy50/vnray/internal/traffic"
 	"github.com/hhy50/vnray/internal/transport"
@@ -31,7 +32,7 @@ type relayDeps struct {
 	exits   transport.ExitResolver
 	limits  *ratelimit.Registry
 	traffic *traffic.Meter
-	stats   *transport.PumpStats
+	stats   *stats.PumpStats
 	proto   store.Protocol
 }
 

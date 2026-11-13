@@ -38,20 +38,22 @@ type cachedQuery struct {
 
 // Service 拥有唯一采样协程；只读快照通过原子指针发布。
 type Service struct {
-	opts          Options
-	settings      atomic.Pointer[Settings]
-	current       atomic.Pointer[publication]
-	reload        chan struct{}
-	userVersion   atomic.Uint64
-	users         []UserSource
-	loadedVersion uint64
-	started       time.Time
-	lastPruned    time.Time
-	lastRetention time.Duration
-	mu            sync.Mutex
-	cancel        context.CancelFunc
-	done          chan struct{}
-	stopped       bool
+	opts           Options
+	settings       atomic.Pointer[Settings]
+	current        atomic.Pointer[publication]
+	reload         chan struct{}
+	userVersion    atomic.Uint64
+	users          []UserSource
+	loadedVersion  uint64
+	started        time.Time
+	lastMaintained time.Time
+	lastRetention  time.Duration
+	historyOnce    sync.Once
+	historyErr     error
+	mu             sync.Mutex
+	cancel         context.CancelFunc
+	done           chan struct{}
+	stopped        bool
 }
 
 // New 创建尚未启动的监控模块。
@@ -92,26 +94,39 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	ctx, s.cancel = context.WithCancel(ctx)
 	s.done = make(chan struct{})
-	routine.Go("monitor.sample", func() { defer close(s.done); s.run(ctx) })
+	routine.Go("monitor.sample", func() {
+		defer close(s.done)
+		defer s.closeHistory()
+		s.run(ctx)
+	})
 	return nil
 }
 
-// Drain 幂等地终止采样并等待数据库操作结束。
+// Drain 幂等地终止采样并等待历史存储关闭。
 func (s *Service) Drain(ctx context.Context) error {
 	s.mu.Lock()
 	s.stopped = true
 	cancel, done := s.cancel, s.done
 	s.mu.Unlock()
 	if cancel == nil {
-		return nil
+		s.closeHistory()
+		return s.historyErr
 	}
 	cancel()
 	select {
 	case <-done:
-		return nil
+		return s.historyErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (s *Service) closeHistory() {
+	s.historyOnce.Do(func() {
+		if s.opts.History != nil {
+			s.historyErr = s.opts.History.Close()
+		}
+	})
 }
 
 func (s *Service) run(ctx context.Context) {
@@ -149,15 +164,15 @@ func (s *Service) run(ctx context.Context) {
 			sampler.Reset()
 			s.current.Store(nil)
 		}
-		if s.opts.History != nil && (s.lastRetention != settings.Retention || time.Since(s.lastPruned) >= time.Minute) {
-			s.prune(ctx, settings.Retention)
+		if s.opts.History != nil && (s.lastRetention != settings.Retention || time.Since(s.lastMaintained) >= time.Minute) {
+			s.maintainHistory(ctx, settings.Retention)
 		}
 		wait := time.Minute
 		if settings.Enabled {
 			wait = min(wait, max(time.Millisecond, time.Until(nextSample)))
 		}
-		if s.opts.History != nil && !s.lastPruned.IsZero() {
-			wait = min(wait, max(time.Millisecond, time.Until(s.lastPruned.Add(time.Minute))))
+		if s.opts.History != nil && !s.lastMaintained.IsZero() {
+			wait = min(wait, max(time.Millisecond, time.Until(s.lastMaintained.Add(time.Minute))))
 		}
 		timer.Reset(wait)
 	}
@@ -196,12 +211,7 @@ func (s *Service) collect(ctx context.Context, sampler *metrics.Sampler, setting
 		return
 	}
 	if s.opts.History != nil {
-		payload, encodeErr := json.Marshal(p.users.Snapshot)
-		if encodeErr != nil {
-			err = encodeErr
-		} else {
-			err = s.opts.History.Save(ctx, host.SampledAt, payload, time.Time{})
-		}
+		err = s.opts.History.Save(ctx, p.users.Snapshot)
 		p.users.HistoryStored = err == nil
 		if err != nil {
 			logging.Warn("monitoring: persist sample", "err", err)
@@ -241,12 +251,13 @@ func (s *Service) sampleUsers(at time.Time) []User {
 	return users
 }
 
-func (s *Service) prune(ctx context.Context, retention time.Duration) {
+func (s *Service) maintainHistory(ctx context.Context, retention time.Duration) {
 	ctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()
-	s.lastPruned, s.lastRetention = time.Now(), retention
-	if err := s.opts.History.Save(ctx, time.Time{}, nil, time.Now().Add(-retention)); err != nil {
-		logging.Warn("monitoring: expire history", "err", err)
+	s.lastMaintained = time.Now()
+	if err := s.opts.History.Configure(ctx, retention); err != nil {
+		logging.Warn("monitoring: configure history", "err", err)
 		return
 	}
+	s.lastRetention = retention
 }

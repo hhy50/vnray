@@ -52,7 +52,7 @@ const messages: Messages = {
     search: 'Search user or protocol', expand: 'Expand chart', chart: 'Metric trends', empty: 'No matching users', noHistory: 'Waiting for samples',
     stale: 'Refresh failed; displayed data may be stale', storageError: 'The latest sample was not stored. Check server logs.',
     interval: 'Sample interval', retention: 'History retention', cadence: 'Sampled every {n}s', retained: 'History retained for {n}h',
-    configHint: 'Example: 2s / 1h. Interval: 1s–1h. Retention: at least one interval, up to 168h and 10000 intervals. Changes apply automatically; expired history is removed.',
+    configHint: 'Example: 2s / 1h. Interval: 1s–1h. Retention: at least one interval, up to 168h. Changes apply automatically; expired history is removed.',
     definition: 'TCP counts authenticated inbound connections; Streams counts active logical streams (one for a regular proxy connection). Requests counts proxy target requests, including denials and failures, excluding heartbeats and HTTP requests inside tunnels. Totals start at process startup. Upload: user to exit; download: exit to user. Initial rates display —. Charts show up to 120 samples. Click legends to toggle lines.',
   },
   metrics: {

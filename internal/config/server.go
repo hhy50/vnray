@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// 默认管理台凭据：账号/审计/指标与转发绑定表共用 storage 指向的同一个库。
+// 默认管理台凭据。
 // 默认口令是弱口令，但管理台只监听 127.0.0.1；正式部署请在配置里设 admin.password。
 const (
 	DefaultAdminUsername = "admin"
@@ -112,6 +112,8 @@ func (h Heartbeat) Validate() error {
 type StorageConfig struct {
 	Driver string `yaml:"driver"`
 	DSN    string `yaml:"dsn"`
+	// MonitoringDir 是独立的监控历史目录，每个服务实例必须独占。
+	MonitoringDir string `yaml:"monitoring_dir,omitempty"`
 }
 
 // DefaultDriver 是绑定表存储的默认驱动名。
@@ -123,6 +125,14 @@ func (s StorageConfig) ResolvedDriver() string {
 		return DefaultDriver
 	}
 	return s.Driver
+}
+
+// ResolvedMonitoringDir 返回监控目录，空值使用 data/monitoring。
+func (s StorageConfig) ResolvedMonitoringDir() string {
+	if s.MonitoringDir == "" {
+		return "data/monitoring"
+	}
+	return s.MonitoringDir
 }
 
 // Validate 校验用户接入配置；未启用时不允许残留 bindings/storage，避免以为配了却不生效。

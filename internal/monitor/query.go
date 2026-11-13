@@ -28,7 +28,7 @@ func (s *Service) HostJSON() ([]byte, error) {
 	return p.hostJSON, nil
 }
 
-// UsersJSON 返回只读用户响应；历史按采样代次和窗口缓存，最新列表不访问数据库。
+// UsersJSON 返回只读用户响应；历史按采样代次和窗口缓存，最新列表不访问历史存储。
 func (s *Service) UsersJSON(ctx context.Context, query Query) ([]byte, error) {
 	p, err := s.latest()
 	if err != nil {
@@ -54,29 +54,44 @@ func (s *Service) UsersJSON(ctx context.Context, query Query) ([]byte, error) {
 	}
 	response := p.users
 	if s.opts.History != nil {
-		rows, err := s.opts.History.Read(ctx, time.Now().Add(-query.Window), p.users.SampledAt, query.Points)
+		since := time.Now().Add(-query.Window)
+		ids := make([]uint64, 0, len(p.users.Users))
+		for _, u := range p.users.Users {
+			ids = append(ids, u.ID)
+		}
+		rows, err := s.opts.History.Read(ctx, since, p.users.SampledAt, query.Points, ids)
 		if err != nil {
 			return nil, err
 		}
-		current := make(map[uint64]bool, len(p.users.Users))
+		current := make(map[uint64]User, len(p.users.Users))
 		for _, u := range p.users.Users {
-			current[u.ID] = true
+			current[u.ID] = u
 		}
 		response.History = make([]Snapshot, 0, len(rows))
-		for _, row := range rows {
-			var sample Snapshot
-			if err := json.Unmarshal(row, &sample); err != nil {
-				return nil, err
-			}
+		for _, sample := range rows {
 			filtered := sample.Users[:0]
 			for _, u := range sample.Users {
-				if current[u.ID] {
+				if latest, ok := current[u.ID]; ok {
+					u.Name, u.Protocol = latest.Name, latest.Protocol
 					filtered = append(filtered, u)
 				}
 			}
 			sample.Users = filtered
 			response.History = append(response.History, sample)
 		}
+		// 去重期间曲线仍延伸到最新采样，但不为此写历史存储。
+		history := response.History
+		if !p.users.SampledAt.Before(since) && (len(history) == 0 || !history[len(history)-1].SampledAt.Equal(p.users.SampledAt)) {
+			history = append(history, p.users.Snapshot)
+		}
+		if len(history) > query.Points {
+			selected := make([]Snapshot, query.Points)
+			for i := range selected {
+				selected[i] = history[i*(len(history)-1)/(len(selected)-1)]
+			}
+			history = selected
+		}
+		response.History = history
 	}
 	encoded, err := json.Marshal(response)
 	if err != nil {

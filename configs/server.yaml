@@ -12,6 +12,7 @@ admin:
 storage:
   driver: sqlite
   dsn: bindings.db
+  monitoring_dir: data/monitoring
 
 # diagnostics:
   # pprof_listen: 127.0.0.1:6060

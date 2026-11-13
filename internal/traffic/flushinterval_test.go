@@ -8,8 +8,7 @@ import (
 	"github.com/hhy50/vnray/internal/store"
 )
 
-// TestSetFlushIntervalHotReload 断言落库周期热改即时生效：默认周期是 10s，这里改成
-// 10ms 后必须在很短时间内看到增量落库，否则说明 reload 没起作用。
+// TestSetFlushIntervalHotReload 验证缩短落库周期后增量及时写入。
 func TestSetFlushIntervalHotReload(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

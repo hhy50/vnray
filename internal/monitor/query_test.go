@@ -15,8 +15,10 @@ type blockedHistory struct {
 	release chan struct{}
 }
 
-func (*blockedHistory) Save(context.Context, time.Time, []byte, time.Time) error { return nil }
-func (h *blockedHistory) Read(ctx context.Context, _, _ time.Time, _ int) ([][]byte, error) {
+func (*blockedHistory) Save(context.Context, Snapshot) error           { return nil }
+func (*blockedHistory) Configure(context.Context, time.Duration) error { return nil }
+func (*blockedHistory) Close() error                                   { return nil }
+func (h *blockedHistory) Read(ctx context.Context, _, _ time.Time, _ int, _ []uint64) ([]Snapshot, error) {
 	close(h.entered)
 	select {
 	case <-h.release:
@@ -46,7 +48,7 @@ func TestHistoryWaitCancellation(t *testing.T) {
 	}
 }
 
-func TestHistoryCacheExpiryAndDisabledLongIntervalCleanup(t *testing.T) {
+func TestHistoryCacheExpiryAndLongIntervalMaintenance(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		history := &memoryHistory{}
 		s := New(Options{History: history})
@@ -70,11 +72,11 @@ func TestHistoryCacheExpiryAndDisabledLongIntervalCleanup(t *testing.T) {
 		}
 		defer s.Drain(context.Background())
 		synctest.Wait()
-		prunes := history.prunes.Load()
+		maintenance := history.maintenance.Load()
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if history.prunes.Load() <= prunes {
-			t.Fatal("long sample interval delayed retention cleanup")
+		if history.maintenance.Load() <= maintenance {
+			t.Fatal("long sample interval delayed history maintenance")
 		}
 		settings.Enabled = false
 		s.Configure(settings)

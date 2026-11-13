@@ -182,7 +182,15 @@ func initServerApp(appctx context.Context, cfg *config.Server) (*serverApp, erro
 	if err := seedLimits(appctx, st, limits, meter); err != nil {
 		return nil, err
 	}
-	monitoring := newMonitoring(st, meter, settings)
+	monitoring, err := newMonitoring(st, meter, settings, cfg.Storage)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !assembled {
+			_ = monitoring.Drain(context.Background())
+		}
+	}()
 	bindings.Watch(func(access.UserChange) { monitoring.InvalidateUsers() })
 	svc := NewConnectorServiceWith(cfg, sessions, newUserRegistry(bindings), limits,
 		tcp.WithSessionConfig(sessionConfigFromSettings(settings.Session)))
