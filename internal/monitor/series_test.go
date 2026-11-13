@@ -17,7 +17,7 @@ func TestHistoryNativeSeriesAndInvalidMetrics(t *testing.T) {
 	if err := h.Save(ctx, sample); err != nil {
 		t.Fatal(err)
 	}
-	at := sample.SampledAt.UnixNano()
+	at := sample.SampledAt.UnixMilli()
 	for _, tc := range []struct {
 		metric string
 		want   float64

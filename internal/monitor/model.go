@@ -62,7 +62,7 @@ type Host struct {
 	PipeAllocatedBytes uint64                 `json:"pipe_allocated_bytes"`
 }
 
-// Snapshot 是持久化和历史查询共用的采样值。
+// Snapshot 是持久化和历史查询共用的采样值；历史时间戳按 100ms 对齐。
 type Snapshot struct {
 	SampledAt time.Time           `json:"sampled_at"`
 	Users     []User              `json:"users"`

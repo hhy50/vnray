@@ -22,7 +22,7 @@ func testPointer[T any](v T) *T { return &v }
 
 func testSnapshot() Snapshot {
 	return Snapshot{
-		SampledAt: time.Now().UTC(),
+		SampledAt: time.Now().UTC().Truncate(historyTimestampResolution),
 		Server: metrics.ServerInfo{
 			CPUPercent: testPointer(12.5), MemoryTotal: testPointer(uint64(math.MaxUint64)), MemoryUsed: testPointer(uint64(2 << 30)),
 			ReceiveBytesPerSecond: testPointer(12345.6789), TransmitBytesPerSecond: testPointer(0.0), Interfaces: 2,
@@ -240,7 +240,7 @@ func TestHistoryDiskPersistenceAndAbruptExit(t *testing.T) {
 	for _, mode := range []string{"close", "crash", "partitions"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
-			at := strconv.FormatInt(time.Now().UnixNano(), 10)
+			at := strconv.FormatInt(time.Now().Truncate(historyTimestampResolution).UnixNano(), 10)
 			readAction := "read"
 			if mode == "partitions" {
 				readAction = "partition-read"
@@ -285,9 +285,9 @@ func TestHistoryDiskHelper(t *testing.T) {
 		offsets[i] = time.Duration(i) * 2 * time.Second
 	}
 	if action == "partitions" || action == "partition-read" {
-		offsets = []time.Duration{0, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30*time.Minute + 1, 30*time.Minute + 2, 40 * time.Minute}
+		offsets = []time.Duration{0, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30*time.Minute + historyTimestampResolution, 30*time.Minute + 2*historyTimestampResolution, 40 * time.Minute}
 	}
-	if action != "read" && action != "partition-read" {
+	if action != "read" && action != "partition-read" && action != "crash-read" {
 		for i, offset := range offsets {
 			sample.SampledAt = time.Unix(0, at).Add(offset).UTC()
 			sample.Process.GCCount = uint64(i)
@@ -346,7 +346,7 @@ func TestHistoryDiskHelper(t *testing.T) {
 					continue
 				}
 				partitions++
-				if meta.Max-meta.Min > int64(historyPartitionDuration)+1 {
+				if meta.Max-meta.Min > historyPartitionDuration.Milliseconds()+historyTimestampResolution.Milliseconds() {
 					t.Fatal("partition exceeds boundary")
 				}
 			}
@@ -369,7 +369,7 @@ func TestHistoryDiskHelper(t *testing.T) {
 
 func TestHistoryRetentionAndUserMembership(t *testing.T) {
 	h, db := newTestHistory(t)
-	first := time.Now().UTC().Add(-time.Hour)
+	first := time.Now().UTC().Truncate(historyTimestampResolution).Add(-time.Hour)
 	now := first.Add(time.Hour)
 	h.now = func() time.Time { return now }
 	sample := testSnapshot()
@@ -402,11 +402,11 @@ func TestHistoryRetentionAndUserMembership(t *testing.T) {
 	}
 }
 
-func TestHistoryNanosecondBoundsAndTimestampCollision(t *testing.T) {
+func TestHistoryTimestampResolutionBoundsAndCollision(t *testing.T) {
 	h, _ := newTestHistory(t)
 	sample := testSnapshot()
-	sample.SampledAt = time.Now().UTC().Truncate(time.Millisecond).Add(123456 * time.Nanosecond)
-	at := sample.SampledAt
+	sample.SampledAt = time.Now().UTC().Truncate(historyTimestampResolution).Add(123456 * time.Nanosecond)
+	at := sample.SampledAt.Truncate(historyTimestampResolution)
 	ctx := context.Background()
 	if err := h.Save(ctx, sample); err != nil {
 		t.Fatal(err)
@@ -417,8 +417,12 @@ func TestHistoryNanosecondBoundsAndTimestampCollision(t *testing.T) {
 			t.Fatalf("nanosecond boundary: %v %v", rows, err)
 		}
 	}
-	sample.SampledAt = at.Add(time.Nanosecond)
+	sample.SampledAt = at.Add(historyTimestampResolution - time.Nanosecond)
 	sample.Process.GCCount++
+	if err := h.Save(ctx, sample); err == nil {
+		t.Fatal("accepted same-resolution collision")
+	}
+	sample.SampledAt = at.Add(historyTimestampResolution)
 	if err := h.Save(ctx, sample); err != nil {
 		t.Fatal(err)
 	}
@@ -429,6 +433,6 @@ func TestHistoryNanosecondBoundsAndTimestampCollision(t *testing.T) {
 	sample.Process.GCCount--
 	rows, err := h.Read(ctx, at, sample.SampledAt, 120, nil)
 	if err != nil || len(rows) != 2 || !rows[0].SampledAt.Equal(at) || !rows[1].SampledAt.Equal(sample.SampledAt) {
-		t.Fatalf("nanosecond round trip: %v %v", rows, err)
+		t.Fatalf("100ms round trip: %v %v", rows, err)
 	}
 }

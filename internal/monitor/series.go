@@ -134,9 +134,10 @@ func userLabels(id uint64) []tstorage.Label {
 
 func snapshotRows(s Snapshot) ([]tstorage.Row, error) {
 	rows := make([]tstorage.Row, 0, 27+10*len(s.Users))
+	at := s.SampledAt.Truncate(historyTimestampResolution).UnixMilli()
 	writer := func(prefix string, labels []tstorage.Label) *seriesCodec {
 		return &seriesCodec{value: func(name string, value float64) (float64, error) {
-			rows = append(rows, tstorage.Row{Metric: prefix + name, Labels: labels, DataPoint: tstorage.DataPoint{Timestamp: s.SampledAt.UnixNano(), Value: value}})
+			rows = append(rows, tstorage.Row{Metric: prefix + name, Labels: labels, DataPoint: tstorage.DataPoint{Timestamp: at, Value: value}})
 			return value, nil
 		}}
 	}
@@ -157,7 +158,7 @@ func snapshotRows(s Snapshot) ([]tstorage.Row, error) {
 			return nil, c.err
 		}
 	}
-	rows = append(rows, tstorage.Row{Metric: sampleMetric, DataPoint: tstorage.DataPoint{Timestamp: s.SampledAt.UnixNano(), Value: 1}})
+	rows = append(rows, tstorage.Row{Metric: sampleMetric, DataPoint: tstorage.DataPoint{Timestamp: at, Value: 1}})
 	return rows, nil
 }
 
@@ -221,7 +222,7 @@ func (h *History) readSnapshots(ctx context.Context, times []int64, ids []uint64
 	}
 	result := make([]Snapshot, 0, len(times))
 	for _, at := range times {
-		s := Snapshot{SampledAt: time.Unix(0, at).UTC(), Users: []User{}}
+		s := Snapshot{SampledAt: time.UnixMilli(at).UTC(), Users: []User{}}
 		c := reader(at, hostPrefix, nil)
 		c.host(&s)
 		if c.err != nil {

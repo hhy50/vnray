@@ -13,8 +13,10 @@ import (
 	"github.com/hhy50/vnray/internal/logging"
 )
 
-// 分区 10 分钟落盘一次；WAL 已关闭，进程崩溃会丢失未刷盘的尾部（最多两个分区）。
+// WAL 已关闭，崩溃会丢失尚未刷盘的内存尾部；分区由后续写入推动轮转。
 const historyPartitionDuration = 10 * time.Minute
+
+const historyTimestampResolution = 100 * time.Millisecond
 
 // History 管理独立的 tstorage 指标目录及串行读写生命周期。
 type History struct {
@@ -54,7 +56,7 @@ func openHistory(dir string, retention time.Duration) (tstorage.Storage, error) 
 		tstorage.WithDataPath(dir),
 		tstorage.WithPartitionDuration(historyPartitionDuration),
 		tstorage.WithRetention(retention),
-		tstorage.WithTimestampPrecision(tstorage.Nanoseconds),
+		tstorage.WithTimestampPrecision(tstorage.Milliseconds),
 		tstorage.WithWALBufferedSize(-1),
 		tstorage.WithWriteTimeout(storageTimeout),
 		tstorage.WithLogger(historyLogger{}),
@@ -109,9 +111,9 @@ func (h *History) Save(ctx context.Context, sample Snapshot) error {
 	if sameRows(rows, h.last) {
 		return nil
 	}
-	at := sample.SampledAt.UnixNano()
+	at := sample.SampledAt.Truncate(historyTimestampResolution).UnixMilli()
 	if at <= h.lastAt || at == math.MaxInt64 {
-		return errors.New("monitoring: sample timestamp must be positive and increase")
+		return errors.New("monitoring: sample timestamp must be positive and increase at 100ms resolution")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -135,7 +137,7 @@ func (h *History) Read(ctx context.Context, since, until time.Time, limit int, i
 	if err := h.available(); err != nil {
 		return nil, err
 	}
-	start, end := max(since.UnixNano(), h.now().Add(-h.retention).UnixNano()), until.UnixNano()
+	start, end := max(ceilMillisecond(since), ceilMillisecond(h.now().Add(-h.retention))), until.UnixMilli()
 	if start > end || start == math.MaxInt64 {
 		return []Snapshot{}, nil
 	}
@@ -165,7 +167,7 @@ func (h *History) Read(ctx context.Context, since, until time.Time, limit int, i
 	result := make([]Snapshot, 0, len(times))
 	for len(times) > 0 {
 		n := 1
-		for n < len(times) && times[n]-times[0] < int64(historyPartitionDuration) {
+		for n < len(times) && times[n]-times[0] < historyPartitionDuration.Milliseconds() {
 			n++
 		}
 		group, err := h.readSnapshots(ctx, times[:n], ids)
@@ -193,7 +195,20 @@ func (h *History) selectPoints(ctx context.Context, metric string, labels []tsto
 	if err != nil {
 		return nil, fmt.Errorf("monitoring: read %s: %w", metric, err)
 	}
+	// 上游内存分区在 end 等于末点时可能返回末点。
+	for len(points) > 0 && points[len(points)-1].Timestamp >= end {
+		points = points[:len(points)-1]
+	}
 	return points, nil
+}
+
+// 下限向上取整，避免查询窗口或保留期边界带入已经过期的样本。
+func ceilMillisecond(at time.Time) int64 {
+	value := at.UnixMilli()
+	if at.Nanosecond()%int(time.Millisecond) != 0 {
+		value++
+	}
+	return value
 }
 
 // Configure 更新查询保留期，变化时关闭并重开引擎以应用磁盘保留策略。

@@ -81,8 +81,12 @@ func (s *Service) UsersJSON(ctx context.Context, query Query) ([]byte, error) {
 		}
 		// 去重期间曲线仍延伸到最新采样，但不为此写历史存储。
 		history := response.History
-		if !p.users.SampledAt.Before(since) && (len(history) == 0 || !history[len(history)-1].SampledAt.Equal(p.users.SampledAt)) {
-			history = append(history, p.users.Snapshot)
+		if !p.users.SampledAt.Before(since) {
+			if len(history) > 0 && history[len(history)-1].SampledAt.Truncate(historyTimestampResolution).Equal(p.users.SampledAt.Truncate(historyTimestampResolution)) {
+				history[len(history)-1] = p.users.Snapshot
+			} else {
+				history = append(history, p.users.Snapshot)
+			}
 		}
 		if len(history) > query.Points {
 			selected := make([]Snapshot, query.Points)

@@ -138,12 +138,12 @@ func TestHistorySevenDayCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	markers, err := reader.selectPoints(context.Background(), sampleMetric, nil, first.UnixNano(), last.UnixNano()+1)
+	markers, err := reader.selectPoints(context.Background(), sampleMetric, nil, first.UnixMilli(), last.UnixMilli()+1)
 	if err != nil || len(markers) != samples {
 		t.Fatalf("markers: %d, want %d: %v", len(markers), samples, err)
 	}
 	for i, marker := range markers {
-		if marker.Timestamp != first.Add(time.Duration(i)*2*time.Second).UnixNano() || marker.Value != 1 {
+		if marker.Timestamp != first.Add(time.Duration(i)*2*time.Second).UnixMilli() || marker.Value != 1 {
 			t.Fatalf("marker %d mismatch", i)
 		}
 	}
