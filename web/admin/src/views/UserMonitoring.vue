@@ -9,6 +9,7 @@ import { useI18n } from '../i18n'
 const { t } = useI18n()
 const UserMetricChart = defineAsyncComponent(() => import('../components/UserMetricChart.vue'))
 const data = ref<Monitoring | null>(null)
+const dataWindow = ref('')
 const mode = ref('list')
 const window = ref('1h')
 const nameFilter = ref('')
@@ -46,10 +47,13 @@ const selectedMetrics = ref(['tcp', 'requests', 'up_rate', 'down_rate'])
 const periods = ['1m', '3m', '5m', '10m', '1h', 'custom']
 const period = ref('5m')
 const customMinutes = ref(15)
-const historyWindows = ['5m', '15m', '1h', '6h', '24h', '168h']
 const windowMinutes = (w: string) => w.endsWith('h') ? parseInt(w) * 60 : parseInt(w)
 const periodMinutes = computed(() => period.value === 'custom' ? Math.max(1, customMinutes.value) : windowMinutes(period.value))
+// 对话框按所选周期独立拉取历史，120 个点均摊到周期上，保证细粒度曲线。
+const dialogWindow = computed(() => period.value === 'custom' ? `${periodMinutes.value}m` : period.value)
 const dialogHistory = computed(() => {
+  // 当前数据与所选周期窗口不符（刚打开/刚切换）时不渲染旧数据，等待匹配的拉取到达。
+  if (dataWindow.value !== dialogWindow.value) return []
   const cutoff = Date.now() - periodMinutes.value * 60_000
   return (data.value?.history ?? []).filter(s => new Date(s.sampled_at).getTime() >= cutoff)
 })
@@ -70,9 +74,10 @@ async function load() {
   controller = new AbortController()
   const timeout = setTimeout(() => controller?.abort(), 15000)
   try {
-    const next = await api.monitoring(window.value, controller.signal, mode.value === 'grid' || expanded.value != null)
+    const next = await api.monitoring(expanded.value != null ? dialogWindow.value : window.value, controller.signal, mode.value === 'grid' || expanded.value != null)
     if (disposed) return
     data.value = next
+    dataWindow.value = expanded.value != null ? dialogWindow.value : window.value
     disabled.value = warming.value = false
     error.value = ''
     page.value = Math.min(page.value, Math.max(1, Math.ceil(users.value.length / 12)))
@@ -101,10 +106,7 @@ watch([nameFilter, protocolFilter], () => { page.value = 1 })
 watch(window, () => { void load() })
 watch([mode, expanded], () => { void load() })
 watch(autoRefresh, schedule)
-watch([period, customMinutes], () => {
-  const covering = historyWindows.find(w => windowMinutes(w) >= periodMinutes.value)
-  if (covering && windowMinutes(window.value) < periodMinutes.value) window.value = covering
-})
+watch([period, customMinutes], () => { if (expanded.value != null) void load() })
 onMounted(() => { void load(); document.addEventListener('visibilitychange', onVisible) })
 onUnmounted(() => { disposed = true; clearTimeout(timer); controller?.abort(); document.removeEventListener('visibilitychange', onVisible) })
 </script>

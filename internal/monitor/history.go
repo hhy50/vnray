@@ -158,11 +158,7 @@ func (h *History) Read(ctx context.Context, since, until time.Time, limit int, i
 	slices.Sort(times)
 	times = slices.Compact(times)
 	if len(times) > limit {
-		selected := make([]int64, limit)
-		for i := range selected {
-			selected[i] = times[i*(len(times)-1)/(limit-1)]
-		}
-		times = selected
+		times = selectEvenly(times, limit)
 	}
 	result := make([]Snapshot, 0, len(times))
 	for len(times) > 0 {
@@ -178,6 +174,33 @@ func (h *History) Read(ctx context.Context, since, until time.Time, limit int, i
 		times = times[n:]
 	}
 	return result, nil
+}
+
+// selectEvenly 按时间均匀取网格点就近选取；去重跳写留下的空窗会让多个网格命中
+// 同一点，去重后输出可能少于 limit，但时间分布均匀且保持有序不重复。
+func selectEvenly(times []int64, limit int) []int64 {
+	start := times[0]
+	step := (times[len(times)-1] - start) / int64(limit-1)
+	selected := make([]int64, 0, limit)
+	j, last := 0, -1
+	for i := range limit {
+		target := start + int64(i)*step
+		for j+1 < len(times) && times[j+1] <= target {
+			j++
+		}
+		nearest := j
+		if j+1 < len(times) && times[j+1]-target < target-times[j] {
+			nearest = j + 1
+		}
+		if nearest < last {
+			nearest = last
+		}
+		if nearest != last {
+			selected = append(selected, times[nearest])
+			last = nearest
+		}
+	}
+	return selected
 }
 
 func (h *History) selectPoints(ctx context.Context, metric string, labels []tstorage.Label, start, end int64) ([]*tstorage.DataPoint, error) {
