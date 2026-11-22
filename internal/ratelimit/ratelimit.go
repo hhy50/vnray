@@ -10,56 +10,71 @@ import (
 	"github.com/hhy50/vnray/internal/concurrency"
 	"github.com/hhy50/vnray/internal/stats"
 )
-
+ 
 // Identity 返回隔离不同协议用户的运行态身份键。协议只作为命名空间参与拼接，
 // 这里按底层类型约束而非具体类型取参，避免限速器反向依赖 store 的领域类型。
 func Identity[P ~string](protocol P, key string) string { return string(protocol) + ":" + key }
 
-// Bucket 是容量为一秒速率、支持取消和动态调速的共享令牌桶。
+// window 是补额窗口：每窗口发放 rate×window 的额度，容量同样如此。
+// 窗口越细，单个请求一次能拿走的额度越小，代价是等待者唤醒更频繁。
+const window = 100 * time.Millisecond
+
+// quota 返回某速率下单个窗口的额度（字节）。
+func quota(rate float64) float64 { return rate * window.Seconds() }
+
+// Bucket 是容量为单窗口额度的窗口式令牌桶，支持取消和动态调速。
 type Bucket struct {
-	rate    atomic.Int64
-	mu      sync.Mutex
-	tokens  float64
-	last    time.Time
-	changed chan struct{}
+	rate   atomic.Int64
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
 }
 
 // NewBucket 创建令牌桶；非正速率表示不限速。
 func NewBucket(bytesPerSec int64) *Bucket {
 	b := &Bucket{last: time.Now()}
 	b.rate.Store(max(bytesPerSec, 0))
-	b.tokens = float64(b.rate.Load())
+	b.tokens = quota(float64(b.rate.Load()))
 	return b
 }
 
-// refill 必须持锁调用，调速前以旧速率结算已有令牌。
+// refill 必须持锁调用，攒满一个窗口才补满额度，并把窗口起点钉回原网格，
+// 否则每次访问的唤醒延迟会累积成漂移。
 func (b *Bucket) refill(now time.Time) {
-	rate := float64(b.rate.Load())
-	b.tokens = math.Min(rate, b.tokens+now.Sub(b.last).Seconds()*rate)
-	b.last = now
+	elapsed := now.Sub(b.last)
+	if elapsed < window {
+		return
+	}
+	b.tokens = quota(float64(b.rate.Load()))
+	b.last = now.Add(-(elapsed % window))
 }
 
-// SetRate 更新速率并唤醒已有等待者，不重建共享桶。
+// SetRate 更新速率，不重建共享桶；阻塞中的等待者在下一个窗口边界按新速率重算。
+// 从"不限速"开启限速时立即给满一个窗口，否则首字节要白等一整个窗口。
 func (b *Bucket) SetRate(bytesPerSec int64) {
 	bytesPerSec = max(bytesPerSec, 0)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.rate.Load() == bytesPerSec {
+	old := b.rate.Load()
+	if old == bytesPerSec {
 		return
 	}
-	b.refill(time.Now())
-	b.tokens = math.Min(b.tokens, float64(bytesPerSec))
+	now := time.Now()
+	b.refill(now)
+	b.tokens = math.Min(b.tokens, quota(float64(bytesPerSec)))
 	b.rate.Store(bytesPerSec)
-	if b.changed != nil {
-		close(b.changed)
-		b.changed = nil
+	if old == 0 && bytesPerSec > 0 {
+		b.tokens = quota(float64(bytesPerSec))
+		b.last = now
 	}
 }
 
 // Rate 返回字节/秒速率；0 表示不限速。
 func (b *Bucket) Rate() int64 { return b.rate.Load() }
 
-// Wait 按实际补充的令牌放行字节，取消或调速均可打断等待。
+// Wait 按实际补充的令牌放行字节，取消可打断等待。
+// 令牌够不上本轮所需时先扣走已有的那部分再等差额：已攒到的额度归本次调用，
+// 不会被同一身份的其它隧道抢走。取消时把已扣未交付的额度退回。
 func (b *Bucket) Wait(ctx context.Context, n int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -68,12 +83,22 @@ func (b *Bucket) Wait(ctx context.Context, n int) error {
 		return nil
 	}
 	var timer *time.Timer
+	remaining := float64(n)
+	permitted := false
 	defer func() {
 		if timer != nil {
 			timer.Stop()
 		}
+		if permitted {
+			return
+		}
+		if used := float64(n) - remaining; used > 0 {
+			b.mu.Lock()
+			b.refill(time.Now())
+			b.tokens = math.Min(quota(float64(b.rate.Load())), b.tokens+used)
+			b.mu.Unlock()
+		}
 	}()
-	remaining := float64(n)
 	for remaining > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -82,21 +107,21 @@ func (b *Bucket) Wait(ctx context.Context, n int) error {
 		rate := float64(b.rate.Load())
 		if rate == 0 {
 			b.mu.Unlock()
+			permitted = true
 			return nil
 		}
-		b.refill(time.Now())
-		take := math.Min(remaining, rate)
-		if b.tokens >= take {
-			b.tokens -= take
-			remaining -= take
+		now := time.Now()
+		b.refill(now)
+		take := math.Min(remaining, quota(rate))
+		got := math.Min(b.tokens, take)
+		b.tokens -= got
+		remaining -= got
+		if got == take {
 			b.mu.Unlock()
 			continue
 		}
-		delay := max(time.Nanosecond, time.Duration((take-b.tokens)/rate*float64(time.Second)))
-		if b.changed == nil {
-			b.changed = make(chan struct{})
-		}
-		changed := b.changed
+		// 额度只在窗口边界补齐，睡到窗口起点加一个 window 即可。
+		delay := b.last.Add(window).Sub(now)
 		b.mu.Unlock()
 		if timer == nil {
 			timer = time.NewTimer(delay)
@@ -106,11 +131,10 @@ func (b *Bucket) Wait(ctx context.Context, n int) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-changed:
-			timer.Stop()
 		case <-timer.C:
 		}
 	}
+	permitted = true
 	return nil
 }
 
