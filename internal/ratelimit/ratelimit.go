@@ -10,7 +10,7 @@ import (
 	"github.com/hhy50/vnray/internal/concurrency"
 	"github.com/hhy50/vnray/internal/stats"
 )
- 
+
 // Identity 返回隔离不同协议用户的运行态身份键。协议只作为命名空间参与拼接，
 // 这里按底层类型约束而非具体类型取参，避免限速器反向依赖 store 的领域类型。
 func Identity[P ~string](protocol P, key string) string { return string(protocol) + ":" + key }
